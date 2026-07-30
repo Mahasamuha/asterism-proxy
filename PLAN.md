@@ -586,8 +586,17 @@ document resolves once and the second resolution makes no outbound request.
 
 ---
 
-### T10 — DCR fallback
+### T10 — DCR fallback — **DEFERRED**
+
 `feat: port dynamic client registration behind a flag`
+
+**Deferred 2026-07-30.** `ENABLE_DCR` already defaults to false (T2), so this task changes
+nothing reachable until it's both built and explicitly turned on — deferring it blocks nothing
+downstream. T9's `resolveClient()` already returns `null` for a non-CIMD, non-cached client,
+which is exactly what a DCR-only client gets whether or not this task exists. MCP's own spec
+(2025-11-25, SEP-991) recommends CIMD as the client registration mechanism, and T9 is already
+built, so the near-term need for this fallback is lower than originally assumed. Revisit when a
+real client that only speaks DCR needs to connect.
 
 Lift Constellation's `/oauth/register` including its pruning job. Gate on `ENABLE_DCR`,
 **default false**; return 404 when disabled. Registered clients get `source: dcr`,
