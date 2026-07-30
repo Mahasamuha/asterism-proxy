@@ -590,13 +590,19 @@ document resolves once and the second resolution makes no outbound request.
 
 `feat: port dynamic client registration behind a flag`
 
-**Deferred 2026-07-30.** `ENABLE_DCR` already defaults to false (T2), so this task changes
-nothing reachable until it's both built and explicitly turned on — deferring it blocks nothing
-downstream. T9's `resolveClient()` already returns `null` for a non-CIMD, non-cached client,
-which is exactly what a DCR-only client gets whether or not this task exists. MCP's own spec
-(2025-11-25, SEP-991) recommends CIMD as the client registration mechanism, and T9 is already
-built, so the near-term need for this fallback is lower than originally assumed. Revisit when a
-real client that only speaks DCR needs to connect.
+**Deferred 2026-07-30, confirmed 2026-07-30.** `ENABLE_DCR` already defaults to false (T2), so
+this task changes nothing reachable until it's both built and explicitly turned on — deferring it
+blocks nothing downstream. T9's `resolveClient()` already returns `null` for a non-CIMD,
+non-cached client, which is exactly what a DCR-only client gets whether or not this task exists.
+
+The current MCP spec ([2026-07-28](https://modelcontextprotocol.io/specification/2026-07-28/basic/authorization/index#overview))
+states this plainly: "Authorization servers and MCP clients **MAY** support the OAuth 2.0 Dynamic
+Client Registration Protocol (RFC7591). Note that Dynamic Client Registration is deprecated and
+retained for backwards compatibility with authorization servers that do not support Client ID
+Metadata Documents." That carve-out is specifically for authorization servers that lack CIMD —
+this proxy has it (T9) — so the only remaining reason to build T10 is a client that itself hasn't
+adopted CIMD yet, not anything on this server's side. Revisit when a real client that only speaks
+DCR needs to connect.
 
 Lift Constellation's `/oauth/register` including its pruning job. Gate on `ENABLE_DCR`,
 **default false**; return 404 when disabled. Registered clients get `source: dcr`,
