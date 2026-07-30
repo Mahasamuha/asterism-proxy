@@ -1,7 +1,8 @@
 import pino from "pino";
+import { config } from "./config.js";
 
 export const logger = pino({
-  level: process.env["LOG_LEVEL"] ?? "warn",
+  level: config.logLevel,
   redact: {
     paths: ["token", "auth", "password", "secret", "*.token", "*.auth", "*.password", "*.secret", "err.path"],
     censor: "[REDACTED]",

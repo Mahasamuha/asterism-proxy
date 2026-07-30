@@ -1,0 +1,5 @@
+# Resource server registry (§2/T2). Static config, not the database — each MCP
+# server this proxy issues tokens for must be listed here with its scope
+# vocabulary. See PLAN.md §2 for the example shape and M1 for onboarding
+# Constellation.
+resourceServers: []

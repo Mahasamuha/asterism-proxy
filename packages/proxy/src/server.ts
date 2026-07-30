@@ -2,6 +2,10 @@ import express, { Express, NextFunction, Request, Response } from "express";
 import { createServer } from "node:http";
 import { randomUUID } from "node:crypto";
 import { createLogger } from "./logger.js";
+import { config } from "./config.js";
+// Imported for its startup-time validation side effect: an invalid or missing
+// resource server registry should fail the process the same way bad env does.
+import "./resource-registry.js";
 
 const log = createLogger("server");
 
@@ -27,11 +31,10 @@ app.get("/health", (_req: Request, res: Response) => {
 });
 
 if (import.meta.url === `file://${process.argv[1]}`) {
-  const port = Number(process.env["PORT"] ?? 3000);
   const server = createServer(app);
 
-  server.listen(port, () => {
-    log.info({ port }, "Proxy listening");
+  server.listen(config.port, () => {
+    log.info({ port: config.port }, "Proxy listening");
   });
 
   async function shutdown(): Promise<void> {
