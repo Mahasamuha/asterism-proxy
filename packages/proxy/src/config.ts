@@ -24,6 +24,7 @@ const envSchema = z
     ALLOW_INSECURE_CLIENT_METADATA: boolFromEnv(false),
 
     RESOURCE_SERVERS_PATH: z.string().optional(),
+    TRUST_POLICY_PATH: z.string().optional(),
   })
   .superRefine((env, ctx) => {
     // Requirement 8 (§1): at least one identity provider must be usable, or the
@@ -75,4 +76,5 @@ export const config = {
   allowInsecureClientMetadata: env.ALLOW_INSECURE_CLIENT_METADATA,
 
   resourceServersPath: env.RESOURCE_SERVERS_PATH ?? path.join(process.cwd(), "config/resource-servers.yaml"),
+  trustPolicyPath: env.TRUST_POLICY_PATH ?? path.join(process.cwd(), "config/trust-policy.yaml"),
 };

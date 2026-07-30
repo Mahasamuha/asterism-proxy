@@ -2,7 +2,7 @@ import type { IncomingHttpHeaders } from "node:http";
 import { prisma } from "../db.js";
 import { createLogger } from "../logger.js";
 import { safeFetchJson } from "./safe-fetch.js";
-import { assignTrustLevel } from "./trust-policy.js";
+import { assignTrustLevel, isDenylisted } from "./trust-policy.js";
 import type { OauthClient, Prisma } from "../generated/prisma/client.js";
 
 const log = createLogger("cimd");
@@ -117,7 +117,12 @@ export function computeExpiresAt(headers: IncomingHttpHeaders): Date {
 
 /**
  * Resolves a client_id to its metadata, per T9:
+ *   0. A denylisted client_id (T11) is rejected outright — checked first so
+ *      it overrides even an already-cached row from before it was denylisted.
  *   1. An unexpired cached OauthClient row short-circuits everything below.
+ *      Its trust level is still re-assigned on every cache hit (cheap — the
+ *      lastSeenAt bump already writes the row) so an allowlist change takes
+ *      effect immediately rather than waiting for the cache to expire.
  *   2. Non-URL / non-https client ids are DCR-only — no CIMD fetch is
  *      attempted, and step 1 already covers a client that's actually
  *      registered (T10's /oauth/register is what creates that row).
@@ -129,9 +134,17 @@ export function computeExpiresAt(headers: IncomingHttpHeaders): Date {
  * rather than redirecting, since the client isn't trusted yet.
  */
 export async function resolveClient(clientId: string): Promise<OauthClient | null> {
+  if (isDenylisted(clientId)) {
+    log.warn({ clientId }, "Client rejected: denylisted");
+    return null;
+  }
+
   const cached = await prisma.oauthClient.findUnique({ where: { clientId } });
   if (cached && (cached.expiresAt === null || cached.expiresAt > new Date())) {
-    return prisma.oauthClient.update({ where: { clientId }, data: { lastSeenAt: new Date() } });
+    return prisma.oauthClient.update({
+      where: { clientId },
+      data: { lastSeenAt: new Date(), trustLevel: assignTrustLevel(clientId, cached.source) },
+    });
   }
 
   let url: URL;
@@ -163,7 +176,7 @@ export async function resolveClient(clientId: string): Promise<OauthClient | nul
     return null;
   }
 
-  const trustLevel = assignTrustLevel("cimd");
+  const trustLevel = assignTrustLevel(clientId, "cimd");
   const expiresAt = computeExpiresAt(headers);
 
   const record = await prisma.oauthClient.upsert({

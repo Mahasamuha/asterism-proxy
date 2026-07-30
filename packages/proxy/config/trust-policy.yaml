@@ -1,0 +1,13 @@
+# Client trust policy (§2/T11). Optional — if this file doesn't exist, every
+# resolved client falls through to the domain_verified (CIMD) / unverified
+# (DCR) defaults described in PLAN.md §T11.
+#
+# Order: exact id allowlist -> domain allowlist -> domain_verified (CIMD) ->
+# unverified (DCR). A denylist match rejects resolution outright, regardless
+# of source, overriding even an already-cached client.
+allowlist:
+  clientIds: []
+  domains: []
+denylist:
+  clientIds: []
+  domains: []
