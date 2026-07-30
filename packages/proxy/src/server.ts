@@ -8,10 +8,17 @@ import { config } from "./config.js";
 import "./resource-registry.js";
 import { jwksRouter } from "./crypto/jwks-router.js";
 import { ensureActiveSigningKey } from "./crypto/signing-keys.js";
+import { discoveryRouter } from "./oauth/discovery.js";
+import { authorizeRouter } from "./oauth/authorize.js";
+import { tokenRouter } from "./oauth/token.js";
+import { deviceRouter } from "./oauth/device.js";
 
 const log = createLogger("server");
 
 export const app: Express = express();
+
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
 app.use((req: Request, res: Response, next: NextFunction) => {
   const raw = req.headers["x-request-id"] as string | undefined;
@@ -33,6 +40,10 @@ app.get("/health", (_req: Request, res: Response) => {
 });
 
 app.use(jwksRouter);
+app.use(discoveryRouter);
+app.use(authorizeRouter);
+app.use(tokenRouter);
+app.use(deviceRouter);
 
 if (import.meta.url === `file://${process.argv[1]}`) {
   const server = createServer(app);
