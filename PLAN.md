@@ -802,8 +802,16 @@ detections, local login failures. Periodic cleanup of expired `AuthorizationRequ
 
 ## 9. Constellation migration
 
+Scoped for the actual deployment, not a generic one: a handful of self-controlled nodes/hubs
+(currently three), not an unknown population of live client sessions the operator can't
+coordinate with directly. The dual-validation-and-drain choreography a public-facing migration
+would need is solving a problem this deployment doesn't have — every connected node/hub can
+simply be re-authenticated by hand immediately after cutover. If that stops being true (this
+proxy starts serving clients you don't personally control), revisit M3 below and reintroduce a
+dual-validation-plus-drain step ahead of it, the way the original version of this section had it.
+
 Do not start until T1–T20 are done and the proxy has been exercised end to end with a throwaway
-client. Every step is independently revertible.
+client.
 
 ### M1 — Register Constellation as a resource server
 `chore: register constellation with auth proxy`
@@ -818,54 +826,35 @@ by minting a token for that audience and inspecting it.
 A one-shot script copying `users`, `local_users`, and `login_failures` from Constellation's
 database into the proxy's, **preserving primary keys**.
 
-Preserving `User.id` is what makes the rest of this cheap: the proxy's `sub` claim then equals
-the id Constellation already uses, so Constellation needs no subject-mapping table and no
-foreign-key rewrites. Verify row counts and spot-check that an OIDC user's
-`(oidcSub, oidcIssuer)` pair round-trips to the same id through a proxy login.
+This isn't for session continuity — every node/hub re-authenticates at cutover regardless (M3).
+It's so Constellation's *other* tables that foreign-key off `User.id` (executors, path shares,
+activity log) keep pointing at the same user afterward, instead of needing to be reconfigured
+from scratch. Verify row counts and spot-check that an OIDC user's `(oidcSub, oidcIssuer)` pair
+round-trips to the same id through a proxy login.
 
-Copy, do not move. Constellation's rows stay until M6.
+Copy, do not move. Constellation's rows stay until M3 deletes them.
 
-### M3 — Add dual validation
-`feat: accept auth proxy tokens alongside legacy sessions`
+### M3 — Cutover
+`feat: point constellation at the auth proxy and remove the legacy AS`
 
-Add `rs-auth` to Constellation. Token validation attempts the existing `OauthSession` lookup,
-then falls back to `rs-auth`, accepting either. **Instrument both branches with counters** — the
-legacy counter is the drain signal for M5.
-
-Map the `admin` scope onto whatever `adminUntil` currently gates, so both paths grant the same
-privileges.
-
-This is the only Constellation change carrying real risk, and it is purely additive.
-
-### M4 — Move discovery
-`feat: point constellation oauth discovery at the auth proxy`
-
-Update `/.well-known/oauth-protected-resource` and the `WWW-Authenticate` header in `mcp.ts` to
-name the proxy. New authorizations flow through the proxy; existing sessions keep working via M3.
-
-**This is the reversible cutover point.** Revert this commit and new clients return to the
-legacy path with no data loss.
-
-### M5 — Drain
-
-No code change. Wait until M3's legacy counter reads zero for longer than the maximum legacy
-session lifetime plus its refresh window. Measure it; do not estimate it.
-
-### M6 — Remove the legacy AS
-`chore: remove embedded authorization server from constellation`
-
-Delete `oauth.ts`, the `AuthCode` / `DeviceCode` / `OauthClient` / `OauthSession` models and
-their migrations, the `LocalUser` / `LoginFailure` models, `/setup` and `/auth/login`, the
-bcrypt dependency, and the legacy validation branch. Reduce `User` to whatever Constellation
-still needs to key its own records off `sub`.
+One change, not a phased rollout. Add `rs-auth` for token validation; update
+`/.well-known/oauth-protected-resource` and the `WWW-Authenticate` header in `mcp.ts` to name the
+proxy; delete `oauth.ts`, the `AuthCode` / `DeviceCode` / `OauthClient` / `OauthSession` models
+and their migrations, the `LocalUser` / `LoginFailure` models, `/setup` and `/auth/login`, and the
+bcrypt dependency. Map the `admin` scope onto whatever `adminUntil` currently gates. Reduce `User`
+to whatever Constellation still needs to key its own records off `sub`.
 
 Keep `rate-limit-classify.ts` — its non-OAuth routes still matter.
+
+**Every connected node/hub's session ends the moment this ships.** Re-authenticate all three
+immediately after deploying — that manual step is the entire migration strategy for existing
+clients, replacing the old M3–M5 dual-validation-and-drain sequence.
 
 ### On migrating DCR client records
 
 Do not. DCR registrations are ephemeral per-instance records, which is exactly the problem CIMD
 exists to eliminate; migrating them imports the mess into a system built to avoid it. Let them
-expire during M5.
+expire.
 
 Exception: a long-lived headless client whose registration cannot easily be redone. Handle it as
 a single manual entry in the proxy's allowlist, not as a migration path.
@@ -901,7 +890,7 @@ touching anything in §7.
 | SSRF via CIMD fetching | High | T8. The only entry here that is an actual vulnerability class rather than an inconvenience, and the only major component with no prior art in Constellation. Complete it before the proxy is externally reachable. |
 | Revocation lag under JWT | Medium | 15-minute access tokens, 5 minutes with `admin`. Accepted trade for removing the per-request introspection hop. |
 | Proxy outage blocks all new authorizations | Medium | Stale-on-failure JWKS caching (T19) keeps validation working; only issuance stops. |
-| User migration corrupts identity mapping | Medium | M2 preserves primary keys, and M3's dual validation means a bad migration surfaces before anything is deleted in M6. |
+| User migration corrupts identity mapping | Low | M2 preserves primary keys and is verified (row counts, an OIDC round-trip spot-check) before M3 ever runs. Downgraded from the original Medium: with only three self-controlled nodes/hubs and no dual-validation window, a bad migration surfaces immediately when they're manually re-authenticated right after cutover, not silently later. |
 | Signing key compromise | Medium | Two-key rotation (T4), documented runbook (T20). |
 | Audience confusion between MCP servers | Medium | Enforced at four points: `resource` validation in T12 and T17, the array assertion in T14, resource pinning in T15, and array rejection in T19. |
 | Local account subsystem grows features | Low | §6's explicit out-of-scope list. The intended answer to feature requests is "run an OIDC server." |
