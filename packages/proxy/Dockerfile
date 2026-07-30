@@ -11,8 +11,11 @@ RUN pnpm install --frozen-lockfile
 COPY tsconfig.base.json ./
 COPY packages/proxy/src ./packages/proxy/src
 COPY packages/proxy/tsconfig.json ./packages/proxy/
+COPY packages/proxy/prisma ./packages/proxy/prisma
+COPY packages/proxy/prisma.config.ts ./packages/proxy/
 
 RUN pnpm --filter @mcp-auth/proxy build
+RUN pnpm --filter @mcp-auth/proxy exec prisma generate
 
 RUN pnpm deploy --filter @mcp-auth/proxy --prod /app/deploy
 
@@ -22,9 +25,12 @@ WORKDIR /app
 
 COPY --from=builder /app/deploy/node_modules ./node_modules
 COPY --from=builder /app/packages/proxy/dist ./dist
+COPY --from=builder /app/packages/proxy/prisma ./prisma
+COPY packages/proxy/config ./config
+COPY packages/proxy/docker-entrypoint.sh ./
+RUN chmod +x docker-entrypoint.sh && chown -R node:node /app
 
-RUN chown -R node:node /app
 USER node
 
 EXPOSE 3000
-CMD ["node", "dist/server.js"]
+ENTRYPOINT ["./docker-entrypoint.sh"]

@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Sign in</title>
+  <style>
+    body { font-family: system-ui, sans-serif; background: #f5f5f5; display: flex; justify-content: center; padding: 4rem 1rem; }
+    .card { background: #fff; border-radius: 8px; padding: 2rem; max-width: 380px; width: 100%; box-shadow: 0 2px 8px rgba(0,0,0,.1); }
+    h1 { margin-top: 0; font-size: 1.4rem; }
+    label { display: block; margin: 1rem 0 .4rem; font-weight: 500; }
+    input { width: 100%; box-sizing: border-box; padding: .5rem; font-size: 1rem; border: 1px solid #ccc; border-radius: 4px; }
+    button { margin-top: 1.2rem; padding: .6rem 1.4rem; font-size: 1rem; border: none; border-radius: 4px; cursor: pointer; background: #2563eb; color: #fff; }
+    .error { color: #dc2626; background: #fee2e2; padding: .6rem; border-radius: 4px; margin-bottom: .5rem; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Sign in</h1>
+    <% if (error) { %>
+      <p class="error"><%= error %></p>
+    <% } %>
+    <form method="POST" action="/auth/login">
+      <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
+      <% if (flow) { %>
+        <input type="hidden" name="flow" value="<%= flow %>">
+      <% } %>
+      <label for="username">Username</label>
+      <input id="username" name="username" type="text" autocomplete="username" autofocus required>
+      <label for="password">Password</label>
+      <input id="password" name="password" type="password" autocomplete="current-password" required>
+      <button type="submit">Sign in</button>
+    </form>
+  </div>
+</body>
+</html>

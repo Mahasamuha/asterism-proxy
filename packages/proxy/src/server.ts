@@ -1,6 +1,9 @@
 import express, { Express, NextFunction, Request, Response } from "express";
 import { createServer } from "node:http";
-import { randomUUID } from "node:crypto";
+import { randomUUID, randomBytes } from "node:crypto";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import cookieParser from "cookie-parser";
 import { createLogger } from "./logger.js";
 import { config } from "./config.js";
 // Imported for its startup-time validation side effect: an invalid or missing
@@ -14,13 +17,29 @@ import { tokenRouter } from "./oauth/token.js";
 import { deviceRouter } from "./oauth/device.js";
 import { consentRouter } from "./oauth/consent.js";
 import { oidcRouter } from "./identity/oidc-router.js";
+import { localAccountsRouter } from "./identity/local-accounts-router.js";
 
 const log = createLogger("server");
 
 export const app: Express = express();
 
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+app.set("view engine", "ejs");
+app.set("views", path.join(__dirname, "views"));
+
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+
+// COOKIE_SECRET signs the session and CSRF cookies used by local-account login
+// (T7) and, later, consent (T13). An ephemeral secret is generated at startup
+// if unset — fine within a process, but sessions won't survive a restart;
+// set COOKIE_SECRET for that.
+const cookieSecret = process.env["COOKIE_SECRET"] ?? (() => {
+  const ephemeral = randomBytes(32).toString("hex");
+  log.warn("COOKIE_SECRET is not set — using an ephemeral secret. Set COOKIE_SECRET for cross-restart cookie validity.");
+  return ephemeral;
+})();
+app.use(cookieParser(cookieSecret));
 
 app.use((req: Request, res: Response, next: NextFunction) => {
   const raw = req.headers["x-request-id"] as string | undefined;
@@ -51,6 +70,11 @@ app.use(consentRouter);
 // 404 rather than confirm the feature exists, matching T7's local-account routes.
 if (config.enableOidc) {
   app.use(oidcRouter);
+}
+// Same 404-not-403 reasoning as the OIDC router above (T7): when local accounts
+// are disabled, /setup, /auth/login, etc. must not be reachable at all.
+if (config.enableLocalAccounts) {
+  app.use(localAccountsRouter);
 }
 
 // Centralized error boundary (§10): route handlers throw, Express 5 forwards
