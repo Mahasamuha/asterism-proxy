@@ -1,0 +1,15 @@
+node_modules/
+dist/
+src/generated/
+*.js.map
+*.d.ts.map
+
+.env
+.env.local
+
+*.log
+
+# Local Claude Code session/permission state — machine-specific, not shared
+.claude
+.idea
+CLAUDE.local.md
