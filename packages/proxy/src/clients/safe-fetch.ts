@@ -113,6 +113,18 @@ function checkRateLimit(hostname: string): void {
   entry.count += 1;
 }
 
+// Hostnames are attacker-influenced (CIMD client_id URLs, T9), so this map
+// must not grow forever on distinct hosts that are never queried again — an
+// expired entry only gets overwritten by checkRateLimit if that same host is
+// queried again, never if it isn't. Sweep it independently. unref()'d so it
+// never keeps the process alive on its own.
+setInterval(() => {
+  const now = Date.now();
+  for (const [hostname, entry] of rateLimitWindows) {
+    if (now - entry.windowStart >= RATE_LIMIT_WINDOW_MS) rateLimitWindows.delete(hostname);
+  }
+}, RATE_LIMIT_WINDOW_MS).unref();
+
 // ---------------------------------------------------------------------------
 // URL + scheme validation
 // ---------------------------------------------------------------------------
@@ -210,7 +222,11 @@ function performRequest(
     const req = transport.request(
       {
         protocol: url.protocol,
-        hostname: url.hostname,
+        // Bracket-stripped: url.hostname keeps "[::1]"-style brackets for IPv6
+        // literals, which Node's own hostname/servername option rejects
+        // outright ("Invalid IP address: undefined") — the Host header below
+        // is unaffected and correctly keeps the bracketed form.
+        hostname: stripBrackets(url.hostname),
         port: url.port || (url.protocol === "https:" ? 443 : 80),
         path: `${url.pathname}${url.search}`,
         method: "GET",
@@ -317,7 +333,11 @@ export async function safeFetchJson(url: string, options: SafeFetchOptions = {})
     }
 
     const contentType = response.headers["content-type"] ?? "";
-    if (!contentType.toLowerCase().includes("application/json")) {
+    // Exact media-type match (ignoring a ;charset=... suffix), not a substring
+    // check — .includes() would also accept a deceptive type like
+    // "text/html; boundary=application/json".
+    const mediaType = contentType.split(";")[0]?.trim().toLowerCase();
+    if (mediaType !== "application/json") {
       reject("invalid_content_type", `Expected application/json, got "${contentType}"`);
     }
 
