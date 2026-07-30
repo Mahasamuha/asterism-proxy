@@ -14,16 +14,6 @@ const ALG = "ES256";
 // before rotation.
 const RETIRED_KEY_RETENTION_MS = 2 * 60 * 60 * 1000;
 
-export interface SigningKeyRecord {
-  kid: string;
-  algorithm: string;
-  publicJwk: JWK;
-  privateJwk: JWK;
-  createdAt: Date;
-  activatedAt: Date | null;
-  retiredAt: Date | null;
-}
-
 async function generateSigningKey(): Promise<{ kid: string; publicJwk: JWK; privateJwk: JWK }> {
   const { publicKey, privateKey } = await generateKeyPair(ALG, { extractable: true });
   const kid = randomUUID();
@@ -37,13 +27,11 @@ async function generateSigningKey(): Promise<{ kid: string; publicJwk: JWK; priv
   return { kid, publicJwk, privateJwk };
 }
 
-/** Returns the current active signing key, generating one on first startup if none exists. */
-export async function getActiveSigningKey(): Promise<SigningKeyRecord> {
-  const existing = await prisma.signingKey.findFirst({ where: { retiredAt: null } });
-  if (existing) return existing as SigningKeyRecord;
-
+/** Generates a new key and stores it as the active key. Only called when no active key
+ * was found, so callers each do their own findFirst first — this just owns the write. */
+async function createAndActivateKey(): Promise<{ kid: string; privateJwk: JWK }> {
   const { kid, publicJwk, privateJwk } = await generateSigningKey();
-  const created = await prisma.signingKey.create({
+  await prisma.signingKey.create({
     data: {
       kid,
       algorithm: ALG,
@@ -53,16 +41,43 @@ export async function getActiveSigningKey(): Promise<SigningKeyRecord> {
     },
   });
   log.info({ kid }, "Generated initial signing key");
-  return created as SigningKeyRecord;
+  return { kid, privateJwk };
+}
+
+/** Ensures an active signing key exists, generating one on first startup if needed.
+ * Returns only the kid — never private key material. Call this (not
+ * getSigningKeyForSigning) anywhere the private key itself isn't actually needed. */
+export async function ensureActiveSigningKey(): Promise<{ kid: string }> {
+  const existing = await prisma.signingKey.findFirst({
+    where: { retiredAt: null },
+    select: { kid: true },
+  });
+  if (existing) return existing;
+  const { kid } = await createAndActivateKey();
+  return { kid };
+}
+
+/** The only function in this module that reads private key material out of the
+ * database. Used exclusively by signJwt(). */
+async function getSigningKeyForSigning(): Promise<{ kid: string; privateJwk: JWK }> {
+  const existing = await prisma.signingKey.findFirst({
+    where: { retiredAt: null },
+    select: { kid: true, privateJwk: true },
+  });
+  if (existing) return existing as { kid: string; privateJwk: JWK };
+  return createAndActivateKey();
 }
 
 /** Generates a new active key and retires the previous one. Both remain published in
  * JWKS (see getJwks) until the retired key ages out, so in-flight tokens keep verifying. */
-export async function rotateSigningKey(): Promise<SigningKeyRecord> {
-  const current = await prisma.signingKey.findFirst({ where: { retiredAt: null } });
+export async function rotateSigningKey(): Promise<{ kid: string }> {
+  const current = await prisma.signingKey.findFirst({
+    where: { retiredAt: null },
+    select: { kid: true },
+  });
   const { kid, publicJwk, privateJwk } = await generateSigningKey();
 
-  const results = await prisma.$transaction([
+  await prisma.$transaction([
     ...(current
       ? [prisma.signingKey.update({ where: { kid: current.kid }, data: { retiredAt: new Date() } })]
       : []),
@@ -77,16 +92,17 @@ export async function rotateSigningKey(): Promise<SigningKeyRecord> {
     }),
   ]);
 
-  const created = results[results.length - 1] as SigningKeyRecord;
   log.info({ newKid: kid, retiredKid: current?.kid ?? null }, "Rotated signing key");
-  return created;
+  return { kid };
 }
 
-/** Active key plus any retired key still within its verification grace period. */
+/** Active key plus any retired key still within its verification grace period. Only
+ * publicJwk is selected — private key material never leaves the database on this path. */
 export async function getJwks(): Promise<{ keys: JWK[] }> {
   const cutoff = new Date(Date.now() - RETIRED_KEY_RETENTION_MS);
   const keys = await prisma.signingKey.findMany({
     where: { OR: [{ retiredAt: null }, { retiredAt: { gt: cutoff } }] },
+    select: { publicJwk: true },
   });
   return { keys: keys.map((k) => k.publicJwk as JWK) };
 }
@@ -95,7 +111,7 @@ export async function getJwks(): Promise<{ keys: JWK[] }> {
  * token endpoint in particular) are responsible for constructing the payload itself,
  * including the single-string `aud` requirement in §5. */
 export async function signJwt(payload: JWTPayload, expiresIn: string | number): Promise<string> {
-  const key = await getActiveSigningKey();
+  const key = await getSigningKeyForSigning();
   const privateKey = await importJWK(key.privateJwk, ALG);
   return new SignJWT(payload)
     .setProtectedHeader({ alg: ALG, kid: key.kid })

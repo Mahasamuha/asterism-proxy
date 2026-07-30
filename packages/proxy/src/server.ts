@@ -7,7 +7,7 @@ import { config } from "./config.js";
 // resource server registry should fail the process the same way bad env does.
 import "./resource-registry.js";
 import { jwksRouter } from "./crypto/jwks-router.js";
-import { getActiveSigningKey } from "./crypto/signing-keys.js";
+import { ensureActiveSigningKey } from "./crypto/signing-keys.js";
 
 const log = createLogger("server");
 
@@ -42,7 +42,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   // active key — relying on that ordering is only safe because this is a
   // single-instance deployment (§2); a multi-instance cold start would need a
   // DB-level lock instead.
-  const signingKey = await getActiveSigningKey();
+  const signingKey = await ensureActiveSigningKey();
   log.info({ kid: signingKey.kid }, "Active signing key ready");
 
   server.listen(config.port, () => {
