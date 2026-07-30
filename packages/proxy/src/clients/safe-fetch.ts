@@ -287,6 +287,11 @@ function performRequest(
 export interface SafeFetchOptions {
   maxBytes?: number;
   timeoutMs?: number;
+  // Called with the final (post-redirect) response headers once a 2xx JSON
+  // response has been received, before parsing — lets callers read caching
+  // headers (T9 needs Cache-Control's max-age) without widening this
+  // function's return type beyond the parsed JSON body.
+  onHeaders?: (headers: http.IncomingHttpHeaders) => void;
 }
 
 const DEFAULT_MAX_BYTES = 16 * 1024;
@@ -342,7 +347,9 @@ export async function safeFetchJson(url: string, options: SafeFetchOptions = {})
     }
 
     try {
-      return JSON.parse(response.body.toString("utf8"));
+      const json = JSON.parse(response.body.toString("utf8"));
+      options.onHeaders?.(response.headers);
+      return json;
     } catch {
       reject("invalid_json", "Response body was not valid JSON");
     }
