@@ -12,6 +12,8 @@ import { discoveryRouter } from "./oauth/discovery.js";
 import { authorizeRouter } from "./oauth/authorize.js";
 import { tokenRouter } from "./oauth/token.js";
 import { deviceRouter } from "./oauth/device.js";
+import { consentRouter } from "./oauth/consent.js";
+import { oidcRouter } from "./identity/oidc-router.js";
 
 const log = createLogger("server");
 
@@ -44,6 +46,20 @@ app.use(discoveryRouter);
 app.use(authorizeRouter);
 app.use(tokenRouter);
 app.use(deviceRouter);
+app.use(consentRouter);
+// Mounted only when OIDC is actually enabled — otherwise /oauth/callback should
+// 404 rather than confirm the feature exists, matching T7's local-account routes.
+if (config.enableOidc) {
+  app.use(oidcRouter);
+}
+
+// Centralized error boundary (§10): route handlers throw, Express 5 forwards
+// rejected async handlers here automatically. Never leak internals.
+app.use((err: unknown, req: Request, res: Response, _next: NextFunction) => {
+  log.error({ err, path: req.path }, "Unhandled request error");
+  if (res.headersSent) return;
+  res.status(400).json({ error: "invalid_request", error_description: "The request could not be processed" });
+});
 
 if (import.meta.url === `file://${process.argv[1]}`) {
   const server = createServer(app);
