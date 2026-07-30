@@ -1,0 +1,197 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ---------- Users ----------
+// Lifted from Constellation. The proxy is authoritative for user identity.
+
+model User {
+  id              String    @id @default(cuid())
+  oidcSub         String?   @map("oidc_sub")
+  oidcIssuer      String?   @map("oidc_issuer")
+  email           String
+  createdAt       DateTime  @default(now()) @map("created_at")
+  deactivatedAt   DateTime? @map("deactivated_at")
+  lastKnownClaims Json?     @map("last_known_claims")
+
+  localUser     LocalUser?
+  grants        Grant[]
+  refreshTokens RefreshToken[]
+
+  @@unique([oidcSub, oidcIssuer])
+  @@map("users")
+}
+
+model LocalUser {
+  id           String    @id @default(cuid())
+  username     String    @unique
+  passwordHash String    @map("password_hash")
+  createdAt    DateTime  @default(now()) @map("created_at")
+  lastLoginAt  DateTime? @map("last_login_at")
+  isActive     Boolean   @default(true) @map("is_active")
+  userId       String    @unique @map("user_id")
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@map("local_users")
+}
+
+model LoginFailure {
+  id       Int      @id @default(autoincrement())
+  ip       String
+  failedAt DateTime @default(now()) @map("failed_at")
+
+  @@index([ip, failedAt])
+  @@map("login_failures")
+}
+
+// ---------- Signing ----------
+// Two keys active at once so rotation is not an outage.
+
+model SigningKey {
+  kid         String    @id
+  algorithm   String
+  publicJwk   Json      @map("public_jwk")
+  privateJwk  Json      @map("private_jwk")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  activatedAt DateTime? @map("activated_at")
+  retiredAt   DateTime? @map("retired_at")
+
+  @@map("signing_keys")
+}
+
+// ---------- Clients ----------
+// Supersedes Constellation's OauthClient. CIMD rows are a cache; DCR rows are authoritative.
+
+enum ClientSource {
+  cimd
+  dcr
+}
+
+enum TrustLevel {
+  allowlisted
+  domain_verified
+  unverified
+}
+
+model OauthClient {
+  // CIMD: the HTTPS document URL. DCR: a generated opaque id.
+  clientId   String       @id @map("client_id")
+  source     ClientSource
+  metadata   Json         // validated client metadata document
+  trustLevel TrustLevel   @map("trust_level")
+  fetchedAt  DateTime     @default(now()) @map("fetched_at")
+  expiresAt  DateTime?    @map("expires_at")   // NULL for DCR
+  lastSeenAt DateTime     @default(now()) @map("last_seen_at")
+
+  @@index([expiresAt])
+  @@map("oauth_clients")
+}
+
+// ---------- Flow state ----------
+
+model AuthorizationRequest {
+  handle              String   @id
+  clientId            String   @map("client_id")
+  resource            String
+  scopes              String[]
+  redirectUri         String   @map("redirect_uri")
+  state               String?
+  codeChallenge       String   @map("code_challenge")
+  codeChallengeMethod String   @default("S256") @map("code_challenge_method")
+  upstreamState       String?  @map("upstream_state")
+  upstreamNonce       String?  @map("upstream_nonce")
+  upstreamVerifier    String?  @map("upstream_verifier")
+  subject             String?  // populated once the user authenticates
+  createdAt           DateTime @default(now()) @map("created_at")
+  expiresAt           DateTime @map("expires_at")
+
+  @@index([expiresAt])
+  @@map("authorization_requests")
+}
+
+model AuthCode {
+  codeHash String @id @map("code_hash")
+  userId   String @map("user_id")
+  clientId String @map("client_id")
+  // Non-nullable: PKCE is required for every AuthCode this app issues (see
+  // /oauth/authorize's code_challenge check) — making the column itself unable to
+  // store a missing challenge means a future code path that creates an AuthCode
+  // without going through /oauth/authorize fails at the database layer instead of
+  // silently skipping PKCE verification at the token endpoint.
+  codeChallenge       String   @map("code_challenge")
+  codeChallengeMethod String   @default("S256") @map("code_challenge_method")
+  // New relative to Constellation: the audience this code may be exchanged for.
+  resource            String
+  scopes              String[]
+  redirectUri         String   @map("redirect_uri")
+  grantId             String   @map("grant_id")
+  expiresAt           DateTime @map("expires_at")
+  createdAt           DateTime @default(now()) @map("created_at")
+  consumedAt          DateTime? @map("consumed_at")
+
+  @@map("auth_codes")
+}
+
+model DeviceCode {
+  deviceCodeHash String   @id @map("device_code_hash")
+  userCode       String   @unique @map("user_code")
+  clientId       String   @map("client_id")
+  resource       String
+  scopes         String[]
+  status         String   @default("pending")   // pending | approved | denied | consumed
+  userId         String?  @map("user_id")
+  hostName       String?  @map("host_name")
+  pendingUserId  String?  @map("pending_user_id")
+  lastPolledAt   DateTime? @map("last_polled_at")
+  pollInterval   Int      @default(5) @map("poll_interval")
+  createdAt      DateTime @default(now()) @map("created_at")
+  expiresAt      DateTime @map("expires_at")
+
+  @@map("device_codes")
+}
+
+// ---------- Grants and refresh ----------
+// Replaces OauthSession. Access tokens are JWTs and are not stored.
+
+model Grant {
+  id        String    @id @default(cuid())
+  userId    String    @map("user_id")
+  clientId  String    @map("client_id")
+  resource  String
+  scopes    String[]
+  grantedAt DateTime  @default(now()) @map("granted_at")
+  revokedAt DateTime? @map("revoked_at")
+
+  user          User           @relation(fields: [userId], references: [id])
+  refreshTokens RefreshToken[]
+
+  @@unique([userId, clientId, resource])
+  @@index([userId])
+  @@map("grants")
+}
+
+model RefreshToken {
+  tokenHash String    @id @map("token_hash")
+  userId    String    @map("user_id")
+  clientId  String    @map("client_id")
+  resource  String
+  scopes    String[]
+  grantId   String    @map("grant_id")
+  createdAt DateTime  @default(now()) @map("created_at")
+  expiresAt DateTime  @map("expires_at")
+  rotatedTo String?   @map("rotated_to")
+  revokedAt DateTime? @map("revoked_at")
+
+  user  User  @relation(fields: [userId], references: [id])
+  grant Grant @relation(fields: [grantId], references: [id])
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("refresh_tokens")
+}

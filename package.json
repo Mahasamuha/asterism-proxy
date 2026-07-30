@@ -15,5 +15,12 @@
     "eslint": "^10.3.0",
     "typescript": "^6.0.0",
     "typescript-eslint": "^8.59.3"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "@prisma/engines",
+      "esbuild",
+      "prisma"
+    ]
   }
 }
