@@ -6,6 +6,8 @@ import { config } from "./config.js";
 // Imported for its startup-time validation side effect: an invalid or missing
 // resource server registry should fail the process the same way bad env does.
 import "./resource-registry.js";
+import { jwksRouter } from "./crypto/jwks-router.js";
+import { getActiveSigningKey } from "./crypto/signing-keys.js";
 
 const log = createLogger("server");
 
@@ -30,8 +32,18 @@ app.get("/health", (_req: Request, res: Response) => {
   res.status(200).json({ status: "ok" });
 });
 
+app.use(jwksRouter);
+
 if (import.meta.url === `file://${process.argv[1]}`) {
   const server = createServer(app);
+
+  // Ensure a signing key exists before accepting any traffic. This runs before
+  // server.listen() so it can't race with a concurrent request also finding no
+  // active key — relying on that ordering is only safe because this is a
+  // single-instance deployment (§2); a multi-instance cold start would need a
+  // DB-level lock instead.
+  const signingKey = await getActiveSigningKey();
+  log.info({ kid: signingKey.kid }, "Active signing key ready");
 
   server.listen(config.port, () => {
     log.info({ port: config.port }, "Proxy listening");
