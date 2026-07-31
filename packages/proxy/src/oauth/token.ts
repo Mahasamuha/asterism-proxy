@@ -4,6 +4,8 @@ import { prisma } from "../db.js";
 import { createLogger } from "../logger.js";
 import { mintAccessToken } from "../crypto/access-token.js";
 import { issueRefreshToken, accessTokenScopes, REFRESH_TOKEN_TTL_MS } from "../crypto/refresh-token.js";
+import { resolveClient } from "../clients/cimd.js";
+import { authenticateConfidentialClient } from "./client-assertion.js";
 
 const log = createLogger("token");
 
@@ -96,6 +98,20 @@ async function handleAuthorizationCodeGrant(body: Record<string, string>, res: R
     return;
   }
 
+  // Confidential clients (T16) must authenticate before the code is
+  // consumed — checked here, not after, so a bad assertion doesn't burn a
+  // code a legitimate retry could still use.
+  const client = await resolveClient(client_id);
+  if (!client) {
+    res.status(400).json({ error: "invalid_client", error_description: "Client could not be resolved" });
+    return;
+  }
+  const auth = await authenticateConfidentialClient(client, body);
+  if (!auth.ok) {
+    res.status(400).json({ error: auth.error, error_description: auth.errorDescription });
+    return;
+  }
+
   // Atomically claim the code right before minting — closes the TOCTOU
   // window between the findUnique above and this write. If a concurrent
   // request already consumed it in between, count is 0 here: treat exactly
@@ -185,6 +201,19 @@ async function handleRefreshTokenGrant(body: Record<string, string>, res: Respon
   // differing value is rejected outright rather than silently ignored.
   if (resource !== undefined && resource !== entry.resource) {
     res.status(400).json({ error: "invalid_target", error_description: "resource does not match the refresh token" });
+    return;
+  }
+
+  // Confidential clients (T16) must authenticate before rotation claims the
+  // token, for the same reason as the authorization_code grant above.
+  const client = await resolveClient(client_id);
+  if (!client) {
+    res.status(400).json({ error: "invalid_client", error_description: "Client could not be resolved" });
+    return;
+  }
+  const auth = await authenticateConfidentialClient(client, body);
+  if (!auth.ok) {
+    res.status(400).json({ error: auth.error, error_description: auth.errorDescription });
     return;
   }
 
