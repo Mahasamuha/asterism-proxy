@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Authorize <%= clientName %></title>
+  <style>
+    body { font-family: system-ui, sans-serif; background: #f5f5f5; display: flex; justify-content: center; padding: 4rem 1rem; }
+    .card { background: #fff; border-radius: 8px; padding: 2rem; max-width: 420px; width: 100%; box-shadow: 0 2px 8px rgba(0,0,0,.1); }
+    h1 { margin-top: 0; font-size: 1.3rem; }
+    .domain { font-size: .95rem; color: #555; margin: -0.5rem 0 1rem; }
+    .domain strong { color: #111; }
+    .warning { color: #92400e; background: #fef3c7; border: 1px solid #fde68a; padding: .6rem .8rem; border-radius: 4px; margin-bottom: 1rem; font-size: .9rem; }
+    .resource { font-size: .9rem; color: #555; margin-bottom: 1rem; }
+    ul.scopes { list-style: none; padding: 0; margin: 0 0 1.5rem; }
+    ul.scopes li { padding: .5rem 0; border-bottom: 1px solid #eee; font-size: .95rem; }
+    ul.scopes li:last-child { border-bottom: none; }
+    .actions { display: flex; gap: .75rem; }
+    button { flex: 1; padding: .6rem 1rem; font-size: 1rem; border: none; border-radius: 4px; cursor: pointer; }
+    button.approve { background: #2563eb; color: #fff; }
+    button.deny { background: #e5e7eb; color: #111; }
+    img.logo { max-height: 40px; margin-bottom: .75rem; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <% if (logoUri) { %>
+      <img class="logo" src="<%= logoUri %>" alt="">
+    <% } %>
+    <h1><%= clientName %> wants to access <%= resourceServerName %></h1>
+    <% if (clientDomain) { %>
+      <p class="domain">Requesting client at <strong><%= clientDomain %></strong></p>
+    <% } %>
+    <% if (unverified) { %>
+      <p class="warning">This client's identity has not been verified. Only approve if you recognize and trust it.</p>
+    <% } %>
+    <p class="resource">This will allow access to <strong><%= resourceServerName %></strong> with the following permissions:</p>
+    <ul class="scopes">
+      <% scopes.forEach(function(scope) { %>
+        <li><%= scope.description %></li>
+      <% }) %>
+    </ul>
+    <form method="POST" action="/oauth/consent">
+      <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
+      <input type="hidden" name="flow" value="<%= flow %>">
+      <div class="actions">
+        <button class="deny" type="submit" name="action" value="deny">Deny</button>
+        <button class="approve" type="submit" name="action" value="approve">Approve</button>
+      </div>
+    </form>
+  </div>
+</body>
+</html>
