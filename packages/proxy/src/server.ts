@@ -16,6 +16,7 @@ import { authorizeRouter } from "./oauth/authorize.js";
 import { tokenRouter } from "./oauth/token.js";
 import { deviceRouter } from "./oauth/device.js";
 import { consentRouter } from "./oauth/consent.js";
+import { grantsRouter } from "./oauth/grants.js";
 import { oidcRouter } from "./identity/oidc-router.js";
 import { localAccountsRouter } from "./identity/local-accounts-router.js";
 
@@ -66,6 +67,7 @@ app.use(authorizeRouter);
 app.use(tokenRouter);
 app.use(deviceRouter);
 app.use(consentRouter);
+app.use(grantsRouter);
 // Mounted only when OIDC is actually enabled — otherwise /oauth/callback should
 // 404 rather than confirm the feature exists, matching T7's local-account routes.
 if (config.enableOidc) {

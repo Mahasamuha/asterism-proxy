@@ -13,6 +13,7 @@ import {
 } from "./local-accounts.js";
 import { setSession, clearSession, getSessionUserId } from "./session.js";
 import { issueCsrfToken, verifyCsrfToken } from "./csrf.js";
+import { isSelfLogin } from "./self-login.js";
 
 const log = createLogger("local-accounts-router");
 
@@ -130,6 +131,12 @@ localAccountsRouter.post("/auth/login", async (req: Request, res: Response) => {
     const authRequest = await prisma.authorizationRequest.findUnique({ where: { handle: flow } });
     if (authRequest && authRequest.expiresAt > new Date()) {
       await prisma.authorizationRequest.update({ where: { handle: flow }, data: { subject: userId } });
+      // setSession() above already covers T18's /grants for local accounts —
+      // this just needs to skip consent (there's no OAuth client involved).
+      if (isSelfLogin(authRequest)) {
+        res.redirect(authRequest.state || "/grants");
+        return;
+      }
       res.redirect(`/oauth/consent?flow=${encodeURIComponent(flow)}`);
       return;
     }
@@ -138,14 +145,9 @@ localAccountsRouter.post("/auth/login", async (req: Request, res: Response) => {
   res.redirect("/auth/account");
 });
 
-// ---------------------------------------------------------------------------
-// POST /auth/logout
-// ---------------------------------------------------------------------------
-
-localAccountsRouter.post("/auth/logout", (_req: Request, res: Response) => {
-  clearSession(res);
-  res.redirect("/auth/login");
-});
+// POST /auth/logout lives in oauth/grants.ts, not here — it has to work for
+// OIDC-only sessions too (T18), and this router only mounts when local
+// accounts are enabled.
 
 // ---------------------------------------------------------------------------
 // GET /auth/account, POST /auth/password
