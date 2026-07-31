@@ -97,7 +97,10 @@ authorizeRouter.get("/oauth/authorize", async (req: Request, res: Response) => {
 
   const requestedScopes = (singleQueryValue(query["scope"]) ?? "").split(" ").filter(Boolean);
   const declaredScopeNames = new Set(resourceServer.scopes.map((s) => s.name));
-  const unknownScope = requestedScopes.find((scope) => !declaredScopeNames.has(scope));
+  // offline_access (T15) is a protocol-level scope controlling refresh token
+  // issuance, not an application permission — no resource server declares
+  // it, so it's exempt from the "declared by this resource server" check.
+  const unknownScope = requestedScopes.find((scope) => scope !== "offline_access" && !declaredScopeNames.has(scope));
   if (unknownScope) {
     fail("invalid_scope", `Scope not declared by ${resource}: ${unknownScope}`);
     return;
