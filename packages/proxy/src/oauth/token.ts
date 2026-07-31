@@ -23,8 +23,11 @@ tokenRouter.post("/oauth/token", async (req: Request, res: Response) => {
     await handleRefreshTokenGrant(body, res);
     return;
   }
+  if (grantType === "urn:ietf:params:oauth:grant-type:device_code") {
+    await handleDeviceCodeGrant(body, res);
+    return;
+  }
 
-  // The device_code grant (T17) lands in a later task.
   res.status(400).json({ error: "unsupported_grant_type" });
 });
 
@@ -264,6 +267,128 @@ async function handleRefreshTokenGrant(body: Record<string, string>, res: Respon
     token_type: "Bearer",
     expires_in: expiresIn,
     refresh_token: newToken,
+    scope: entry.scopes.join(" "),
+  });
+}
+
+async function handleDeviceCodeGrant(body: Record<string, string>, res: Response): Promise<void> {
+  const { device_code, client_id } = body;
+
+  if (!device_code || !client_id) {
+    res.status(400).json({ error: "invalid_request", error_description: "device_code and client_id are required" });
+    return;
+  }
+
+  const deviceCodeHash = createHash("sha256").update(device_code).digest("hex");
+  const entry = await prisma.deviceCode.findUnique({ where: { deviceCodeHash } });
+
+  if (!entry) {
+    res.status(400).json({ error: "invalid_grant", error_description: "device_code not found" });
+    return;
+  }
+
+  if (entry.clientId !== client_id) {
+    res.status(400).json({ error: "invalid_grant", error_description: "client_id mismatch" });
+    return;
+  }
+
+  if (entry.expiresAt < new Date()) {
+    await prisma.deviceCode.delete({ where: { deviceCodeHash } }).catch(() => {});
+    res.status(400).json({ error: "expired_token" });
+    return;
+  }
+
+  // Dedicated polling rate limit (§T17): polling faster than the code's own
+  // interval raises that interval and returns slow_down, mirroring
+  // Constellation's device-poll bucket but scoped per device_code rather
+  // than per HTTP route.
+  const now = new Date();
+  if (entry.lastPolledAt && now.getTime() - entry.lastPolledAt.getTime() < entry.pollInterval * 1000) {
+    await prisma.deviceCode.update({
+      where: { deviceCodeHash },
+      data: { lastPolledAt: now, pollInterval: entry.pollInterval + 5 },
+    });
+    res.status(400).json({ error: "slow_down" });
+    return;
+  }
+  await prisma.deviceCode.update({ where: { deviceCodeHash }, data: { lastPolledAt: now } });
+
+  if (entry.status === "pending") {
+    res.status(400).json({ error: "authorization_pending" });
+    return;
+  }
+  if (entry.status === "denied") {
+    await prisma.deviceCode.delete({ where: { deviceCodeHash } }).catch(() => {});
+    res.status(400).json({ error: "access_denied" });
+    return;
+  }
+  if (entry.status !== "approved") {
+    // "consumed" (already redeemed) or any other unexpected value.
+    res.status(400).json({ error: "invalid_grant", error_description: "device_code already redeemed" });
+    return;
+  }
+
+  const userId = entry.userId;
+  if (!userId) {
+    log.error({ deviceCodeHash }, "Approved device_code missing userId — possible data corruption");
+    res.status(500).json({ error: "server_error" });
+    return;
+  }
+
+  // Confidential clients (T16) must authenticate before the code is consumed.
+  const client = await resolveClient(client_id);
+  if (!client) {
+    res.status(400).json({ error: "invalid_client", error_description: "Client could not be resolved" });
+    return;
+  }
+  const auth = await authenticateConfidentialClient(client, body);
+  if (!auth.ok) {
+    res.status(400).json({ error: auth.error, error_description: auth.errorDescription });
+    return;
+  }
+
+  // Atomically claim (consume) — same TOCTOU close as the other two grants.
+  const claim = await prisma.deviceCode.updateMany({
+    where: { deviceCodeHash, status: "approved" },
+    data: { status: "consumed" },
+  });
+  if (claim.count === 0) {
+    res.status(400).json({ error: "invalid_grant", error_description: "device_code already redeemed" });
+    return;
+  }
+
+  // Consent (T13, reused verbatim by T17's device.ts) already created the
+  // Grant during approval — the same upsert path the authorization_code flow
+  // uses, so this must exist by the time a device_code reaches "approved".
+  const grant = await prisma.grant.findUniqueOrThrow({
+    where: { userId_clientId_resource: { userId, clientId: entry.clientId, resource: entry.resource } },
+  });
+
+  const { accessToken, expiresIn } = await mintAccessToken({
+    userId,
+    clientId: entry.clientId,
+    resource: entry.resource,
+    scopes: accessTokenScopes(entry.scopes),
+  });
+
+  let refreshToken: string | undefined;
+  if (entry.scopes.includes("offline_access")) {
+    refreshToken = await issueRefreshToken({
+      userId,
+      clientId: entry.clientId,
+      resource: entry.resource,
+      scopes: entry.scopes,
+      grantId: grant.id,
+    });
+  }
+
+  log.info({ userId, clientId: entry.clientId, resource: entry.resource }, "Access token issued (device_code)");
+
+  res.json({
+    access_token: accessToken,
+    token_type: "Bearer",
+    expires_in: expiresIn,
+    ...(refreshToken ? { refresh_token: refreshToken } : {}),
     scope: entry.scopes.join(" "),
   });
 }

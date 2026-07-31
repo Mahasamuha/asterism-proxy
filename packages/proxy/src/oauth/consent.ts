@@ -6,6 +6,7 @@ import { createLogger } from "../logger.js";
 import { resolveClient } from "../clients/cimd.js";
 import { lookupResourceServer } from "../resource-registry.js";
 import { issueCsrfToken, verifyCsrfToken } from "../identity/csrf.js";
+import { DEVICE_FLOW_REDIRECT_URI_SENTINEL } from "./device.js";
 import type { AuthorizationRequest } from "../generated/prisma/client.js";
 
 const log = createLogger("consent");
@@ -42,6 +43,48 @@ function redirectWithError(res: Response, authRequest: AuthorizationRequest, err
   url.searchParams.set("error", error);
   if (authRequest.state) url.searchParams.set("state", authRequest.state);
   res.redirect(url.toString());
+}
+
+/** Device flow (T17) reuses this whole login+consent chain, but its
+ * completion is different: there's no client redirect_uri to send a code
+ * to — the browser session ends here, and the polling device picks the
+ * result up separately by polling /oauth/token. Recognized by the
+ * redirectUri sentinel T17's device.ts stamps on the AuthorizationRequest;
+ * the device_code itself is found via `state`, which device.ts stashes the
+ * normalized user_code in for exactly this purpose. */
+function isDeviceFlow(authRequest: AuthorizationRequest): boolean {
+  return authRequest.redirectUri === DEVICE_FLOW_REDIRECT_URI_SENTINEL;
+}
+
+function renderDeviceDonePage(res: Response, message: string): void {
+  res.send(`<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Device authorization</title></head>
+<body>
+  <h1>${escHtml(message)}</h1>
+  <p>You can close this tab.</p>
+</body>
+</html>`);
+}
+
+async function completeDeviceFlow(res: Response, authRequest: AuthorizationRequest & { subject: string }, approved: boolean): Promise<void> {
+  const userCode = authRequest.state;
+  if (!userCode) {
+    renderErrorPage(res, "Invalid device authorization session.");
+    return;
+  }
+
+  const result = await prisma.deviceCode.updateMany({
+    where: { userCode, status: "pending" },
+    data: approved ? { status: "approved", userId: authRequest.subject } : { status: "denied" },
+  });
+  if (result.count === 0) {
+    renderErrorPage(res, "This code has already been used or has expired.");
+    return;
+  }
+
+  log.info({ userId: authRequest.subject, clientId: authRequest.clientId, resource: authRequest.resource, approved }, "Device consent completed");
+  renderDeviceDonePage(res, approved ? "Access granted." : "Access denied.");
 }
 
 async function issueAuthCodeAndRedirect(
@@ -107,7 +150,11 @@ consentRouter.get("/oauth/consent", async (req: Request, res: Response) => {
   // Constellation simply doesn't match a request naming another MCP server.
   const existingGrant = await findLiveGrant(authRequest.subject, authRequest.clientId, authRequest.resource);
   if (existingGrant && authRequest.scopes.every((s) => existingGrant.scopes.includes(s))) {
-    await issueAuthCodeAndRedirect(res, authRequest, existingGrant.id);
+    if (isDeviceFlow(authRequest)) {
+      await completeDeviceFlow(res, authRequest, true);
+    } else {
+      await issueAuthCodeAndRedirect(res, authRequest, existingGrant.id);
+    }
     return;
   }
 
@@ -154,7 +201,11 @@ consentRouter.post("/oauth/consent", async (req: Request, res: Response) => {
   }
 
   if (body["action"] !== "approve") {
-    redirectWithError(res, authRequest, "access_denied");
+    if (isDeviceFlow(authRequest)) {
+      await completeDeviceFlow(res, authRequest, false);
+    } else {
+      redirectWithError(res, authRequest, "access_denied");
+    }
     return;
   }
 
@@ -171,5 +222,9 @@ consentRouter.post("/oauth/consent", async (req: Request, res: Response) => {
   });
 
   log.info({ userId: authRequest.subject, clientId: authRequest.clientId, resource: authRequest.resource }, "Grant approved");
-  await issueAuthCodeAndRedirect(res, authRequest, grant.id);
+  if (isDeviceFlow(authRequest)) {
+    await completeDeviceFlow(res, authRequest, true);
+  } else {
+    await issueAuthCodeAndRedirect(res, authRequest, grant.id);
+  }
 });
