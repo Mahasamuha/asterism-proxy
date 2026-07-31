@@ -6,6 +6,7 @@ import { mintAccessToken } from "../crypto/access-token.js";
 import { issueRefreshToken, accessTokenScopes, REFRESH_TOKEN_TTL_MS } from "../crypto/refresh-token.js";
 import { resolveClient } from "../clients/cimd.js";
 import { authenticateConfidentialClient } from "./client-assertion.js";
+import { incrementCounter } from "../metrics.js";
 
 const log = createLogger("token");
 
@@ -41,6 +42,7 @@ async function revokeDescendantRefreshTokens(grantId: string): Promise<void> {
     data: { revokedAt: new Date() },
   });
   if (result.count > 0) {
+    incrementCounter("refresh_reuse_detected_total");
     log.warn({ grantId, revokedCount: result.count }, "Authorization code replay: revoked descendant refresh tokens");
   }
 }
@@ -150,6 +152,7 @@ async function handleAuthorizationCodeGrant(body: Record<string, string>, res: R
     });
   }
 
+  incrementCounter("tokens_issued_total", { client_id: entry.clientId, resource: entry.resource });
   log.info({ userId: entry.userId, clientId: entry.clientId, resource: entry.resource }, "Access token issued (authorization_code)");
 
   res.json({
@@ -260,6 +263,7 @@ async function handleRefreshTokenGrant(body: Record<string, string>, res: Respon
     scopes: accessTokenScopes(entry.scopes),
   });
 
+  incrementCounter("tokens_issued_total", { client_id: entry.clientId, resource: entry.resource });
   log.info({ userId: entry.userId, clientId: entry.clientId, resource: entry.resource }, "Access token issued (refresh_token)");
 
   res.json({
@@ -294,6 +298,7 @@ async function handleDeviceCodeGrant(body: Record<string, string>, res: Response
 
   if (entry.expiresAt < new Date()) {
     await prisma.deviceCode.delete({ where: { deviceCodeHash } }).catch(() => {});
+    incrementCounter("device_flow_outcomes_total", { outcome: "expired" });
     res.status(400).json({ error: "expired_token" });
     return;
   }
@@ -319,6 +324,7 @@ async function handleDeviceCodeGrant(body: Record<string, string>, res: Response
   }
   if (entry.status === "denied") {
     await prisma.deviceCode.delete({ where: { deviceCodeHash } }).catch(() => {});
+    incrementCounter("device_flow_outcomes_total", { outcome: "denied" });
     res.status(400).json({ error: "access_denied" });
     return;
   }
@@ -382,6 +388,8 @@ async function handleDeviceCodeGrant(body: Record<string, string>, res: Response
     });
   }
 
+  incrementCounter("tokens_issued_total", { client_id: entry.clientId, resource: entry.resource });
+  incrementCounter("device_flow_outcomes_total", { outcome: "success" });
   log.info({ userId, clientId: entry.clientId, resource: entry.resource }, "Access token issued (device_code)");
 
   res.json({

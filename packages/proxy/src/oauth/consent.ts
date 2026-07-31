@@ -7,6 +7,7 @@ import { resolveClient } from "../clients/cimd.js";
 import { lookupResourceServer } from "../resource-registry.js";
 import { issueCsrfToken, verifyCsrfToken } from "../identity/csrf.js";
 import { DEVICE_FLOW_REDIRECT_URI_SENTINEL } from "./device.js";
+import { incrementCounter } from "../metrics.js";
 import type { AuthorizationRequest } from "../generated/prisma/client.js";
 
 const log = createLogger("consent");
@@ -150,6 +151,7 @@ consentRouter.get("/oauth/consent", async (req: Request, res: Response) => {
   // Constellation simply doesn't match a request naming another MCP server.
   const existingGrant = await findLiveGrant(authRequest.subject, authRequest.clientId, authRequest.resource);
   if (existingGrant && authRequest.scopes.every((s) => existingGrant.scopes.includes(s))) {
+    incrementCounter("consent_total", { outcome: "approved" });
     if (isDeviceFlow(authRequest)) {
       await completeDeviceFlow(res, authRequest, true);
     } else {
@@ -201,6 +203,7 @@ consentRouter.post("/oauth/consent", async (req: Request, res: Response) => {
   }
 
   if (body["action"] !== "approve") {
+    incrementCounter("consent_total", { outcome: "denied" });
     if (isDeviceFlow(authRequest)) {
       await completeDeviceFlow(res, authRequest, false);
     } else {
@@ -221,6 +224,7 @@ consentRouter.post("/oauth/consent", async (req: Request, res: Response) => {
     update: { scopes: mergedScopes, revokedAt: null },
   });
 
+  incrementCounter("consent_total", { outcome: "approved" });
   log.info({ userId: authRequest.subject, clientId: authRequest.clientId, resource: authRequest.resource }, "Grant approved");
   if (isDeviceFlow(authRequest)) {
     await completeDeviceFlow(res, authRequest, true);

@@ -3,6 +3,7 @@ import { prisma } from "../db.js";
 import { createLogger } from "../logger.js";
 import { safeFetchJson } from "./safe-fetch.js";
 import { assignTrustLevel, isDenylisted } from "./trust-policy.js";
+import { incrementCounter, recordDuration } from "../metrics.js";
 import type { OauthClient, Prisma } from "../generated/prisma/client.js";
 
 const log = createLogger("cimd");
@@ -157,13 +158,18 @@ export async function resolveClient(clientId: string): Promise<OauthClient | nul
 
   let headers: IncomingHttpHeaders = {};
   let raw: unknown;
+  const fetchStarted = Date.now();
   try {
     raw = await safeFetchJson(clientId, {
       onHeaders: (h) => {
         headers = h;
       },
     });
+    recordDuration("cimd_fetch_duration_ms", { outcome: "success" }, Date.now() - fetchStarted);
+    incrementCounter("cimd_fetch_total", { outcome: "success" });
   } catch (err) {
+    recordDuration("cimd_fetch_duration_ms", { outcome: "failure" }, Date.now() - fetchStarted);
+    incrementCounter("cimd_fetch_total", { outcome: "failure" });
     log.warn({ clientId, err: err instanceof Error ? err.message : err }, "CIMD fetch failed");
     return null;
   }

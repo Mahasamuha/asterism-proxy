@@ -19,6 +19,8 @@ import { consentRouter } from "./oauth/consent.js";
 import { grantsRouter } from "./oauth/grants.js";
 import { oidcRouter } from "./identity/oidc-router.js";
 import { localAccountsRouter } from "./identity/local-accounts-router.js";
+import { opsRouter } from "./ops.js";
+import { pruneExpiredRows } from "./cleanup.js";
 
 const log = createLogger("server");
 
@@ -61,6 +63,7 @@ app.get("/health", (_req: Request, res: Response) => {
   res.status(200).json({ status: "ok" });
 });
 
+app.use(opsRouter);
 app.use(jwksRouter);
 app.use(discoveryRouter);
 app.use(authorizeRouter);
@@ -101,6 +104,14 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   server.listen(config.port, () => {
     log.info({ port: config.port }, "Proxy listening");
   });
+
+  // Periodic cleanup of expired rows (§T20), matching Constellation's
+  // established 5-minute cadence for the same kind of TTL-store pruning.
+  pruneExpiredRows().catch((err) => log.warn({ err }, "pruneExpiredRows failed"));
+  const cleanupInterval = setInterval(() => {
+    pruneExpiredRows().catch((err) => log.warn({ err }, "pruneExpiredRows failed"));
+  }, 5 * 60 * 1000);
+  cleanupInterval.unref();
 
   async function shutdown(): Promise<void> {
     log.info("Shutting down");

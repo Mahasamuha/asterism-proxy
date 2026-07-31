@@ -1,6 +1,7 @@
 import bcrypt from "bcryptjs";
 import { prisma } from "../db.js";
 import { createLogger } from "../logger.js";
+import { incrementCounter } from "../metrics.js";
 
 const log = createLogger("local-accounts");
 
@@ -20,6 +21,7 @@ export async function checkBruteForce(ip: string): Promise<boolean> {
 }
 
 export async function recordFailure(ip: string): Promise<void> {
+  incrementCounter("local_login_failures_total");
   await prisma.loginFailure.create({ data: { ip } });
 }
 
