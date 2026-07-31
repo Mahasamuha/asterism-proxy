@@ -113,9 +113,15 @@ export async function getJwks(): Promise<{ keys: JWK[] }> {
 export async function signJwt(payload: JWTPayload, expiresIn: string | number): Promise<string> {
   const key = await getSigningKeyForSigning();
   const privateKey = await importJWK(key.privateJwk, ALG);
+  // jose's setExpirationTime() treats a bare number as an ABSOLUTE Unix
+  // timestamp, not a relative duration — a numeric `expiresIn` here would
+  // silently mint an already-expired token (e.g. 900 -> Jan 1 1970 00:15
+  // UTC). Every caller of this function means "N seconds from now," so
+  // normalize a number to jose's own relative-duration string form first.
+  const jwtExpiresIn = typeof expiresIn === "number" ? `${expiresIn}s` : expiresIn;
   return new SignJWT(payload)
     .setProtectedHeader({ alg: ALG, kid: key.kid })
     .setIssuedAt()
-    .setExpirationTime(expiresIn)
+    .setExpirationTime(jwtExpiresIn)
     .sign(privateKey);
 }
