@@ -5,6 +5,7 @@ Verifies JWT access tokens issued by [asterism-proxy](https://github.com/Mahasam
 - Checks the signature against the proxy's JWKS. Keys are cached in memory, honoring `Cache-Control: max-age`, and refreshed on an unknown `kid`. If a refresh fails the cached keys are still used, so a proxy outage doesn't break tokens that were already issued.
 - Requires an exact `iss`, and checks `exp` and `nbf`.
 - `aud` must be a **single string** equal to this server's identifier. Array audiences are rejected outright, so a token minted for one MCP server can't be replayed against another.
+- JWKS and discovery requests time out after 10 seconds. A signing key the issuer publishes but that can't be imported (for example one without `alg`) fails as `invalid_signature`.
 - Failures throw a typed `TokenValidationError` with a `reason`.
 - Optional Express helpers: bearer-auth middleware that emits RFC 9728 `WWW-Authenticate` challenges, and a protected-resource metadata handler.
 
@@ -25,6 +26,7 @@ const verifier = createVerifier({
   issuer: "https://auth.example.com",        // the proxy's ISSUER_URL
   audience: "https://files.example.com/mcp", // this server's registered resource identifier
   // jwksUri is optional; it defaults to discovery from the issuer
+  // (RFC 8414: /.well-known/oauth-authorization-server, with the issuer's path appended if it has one)
 });
 
 try {

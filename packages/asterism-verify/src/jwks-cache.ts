@@ -28,10 +28,20 @@ function parseMaxAgeMs(cacheControl: string | null): number {
   return Math.max(Number(match[1]) * 1000, MIN_REFRESH_INTERVAL_MS);
 }
 
+// Bounds every outbound request so a hung issuer can't hang verification.
+const FETCH_TIMEOUT_MS = 10_000;
+
+/** RFC 8414 §3.1: the well-known segment goes between host and path, so
+ * `https://h/tenant` is discovered at `https://h/.well-known/oauth-authorization-server/tenant`.
+ * A bare-origin issuer (what the proxy uses) gets the plain path. */
+function discoveryUrl(issuer: string): string {
+  const { origin, pathname } = new URL(issuer);
+  return `${origin}/.well-known/oauth-authorization-server${pathname.replace(/\/+$/, "")}`;
+}
+
 async function discoverJwksUri(issuer: string): Promise<string> {
-  const base = issuer.replace(/\/$/, "");
-  const url = `${base}/.well-known/oauth-authorization-server`;
-  const res = await fetch(url);
+  const url = discoveryUrl(issuer);
+  const res = await fetch(url, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
   if (!res.ok) {
     throw new Error(`JWKS discovery failed at ${url}: HTTP ${res.status}`);
   }
@@ -53,6 +63,9 @@ export class JwksCache {
   private jwksUri: string | undefined;
   private cache: CachedKeySet | null = null;
   private lastRefreshAttempt = 0;
+  // The fetch currently running, if any. Concurrent callers join it instead of
+  // being rate-limited into a spurious "unknown kid" on a cold cache.
+  private inflight: Promise<void> | null = null;
 
   constructor(issuer: string, jwksUri?: string) {
     this.issuer = issuer;
@@ -67,7 +80,7 @@ export class JwksCache {
 
   private async fetchKeys(): Promise<FetchedKeySet> {
     const uri = await this.resolveJwksUri();
-    const res = await fetch(uri);
+    const res = await fetch(uri, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
     if (!res.ok) {
       throw new Error(`JWKS fetch failed at ${uri}: HTTP ${res.status}`);
     }
@@ -89,21 +102,30 @@ export class JwksCache {
     const cached = this.cache?.keys.find((k) => k.kid === kid);
     if (cached && fresh) return cached;
 
-    if (now - this.lastRefreshAttempt < MIN_REFRESH_INTERVAL_MS) {
-      // Rate-limited: don't hammer the AS for a kid we already failed (or
-      // haven't yet tried) to find recently. Serve whatever we have.
-      return cached;
+    if (!this.inflight) {
+      if (now - this.lastRefreshAttempt < MIN_REFRESH_INTERVAL_MS) {
+        // Rate-limited: don't hammer the AS for a kid we already failed (or
+        // haven't yet tried) to find recently. Serve whatever we have.
+        return cached;
+      }
+      this.lastRefreshAttempt = now;
+      this.inflight = this.refresh(now).finally(() => {
+        this.inflight = null;
+      });
     }
-    this.lastRefreshAttempt = now;
 
     try {
-      const { keys, ttlMs } = await this.fetchKeys();
-      this.cache = { keys, fetchedAt: now, expiresAt: now + ttlMs };
+      await this.inflight;
     } catch (err) {
       if (!this.cache) throw err; // nothing to serve stale — a real failure
       // Stale-on-failure: keep the existing cache, don't propagate the error.
     }
 
     return this.cache?.keys.find((k) => k.kid === kid);
+  }
+
+  private async refresh(now: number): Promise<void> {
+    const { keys, ttlMs } = await this.fetchKeys();
+    this.cache = { keys, fetchedAt: now, expiresAt: now + ttlMs };
   }
 }

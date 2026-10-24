@@ -65,7 +65,14 @@ export function createVerifier(config: VerifierConfig): Verifier {
         throw new TokenValidationError("unknown_kid", `No key found for kid "${kid}"`);
       }
 
-      const key = await importJWK(jwk, jwk.alg);
+      let key: Awaited<ReturnType<typeof importJWK>>;
+      try {
+        key = await importJWK(jwk, jwk.alg);
+      } catch {
+        // The issuer published a key we can't use (no alg, bad parameters).
+        // Nothing can be verified against it, so it is a signature failure.
+        throw new TokenValidationError("invalid_signature", `Signing key "${kid}" could not be imported`);
+      }
 
       let payload: JWTPayload;
       try {

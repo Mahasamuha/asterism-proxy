@@ -1,6 +1,6 @@
 {
   "name": "@mahasamuha/asterism-verify",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Verify asterism-proxy JWT access tokens in an MCP resource server: JWKS caching, single-audience checks, and RFC 9728 Express helpers",
   "license": "MIT",
   "type": "module",
@@ -16,7 +16,9 @@
     "dist",
     "src",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "!src/**/*.test.ts",
+    "!src/**/*.test-d.ts"
   ],
   "repository": {
     "type": "git",
@@ -40,6 +42,7 @@
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",
+    "test": "vitest run --root ../.. packages/asterism-verify/",
     "prepublishOnly": "pnpm run build"
   },
   "dependencies": {

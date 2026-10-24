@@ -34,7 +34,8 @@ export function createBearerAuthMiddleware(config: VerifierConfig): RequestHandl
 
   return (req: Request, res: Response, next: NextFunction): void => {
     const authHeader = req.headers["authorization"];
-    if (!authHeader?.startsWith("Bearer ")) {
+    // The auth scheme is case-insensitive (RFC 7235 §2.1).
+    if (!authHeader || !/^bearer /i.test(authHeader)) {
       res.set("WWW-Authenticate", challenge);
       res.status(401).json({ error: "unauthorized", error_description: "Bearer token required" });
       return;
