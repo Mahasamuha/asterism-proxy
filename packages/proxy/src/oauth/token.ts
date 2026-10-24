@@ -117,21 +117,9 @@ async function handleAuthorizationCodeGrant(body: Record<string, string>, res: R
     return;
   }
 
-  // Atomically claim the code right before minting — closes the TOCTOU
-  // window between the findUnique above and this write. If a concurrent
-  // request already consumed it in between, count is 0 here: treat exactly
-  // like the ordinary replay case above, including revoking descendant
-  // refresh tokens (idempotent if the other request already did so).
-  const claim = await prisma.authCode.updateMany({
-    where: { codeHash, consumedAt: null },
-    data: { consumedAt: new Date() },
-  });
-  if (claim.count === 0) {
-    await revokeDescendantRefreshTokens(entry.grantId);
-    res.status(400).json({ error: "invalid_grant", error_description: "Authorization code already used" });
-    return;
-  }
-
+  // Mint before the transaction: signing touches the DB on its own
+  // connection, and a signing failure should happen before anything is
+  // consumed. The JWT is discarded if the claim below is lost.
   const { accessToken, expiresIn } = await mintAccessToken({
     userId: entry.userId,
     clientId: entry.clientId,
@@ -139,18 +127,43 @@ async function handleAuthorizationCodeGrant(body: Record<string, string>, res: R
     scopes: accessTokenScopes(entry.scopes),
   });
 
-  // offline_access (T15) is what controls refresh token issuance — a
-  // protocol-level scope, not something any resource server declares.
-  let refreshToken: string | undefined;
-  if (entry.scopes.includes("offline_access")) {
-    refreshToken = await issueRefreshToken({
-      userId: entry.userId,
-      clientId: entry.clientId,
-      resource: entry.resource,
-      scopes: entry.scopes,
-      grantId: entry.grantId,
+  // Atomically claim the code and issue the refresh token in ONE transaction
+  // (§T14) — a failure after the claim rolls the claim back, so the client
+  // can retry instead of finding its code burned with no tokens. The
+  // conditional updateMany is still what makes concurrent replays lose
+  // (closes the TOCTOU window since the findUnique above). The lost-claim
+  // case returns a sentinel rather than revoking in here: the revocation
+  // must commit independently of this transaction, never be rolled back with it.
+  const issued = await prisma.$transaction(async (tx) => {
+    const claim = await tx.authCode.updateMany({
+      where: { codeHash, consumedAt: null },
+      data: { consumedAt: new Date() },
     });
+    if (claim.count === 0) return null;
+
+    // offline_access (T15) is what controls refresh token issuance — a
+    // protocol-level scope, not something any resource server declares.
+    if (!entry.scopes.includes("offline_access")) return { refreshToken: undefined };
+    const refreshToken = await issueRefreshToken(
+      {
+        userId: entry.userId,
+        clientId: entry.clientId,
+        resource: entry.resource,
+        scopes: entry.scopes,
+        grantId: entry.grantId,
+      },
+      tx
+    );
+    return { refreshToken };
+  });
+  if (!issued) {
+    // Treated exactly like the ordinary replay case above, including revoking
+    // descendant refresh tokens (idempotent if the other request already did so).
+    await revokeDescendantRefreshTokens(entry.grantId);
+    res.status(400).json({ error: "invalid_grant", error_description: "Authorization code already used" });
+    return;
   }
+  const { refreshToken } = issued;
 
   incrementCounter("tokens_issued_total", { client_id: entry.clientId, resource: entry.resource });
   log.info({ userId: entry.userId, clientId: entry.clientId, resource: entry.resource }, "Access token issued (authorization_code)");
@@ -180,6 +193,32 @@ async function handleRefreshTokenGrant(body: Record<string, string>, res: Respon
     return;
   }
 
+  // Client binding and authentication come before the reuse check: only the
+  // client the token was issued to may present it in a way that revokes the
+  // chain, so a different client holding a leaked token can't use it to
+  // knock the real client's grant offline. This doesn't weaken theft
+  // detection for the legitimate client — a thief replaying a rotated token
+  // as that same client_id (and, if confidential, with its credentials) still
+  // reaches the reuse branch below; a thief without them could never have
+  // redeemed the token in the first place.
+  if (entry.clientId !== client_id) {
+    res.status(400).json({ error: "invalid_grant", error_description: "client_id mismatch" });
+    return;
+  }
+
+  // Confidential clients (T16) must authenticate before anything is claimed
+  // or revoked, for the same reason as the authorization_code grant above.
+  const client = await resolveClient(client_id);
+  if (!client) {
+    res.status(400).json({ error: "invalid_client", error_description: "Client could not be resolved" });
+    return;
+  }
+  const auth = await authenticateConfidentialClient(client, body);
+  if (!auth.ok) {
+    res.status(400).json({ error: auth.error, error_description: auth.errorDescription });
+    return;
+  }
+
   if (entry.rotatedTo !== null) {
     // Reuse of an already-rotated token is a strong signal of theft — revoke
     // the entire grant's refresh chain, not just this one token.
@@ -198,28 +237,10 @@ async function handleRefreshTokenGrant(body: Record<string, string>, res: Respon
     return;
   }
 
-  if (entry.clientId !== client_id) {
-    res.status(400).json({ error: "invalid_grant", error_description: "client_id mismatch" });
-    return;
-  }
-
   // A refresh token can never move to a different resource — an explicit
   // differing value is rejected outright rather than silently ignored.
   if (resource !== undefined && resource !== entry.resource) {
     res.status(400).json({ error: "invalid_target", error_description: "resource does not match the refresh token" });
-    return;
-  }
-
-  // Confidential clients (T16) must authenticate before rotation claims the
-  // token, for the same reason as the authorization_code grant above.
-  const client = await resolveClient(client_id);
-  if (!client) {
-    res.status(400).json({ error: "invalid_client", error_description: "Client could not be resolved" });
-    return;
-  }
-  const auth = await authenticateConfidentialClient(client, body);
-  if (!auth.ok) {
-    res.status(400).json({ error: auth.error, error_description: auth.errorDescription });
     return;
   }
 
@@ -229,39 +250,49 @@ async function handleRefreshTokenGrant(body: Record<string, string>, res: Respon
     return;
   }
 
-  // Atomically claim this token for rotation — same TOCTOU close as the
-  // authorization_code grant above. A concurrent request that loses the race
-  // is treated exactly like an ordinary reuse, including chain revocation.
-  const newToken = randomBytes(32).toString("hex");
-  const newTokenHash = createHash("sha256").update(newToken).digest("hex");
-  const claim = await prisma.refreshToken.updateMany({
-    where: { tokenHash, rotatedTo: null, revokedAt: null },
-    data: { rotatedTo: newTokenHash },
-  });
-  if (claim.count === 0) {
-    await revokeDescendantRefreshTokens(entry.grantId);
-    res.status(400).json({ error: "invalid_grant", error_description: "Refresh token already used" });
-    return;
-  }
-
-  await prisma.refreshToken.create({
-    data: {
-      tokenHash: newTokenHash,
-      userId: entry.userId,
-      clientId: entry.clientId,
-      resource: entry.resource,
-      scopes: entry.scopes,
-      grantId: entry.grantId,
-      expiresAt: new Date(Date.now() + REFRESH_TOKEN_TTL_MS),
-    },
-  });
-
+  // Mint first so a signing failure happens before anything is claimed; the
+  // JWT is discarded if the claim below is lost.
   const { accessToken, expiresIn } = await mintAccessToken({
     userId: entry.userId,
     clientId: entry.clientId,
     resource: entry.resource,
     scopes: accessTokenScopes(entry.scopes),
   });
+
+  // Atomically claim this token for rotation and create its successor in one
+  // transaction — otherwise a failed create would leave the old token marked
+  // rotated with no successor, and the client's next retry would look like
+  // theft and revoke the whole chain. Same TOCTOU close as the
+  // authorization_code grant above. A concurrent request that loses the race
+  // is treated exactly like an ordinary reuse, including chain revocation,
+  // which runs after (outside) the transaction so it isn't rolled back.
+  const newToken = randomBytes(32).toString("hex");
+  const newTokenHash = createHash("sha256").update(newToken).digest("hex");
+  const rotated = await prisma.$transaction(async (tx) => {
+    const claim = await tx.refreshToken.updateMany({
+      where: { tokenHash, rotatedTo: null, revokedAt: null },
+      data: { rotatedTo: newTokenHash },
+    });
+    if (claim.count === 0) return false;
+
+    await tx.refreshToken.create({
+      data: {
+        tokenHash: newTokenHash,
+        userId: entry.userId,
+        clientId: entry.clientId,
+        resource: entry.resource,
+        scopes: entry.scopes,
+        grantId: entry.grantId,
+        expiresAt: new Date(Date.now() + REFRESH_TOKEN_TTL_MS),
+      },
+    });
+    return true;
+  });
+  if (!rotated) {
+    await revokeDescendantRefreshTokens(entry.grantId);
+    res.status(400).json({ error: "invalid_grant", error_description: "Refresh token already used" });
+    return;
+  }
 
   incrementCounter("tokens_issued_total", { client_id: entry.clientId, resource: entry.resource });
   log.info({ userId: entry.userId, clientId: entry.clientId, resource: entry.resource }, "Access token issued (refresh_token)");
