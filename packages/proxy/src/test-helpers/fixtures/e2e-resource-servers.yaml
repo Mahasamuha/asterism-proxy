@@ -1,0 +1,10 @@
+# Fixture registry for e2e.int.test.ts (the repo's real registry is empty).
+resourceServers:
+  - identifier: https://mcp.example.test/mcp
+    name: E2E MCP
+    scopes:
+      - name: files:read
+        description: Read files
+      - name: admin
+        description: Administer
+        shortLived: true

@@ -448,7 +448,7 @@ Do not build these. If a task appears to require one, stop and ask.
 - **Dynamic registration of resource servers.** They are static config.
 - **Software statements or client attestation.** A plausible future direction; not now.
 - **An admin UI beyond `/grants`.**
-- **A test suite**, unless explicitly requested. Constellation has vitest; match it if asked.
+- ~~**A test suite**, unless explicitly requested.~~ **Requested and added 2026-10-24.** vitest, matching Constellation, in two tiers. Unit/route tests (`*.test.ts`, Prisma mocked) and Postgres integration tests (`*.int.test.ts`, against a `*_test` database with real migrations) cover the concurrency, rollback and lock guarantees. Two end-to-end flows verify tokens with `@mahasamuha/asterism-verify`. CI and an npm release check go with it. See `docs/testing.md` in the repo. New tests go next to the code they cover, and the suite must stay green.
 
 ---
 
