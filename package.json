@@ -8,13 +8,17 @@
     "build": "pnpm -r --if-present run build",
     "dev": "pnpm --filter @mcp-auth/proxy dev",
     "lint": "eslint 'packages/*/src/**/*.ts'",
-    "typecheck": "pnpm -r --if-present run typecheck"
+    "typecheck": "pnpm -r --if-present run typecheck && tsc -p tsconfig.test.json",
+    "test": "vitest run",
+    "test:unit": "vitest run --project unit",
+    "test:integration": "vitest run --project integration"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "eslint": "^10.3.0",
     "typescript": "^6.0.0",
-    "typescript-eslint": "^8.59.3"
+    "typescript-eslint": "^8.59.3",
+    "vitest": "^4.1.7"
   },
   "pnpm": {
     "onlyBuiltDependencies": [

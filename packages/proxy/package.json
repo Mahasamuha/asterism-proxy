@@ -12,6 +12,7 @@
     "local-user": "tsx --env-file-if-exists=../../.env src/cli/local-user.ts",
     "start": "node dist/server.js",
     "typecheck": "tsc --noEmit",
+    "test": "vitest run --root ../.. packages/proxy/",
     "db:generate": "prisma generate",
     "db:migrate": "prisma migrate dev"
   },
