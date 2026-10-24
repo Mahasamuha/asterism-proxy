@@ -7,10 +7,29 @@ const boolFromEnv = (defaultValue: boolean) =>
     .optional()
     .transform((v) => (v === undefined ? defaultValue : v === "true"));
 
+/** The issuer is concatenated with well-known and endpoint paths (RFC 8414
+ * §3.1, RFC 9728 §3.1) and must match the `issuer` claim exactly, so it has to
+ * be a bare origin. `new URL(x).origin === x` rejects paths, queries, fragments,
+ * trailing slashes, uppercase hosts and explicit default ports in one check. */
+const issuerUrl = z.url("ISSUER_URL must be a valid URL").superRefine((value, ctx) => {
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return; // z.url() already reported it
+  }
+  if ((parsed.protocol !== "https:" && parsed.protocol !== "http:") || parsed.origin !== value) {
+    ctx.addIssue({
+      code: "custom",
+      message: `ISSUER_URL must be a bare http(s) origin with no path, query, fragment or trailing slash (e.g. ${parsed.origin})`,
+    });
+  }
+});
+
 const envSchema = z
   .object({
     DATABASE_URL: z.string().min(1, "DATABASE_URL is required"),
-    ISSUER_URL: z.url("ISSUER_URL must be a valid URL"),
+    ISSUER_URL: issuerUrl,
     PORT: z.coerce.number().int().positive().default(3000),
     LOG_LEVEL: z.string().default("warn"),
 
