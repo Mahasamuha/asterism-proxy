@@ -5,7 +5,7 @@ import { startRouteServer, type RouteServer } from "../test-helpers/servers.js";
 const h = vi.hoisted(() => ({ cfg: { allowInsecureClientMetadata: true, logLevel: "silent" } }));
 vi.mock("../config.js", () => ({ config: h.cfg }));
 
-import { getSafeFetchRejectionCounts, isBlockedAddress, safeFetchJson, SafeFetchError } from "./safe-fetch.js";
+import { getSafeFetchRejectionCounts, isBlockedAddress, MAX_CONCURRENT_FETCHES, safeFetchJson, SafeFetchError } from "./safe-fetch.js";
 
 type Record_ = { address: string; family: 4 | 6 };
 const lookup = vi.spyOn(dns.promises, "lookup");
@@ -55,10 +55,10 @@ describe("isBlockedAddress", () => {
     "::", "::1", "::7f00:1", "::a00:1", "::ffff:ffff", "::ffff:127.0.0.1", "::ffff:10.0.0.1", "::ffff:8.8.8.8",
     "0:0:0:0:0:ffff:7f00:1", "64:ff9b::1", "64:ff9b::a00:1", "64:ff9b:1::1", "100::1", "2001::1", "2001:1ff::1",
     "2001:db8::1", "2001:db8:ffff::1", "2002::1", "2002:7f00:1::", "3fff::1", "3fff:fff::1", "5f00::1",
-    "fc00::1", "fd12:3456::1", "fdff:ffff::1", "fe80::1", "febf::1", "ff00::1", "ff02::1",
+    "fc00::1", "fec0::1", "feff:ffff::1", "fd12:3456::1", "fdff:ffff::1", "fe80::1", "febf::1", "ff00::1", "ff02::1",
   ])("blocks IPv6 %s", (a) => expect(isBlockedAddress(a, 6)).toBe(true));
 
-  it.each(["2606:4700:4700::1111", "2606:4700::1111", "2a00:1450:4001::1", "2001:200::1", "2001:4860:4860::8888", "fb00::1", "fec0::1", "2003::1", "4000::1"])(
+  it.each(["2606:4700:4700::1111", "2606:4700::1111", "2a00:1450:4001::1", "2001:200::1", "2001:4860:4860::8888", "fb00::1", "2003::1", "4000::1"])(
     "allows IPv6 %s",
     (a) => expect(isBlockedAddress(a, 6)).toBe(false),
   );
@@ -394,7 +394,47 @@ describe("safeFetchJson", () => {
     });
   });
 
+  describe("DNS timeout and concurrency cap", () => {
+    const hang = () => lookup.mockImplementation((() => new Promise(() => {})) as never);
+
+    it("times out a lookup that never answers, rather than waiting on it", async () => {
+      hang();
+      const started = Date.now();
+      expect(await reasonOf(safeFetchJson("https://slow-dns.test/x", { timeoutMs: 50 }))).toBe("timeout");
+      expect(Date.now() - started).toBeLessThan(1000);
+    });
+
+    it("fails fast with busy beyond the in-flight cap, and frees slots afterwards", async () => {
+      hang();
+      const inFlight = Array.from({ length: MAX_CONCURRENT_FETCHES }, (_, i) =>
+        reasonOf(safeFetchJson(`https://busy${i}-${n++}.test/x`, { timeoutMs: 150 })),
+      );
+      const before = getSafeFetchRejectionCounts()["busy"] ?? 0;
+      const started = Date.now();
+      expect(await reasonOf(safeFetchJson("https://overflow.test/x", { timeoutMs: 150 }))).toBe("busy");
+      expect(Date.now() - started).toBeLessThan(100);
+      expect(getSafeFetchRejectionCounts()["busy"]).toBe(before + 1);
+      expect(await Promise.all(inFlight)).toEqual(Array(MAX_CONCURRENT_FETCHES).fill("timeout"));
+      // every slot was released (the timeouts above), so a normal fetch works again
+      srv.routes["/ok"] = { body: { ok: true } };
+      stubDns({ [hostname]: LOOP });
+      expect(await safeFetchJson(base("/ok"))).toEqual({ ok: true });
+    });
+  });
+
   describe("per-host rate limit", () => {
+    it("canonicalises the key: case and a trailing dot share one budget", async () => {
+      stubDns({ [hostname]: LOOP, [`${hostname}.`]: LOOP });
+      srv.routes["/x"] = { body: { ok: true } };
+      const port = new URL(srv.url).port;
+      for (let i = 0; i < 10; i++) {
+        const u = i % 2 ? `http://${hostname}.:${port}/x` : `http://${hostname}:${port}/x`;
+        await safeFetchJson(u);
+      }
+      expect(await reasonOf(safeFetchJson(`http://${hostname}.:${port}/x`))).toBe("rate_limited");
+      expect(await reasonOf(safeFetchJson(`http://${hostname.toUpperCase()}:${port}/x`))).toBe("rate_limited");
+    });
+
     it("allows 10 requests per minute per host and rejects the 11th, then resets", async () => {
       vi.useFakeTimers({ toFake: ["Date"] });
       vi.setSystemTime(new Date("2026-03-01T00:00:00Z"));

@@ -1,7 +1,7 @@
 import type { IncomingHttpHeaders } from "node:http";
 import { prisma } from "../db.js";
 import { createLogger } from "../logger.js";
-import { safeFetchJson } from "./safe-fetch.js";
+import { safeFetchJson, SafeFetchError } from "./safe-fetch.js";
 import { assignTrustLevel, isDenylisted } from "./trust-policy.js";
 import { incrementCounter, recordDuration } from "../metrics.js";
 import { Prisma } from "../generated/prisma/client.js";
@@ -18,6 +18,10 @@ const MAX_DOCUMENT_BYTES = 5 * 1024;
 // A redirect response is rejected outright: the document must be served from
 // the client_id URL itself, not from wherever that URL points.
 const CIMD_MAX_REDIRECTS = 0;
+// A fetch refused by the per-host rate limit or the global concurrency cap may
+// be served from an existing row this recent (an attacker can otherwise exhaust
+// the budget for a no-store client's host and deny it to real users).
+const STALE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const CLIENT_ID_URL_MAX_LENGTH = 2000;
 const CLIENT_NAME_MAX_LENGTH = 200;
 
@@ -307,6 +311,17 @@ export async function resolveClient(clientId: string): Promise<OauthClient | nul
 
   if (!isCanonicalClientIdUrl(clientId)) return null;
 
+  // Singleflight: concurrent resolutions of one client_id share a single fetch.
+  const existing = inflightResolutions.get(clientId);
+  if (existing) return existing;
+  const resolution = fetchAndStore(clientId, cached).finally(() => inflightResolutions.delete(clientId));
+  inflightResolutions.set(clientId, resolution);
+  return resolution;
+}
+
+const inflightResolutions = new Map<string, Promise<OauthClient | null>>();
+
+async function fetchAndStore(clientId: string, cached: OauthClient | null): Promise<OauthClient | null> {
   let headers: IncomingHttpHeaders = {};
   let raw: unknown;
   const fetchStarted = Date.now();
@@ -324,6 +339,16 @@ export async function resolveClient(clientId: string): Promise<OauthClient | nul
     recordDuration("cimd_fetch_duration_ms", { outcome: "failure" }, Date.now() - fetchStarted);
     incrementCounter("cimd_fetch_total", { outcome: "failure" });
     log.warn({ clientId, err: err instanceof Error ? err.message : err }, "CIMD fetch failed");
+    if (
+      err instanceof SafeFetchError &&
+      (err.reason === "rate_limited" || err.reason === "busy") &&
+      cached &&
+      Date.now() - cached.fetchedAt.getTime() <= STALE_MAX_AGE_MS
+    ) {
+      log.warn({ clientId, reason: err.reason, fetchedAt: cached.fetchedAt }, "Serving stale CIMD client row because the refetch was refused");
+      incrementCounter("cimd_stale_served_total", { reason: err.reason });
+      return { ...cached, trustLevel: assignTrustLevel(clientId, cached.source) };
+    }
     return null;
   }
 

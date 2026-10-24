@@ -10,7 +10,7 @@ vi.mock("./db.js", () => db);
 vi.mock("./identity/oidc.js", () => oidc);
 vi.mock("./clients/safe-fetch.js", () => sf);
 
-import { opsRouter } from "./ops.js";
+import { opsRouter, resetReadyCache } from "./ops.js";
 import { startRouterApp, type RouterApp } from "./test-helpers/identity-app.js";
 
 let app: RouterApp;
@@ -19,6 +19,7 @@ beforeAll(async () => {
 });
 afterAll(() => app.close());
 beforeEach(() => {
+  resetReadyCache();
   vi.resetAllMocks();
   cfg.metricsToken = undefined;
   cfg.enableOidc = false;
@@ -81,9 +82,19 @@ describe("GET /ready", () => {
   it("P1 with OIDC enabled it also needs discovery to work", async () => {
     cfg.enableOidc = true;
     expect(await (await fetch(`${app.baseUrl}/ready`)).json()).toEqual({ status: "ready", checks: { database: true, oidc: true } });
+    resetReadyCache();
     oidc.getOidcConfig.mockRejectedValue(new Error("idp down"));
     const res = await fetch(`${app.baseUrl}/ready`);
     expect(res.status).toBe(503);
     expect(await res.json()).toEqual({ status: "not_ready", checks: { database: true, oidc: false } });
+  });
+
+  it("P1 caches the result for a few seconds so callers cannot drive a DB query per request", async () => {
+    await Promise.all([1, 2, 3].map(() => fetch(`${app.baseUrl}/ready`)));
+    await fetch(`${app.baseUrl}/ready`);
+    expect(db.prisma.$queryRaw).toHaveBeenCalledTimes(1);
+    resetReadyCache();
+    await fetch(`${app.baseUrl}/ready`);
+    expect(db.prisma.$queryRaw).toHaveBeenCalledTimes(2);
   });
 });

@@ -163,3 +163,24 @@ describe("loading", () => {
     expect(await t.isDenylisted("x")).toBe(true);
   });
 });
+
+describe("IDN domain entries", () => {
+  const IDN = `
+allowlist:
+  domains: ["  Bücher.Example "]
+denylist:
+  domains: ["BÜCHER-bad.example"]
+`;
+  it("matches a unicode allowlist entry against the punycode hostname (and subdomains)", async () => {
+    const t = await load(IDN);
+    expect(t.isAllowlisted("https://xn--bcher-kva.example/c.json")).toBe(true);
+    expect(t.isAllowlisted("https://app.xn--bcher-kva.example/c.json")).toBe(true);
+    expect(t.isAllowlisted("https://other.example/c.json")).toBe(false);
+  });
+
+  it("matches a unicode denylist entry against the punycode hostname", async () => {
+    const t = await load(IDN);
+    expect(await t.isDenylisted("https://xn--bcher-bad-q9a.example/c.json")).toBe(true);
+    expect(h.findFirst).not.toHaveBeenCalled();
+  });
+});

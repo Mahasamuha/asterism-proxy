@@ -13,7 +13,15 @@ export const opsRouter: Router = Router();
  * upstream provider. Distinct from /health (T1, liveness only): a process
  * that's up but can't reach its database should be taken out of rotation,
  * not just restarted. */
-opsRouter.get("/ready", async (_req: Request, res: Response) => {
+const READY_CACHE_MS = 5000;
+let readyCache: { at: number; result: Promise<{ ready: boolean; checks: Record<string, boolean> }> } | undefined;
+
+/** Test hook: forget the cached readiness result. */
+export function resetReadyCache(): void {
+  readyCache = undefined;
+}
+
+async function computeReadiness(): Promise<{ ready: boolean; checks: Record<string, boolean> }> {
   const checks: Record<string, boolean> = {};
 
   try {
@@ -32,7 +40,18 @@ opsRouter.get("/ready", async (_req: Request, res: Response) => {
     }
   }
 
-  const ready = Object.values(checks).every(Boolean);
+  return { ready: Object.values(checks).every(Boolean), checks };
+}
+
+// /ready is unauthenticated and does a DB query plus OIDC discovery, so the
+// result (the in-flight promise, which also coalesces concurrent callers) is
+// cached for a few seconds instead of being recomputed per request.
+opsRouter.get("/ready", async (_req: Request, res: Response) => {
+  const now = Date.now();
+  if (!readyCache || now - readyCache.at >= READY_CACHE_MS) {
+    readyCache = { at: now, result: computeReadiness() };
+  }
+  const { ready, checks } = await readyCache.result;
   res.status(ready ? 200 : 503).json({ status: ready ? "ready" : "not_ready", checks });
 });
 

@@ -1,6 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const h = vi.hoisted(() => ({
+  SafeFetchError: class SafeFetchError extends Error {
+    constructor(readonly reason: string) {
+      super(reason);
+    }
+  },
   findUnique: vi.fn(),
   update: vi.fn(),
   upsert: vi.fn(),
@@ -11,7 +16,7 @@ const h = vi.hoisted(() => ({
 
 vi.mock("../db.js", () => ({ prisma: { oauthClient: { findUnique: h.findUnique, update: h.update, upsert: h.upsert } } }));
 vi.mock("../config.js", () => ({ config: { logLevel: "silent" } }));
-vi.mock("./safe-fetch.js", () => ({ safeFetchJson: h.safeFetchJson }));
+vi.mock("./safe-fetch.js", () => ({ safeFetchJson: h.safeFetchJson, SafeFetchError: h.SafeFetchError }));
 vi.mock("./trust-policy.js", () => ({ isDenylisted: h.isDenylisted, assignTrustLevel: h.assignTrustLevel }));
 
 import { Prisma } from "../generated/prisma/client.js";
@@ -380,6 +385,75 @@ describe("resolveClient", () => {
     h.safeFetchJson.mockResolvedValueOnce({ ...base, redirect_uris: ["https://app.example.com/cb", "javascript:alert(1)", "vbscript:x", "blob:null/x"] });
     await resolveClient(ID);
     expect(h.upsert.mock.calls[0]![0].create.metadata.redirect_uris).toEqual(["https://app.example.com/cb"]);
+  });
+
+  describe("singleflight", () => {
+    it("shares one fetch between concurrent resolutions of the same client_id", async () => {
+      let release!: () => void;
+      const gate = new Promise<void>((r) => (release = r));
+      h.safeFetchJson.mockImplementationOnce(async () => {
+        await gate;
+        return { ...base };
+      });
+      const all = [resolveClient(ID), resolveClient(ID), resolveClient(ID)];
+      await vi.waitFor(() => expect(h.safeFetchJson).toHaveBeenCalled());
+      release();
+      const out = await Promise.all(all);
+      expect(h.safeFetchJson).toHaveBeenCalledOnce();
+      expect(h.upsert).toHaveBeenCalledOnce();
+      expect(out.every((o) => o?.clientId === ID)).toBe(true);
+    });
+
+    it("does not share across different ids, and fetches again once settled", async () => {
+      fetchOk();
+      await resolveClient(ID);
+      fetchOk();
+      await resolveClient(ID);
+      expect(h.safeFetchJson).toHaveBeenCalledTimes(2);
+    });
+
+    it("clears the entry after a failure", async () => {
+      h.safeFetchJson.mockRejectedValueOnce(new Error("boom"));
+      expect(await resolveClient(ID)).toBeNull();
+      fetchOk();
+      expect(await resolveClient(ID)).not.toBeNull();
+    });
+  });
+
+  describe("stale fallback when the per-host limit or busy cap blocks a refetch", () => {
+    const stale = (fetchedAgoMs: number) => row({ expiresAt: NOW, fetchedAt: new Date(NOW.getTime() - fetchedAgoMs), trustLevel: "domain_verified" });
+
+    it.each(["rate_limited", "busy"])("serves the expired row fetched within 24 h on %s", async (reason) => {
+      h.findUnique.mockResolvedValue(stale(60 * 60 * 1000));
+      h.safeFetchJson.mockRejectedValueOnce(new h.SafeFetchError(reason));
+      const out = await resolveClient(ID);
+      expect(out?.clientId).toBe(ID);
+      expect(h.upsert).not.toHaveBeenCalled();
+    });
+
+    it("fails when the row is older than 24 h", async () => {
+      h.findUnique.mockResolvedValue(stale(DAY + 1000));
+      h.safeFetchJson.mockRejectedValueOnce(new h.SafeFetchError("rate_limited"));
+      expect(await resolveClient(ID)).toBeNull();
+    });
+
+    it("fails when there is no row", async () => {
+      h.safeFetchJson.mockRejectedValueOnce(new h.SafeFetchError("rate_limited"));
+      expect(await resolveClient(ID)).toBeNull();
+    });
+
+    it("does not serve stale for other failures", async () => {
+      h.findUnique.mockResolvedValue(stale(1000));
+      h.safeFetchJson.mockRejectedValueOnce(new h.SafeFetchError("http_error"));
+      expect(await resolveClient(ID)).toBeNull();
+    });
+
+    it("still refetches a no-store client every time while the limit allows", async () => {
+      h.findUnique.mockResolvedValue(stale(1000));
+      fetchOk("no-store");
+      await resolveClient(ID);
+      expect(h.safeFetchJson).toHaveBeenCalledOnce();
+    });
   });
 
   describe("cleanup race (P2025 on the cache-hit update)", () => {

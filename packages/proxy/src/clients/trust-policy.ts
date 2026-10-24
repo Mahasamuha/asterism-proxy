@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { domainToASCII } from "node:url";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
 import { config } from "../config.js";
@@ -55,7 +56,14 @@ function loadPolicy(filePath: string): Policy {
 
   // URL hostnames are always lowercase, so lowercase the configured domains too;
   // otherwise "Example.com" would silently never match anything.
-  const domains = (list: string[]) => list.map((d) => d.trim().toLowerCase());
+  // domainToASCII also converts unicode (IDN) entries to the punycode form that
+  // URL hostnames use; it returns "" for an invalid domain, which is dropped.
+  const domains = (list: string[]) =>
+    list.flatMap((d) => {
+      const ascii = domainToASCII(d.trim().toLowerCase());
+      if (ascii === "") log.warn({ domain: d }, "Ignoring invalid domain in trust policy");
+      return ascii === "" ? [] : [ascii];
+    });
   return {
     allowlist: { clientIds: new Set(result.data.allowlist.clientIds), domains: domains(result.data.allowlist.domains) },
     denylist: { clientIds: new Set(result.data.denylist.clientIds), domains: domains(result.data.denylist.domains) },
