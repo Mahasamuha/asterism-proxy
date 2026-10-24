@@ -1,5 +1,5 @@
 export { createVerifier, TokenValidationError } from "./verify.js";
-export type { RsAuthConfig, Principal, TokenValidationReason, Verifier } from "./verify.js";
+export type { VerifierConfig, Principal, TokenValidationReason, Verifier } from "./verify.js";
 export {
   createBearerAuthMiddleware,
   protectedResourceMetadataHandler,

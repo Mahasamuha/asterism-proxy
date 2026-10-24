@@ -1,5 +1,5 @@
 import type { Request, Response, NextFunction, RequestHandler } from "express";
-import { createVerifier, type RsAuthConfig, type Principal } from "./verify.js";
+import { createVerifier, type VerifierConfig, type Principal } from "./verify.js";
 
 export interface AuthenticatedRequest extends Request {
   principal?: Principal;
@@ -28,7 +28,7 @@ export function protectedResourceMetadataUrl(audience: string): string {
  * §3.1 metadata URL. Browser-based clients can only read that header if the
  * app's CORS config lists WWW-Authenticate in Access-Control-Expose-Headers;
  * that is the resource-server app's responsibility, not this middleware's. */
-export function createBearerAuthMiddleware(config: RsAuthConfig): RequestHandler {
+export function createBearerAuthMiddleware(config: VerifierConfig): RequestHandler {
   const verifier = createVerifier(config);
   const challenge = `Bearer realm="${config.audience}", resource_metadata="${protectedResourceMetadataUrl(config.audience)}"`;
 
@@ -59,7 +59,7 @@ export function createBearerAuthMiddleware(config: RsAuthConfig): RequestHandler
  * the audience exactly (§3.3), e.g.
  * `app.get(protectedResourceMetadataPath(aud), protectedResourceMetadataHandler(cfg))`.
  * The handler itself is path-agnostic, so existing callers keep working. */
-export function protectedResourceMetadataHandler(config: RsAuthConfig): RequestHandler {
+export function protectedResourceMetadataHandler(config: VerifierConfig): RequestHandler {
   return (_req: Request, res: Response) => {
     res.json({
       resource: config.audience,

@@ -1,7 +1,7 @@
 import { importJWK, jwtVerify, decodeProtectedHeader, errors as joseErrors, type JWTPayload } from "jose";
 import { JwksCache } from "./jwks-cache.js";
 
-export interface RsAuthConfig {
+export interface VerifierConfig {
   issuer: string;
   audience: string; // this server's identifier — exactly one
   jwksUri?: string; // defaults to discovery from issuer
@@ -39,7 +39,7 @@ export interface Verifier {
   verify(token: string): Promise<Principal>;
 }
 
-export function createVerifier(config: RsAuthConfig): Verifier {
+export function createVerifier(config: VerifierConfig): Verifier {
   const jwksCache = new JwksCache(config.issuer, config.jwksUri);
 
   return {

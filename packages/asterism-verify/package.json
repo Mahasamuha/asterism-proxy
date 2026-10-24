@@ -1,0 +1,61 @@
+{
+  "name": "@mahasamuha/asterism-verify",
+  "version": "0.1.0",
+  "description": "Verify asterism-proxy JWT access tokens in an MCP resource server: JWKS caching, single-audience checks, and RFC 9728 Express helpers",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Mahasamuha/asterism-proxy.git",
+    "directory": "packages/asterism-verify"
+  },
+  "keywords": [
+    "oauth",
+    "jwt",
+    "jwks",
+    "mcp",
+    "resource-server",
+    "rfc9728"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "pnpm run build"
+  },
+  "dependencies": {
+    "jose": "^6.2.5"
+  },
+  "peerDependencies": {
+    "express": "^5.2.1"
+  },
+  "peerDependenciesMeta": {
+    "express": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/node": "^24.0.0",
+    "typescript": "^6.0.0"
+  }
+}

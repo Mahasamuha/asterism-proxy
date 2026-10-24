@@ -8,7 +8,7 @@ COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
 # Every workspace member's manifest is needed: the lockfile has an importer for
 # each, and --frozen-lockfile fails if one is missing on disk.
 COPY packages/proxy/package.json ./packages/proxy/
-COPY packages/rs-auth/package.json ./packages/rs-auth/
+COPY packages/asterism-verify/package.json ./packages/asterism-verify/
 RUN pnpm install --frozen-lockfile
 
 COPY tsconfig.base.json ./
