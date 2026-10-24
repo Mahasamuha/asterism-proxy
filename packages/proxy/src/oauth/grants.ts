@@ -11,6 +11,7 @@ import { getSessionUserId, clearSession } from "../identity/session.js";
 import { issueCsrfToken, verifyCsrfToken } from "../identity/csrf.js";
 import { createSelfLoginRequest } from "../identity/self-login.js";
 import { startUpstreamAuth } from "../identity/oidc.js";
+import { bodyOf, stringField } from "../http-params.js";
 
 const log = createLogger("grants");
 
@@ -188,8 +189,9 @@ grantsRouter.post("/grants/:id/revoke", async (req: Request, res: Response) => {
 // ---------------------------------------------------------------------------
 
 grantsRouter.post("/oauth/revoke", async (req: Request, res: Response) => {
-  const body = req.body as Record<string, string>;
-  const { token, client_id } = body;
+  const body = bodyOf(req);
+  const token = stringField(body, "token");
+  const client_id = stringField(body, "client_id");
 
   if (!token || !client_id) {
     res.status(400).json({ error: "invalid_request", error_description: "token and client_id are required" });

@@ -6,6 +6,7 @@ import { createLogger } from "../logger.js";
 import { resolveClient } from "../clients/cimd.js";
 import { isRegisteredResource, lookupResourceServer } from "../resource-registry.js";
 import { startUpstreamAuth } from "../identity/oidc.js";
+import { bodyOf, stringField } from "../http-params.js";
 
 const log = createLogger("device");
 
@@ -81,8 +82,8 @@ setInterval(
 // ---------------------------------------------------------------------------
 
 deviceRouter.post("/oauth/device/code", async (req: Request, res: Response) => {
-  const body = req.body as Record<string, string>;
-  const clientId = body["client_id"];
+  const body = bodyOf(req);
+  const clientId = stringField(body, "client_id");
 
   if (!clientId) {
     res.status(400).json({ error: "invalid_request", error_description: "client_id is required" });
@@ -96,14 +97,19 @@ deviceRouter.post("/oauth/device/code", async (req: Request, res: Response) => {
   }
 
   // Same resource validation as T12: present, single-valued, registered.
-  const resource = body["resource"];
+  const resource = stringField(body, "resource"); // a repeated resource reads as absent -> invalid_target
   if (!resource || !isRegisteredResource(resource)) {
     res.status(400).json({ error: "invalid_target" });
     return;
   }
   const resourceServer = lookupResourceServer(resource)!;
 
-  const requestedScopes = (body["scope"] ?? "").split(" ").filter(Boolean);
+  const rawScope = body["scope"];
+  if (rawScope !== undefined && typeof rawScope !== "string") {
+    res.status(400).json({ error: "invalid_scope", error_description: "scope must be a single space-delimited string" });
+    return;
+  }
+  const requestedScopes = (rawScope ?? "").split(" ").filter(Boolean);
   const declaredScopeNames = new Set(resourceServer.scopes.map((s) => s.name));
   const unknownScope = requestedScopes.find((scope) => scope !== "offline_access" && !declaredScopeNames.has(scope));
   if (unknownScope) {
@@ -195,6 +201,5 @@ deviceRouter.get("/oauth/device", async (req: Request, res: Response) => {
 });
 
 deviceRouter.post("/oauth/device", async (req: Request, res: Response) => {
-  const body = req.body as Record<string, string>;
-  await startDeviceConsent(req, res, body["user_code"] ?? "");
+  await startDeviceConsent(req, res, stringField(bodyOf(req), "user_code") ?? "");
 });

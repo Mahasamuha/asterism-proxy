@@ -4,6 +4,7 @@ import { safeFetchJson } from "../clients/safe-fetch.js";
 import { config } from "../config.js";
 import { createLogger } from "../logger.js";
 import type { OauthClient } from "../generated/prisma/client.js";
+import { stringField } from "../http-params.js";
 
 const log = createLogger("client-assertion");
 
@@ -152,7 +153,7 @@ export interface ClientAuthResult {
  * verifying client_assertion — checked here, before the caller consumes
  * whatever code/token it's about to redeem, so a bad assertion doesn't burn
  * something a legitimate follow-up attempt could still use. */
-export async function authenticateConfidentialClient(client: OauthClient, body: Record<string, string>): Promise<ClientAuthResult> {
+export async function authenticateConfidentialClient(client: OauthClient, body: Record<string, unknown>): Promise<ClientAuthResult> {
   const metadata = client.metadata as Record<string, unknown>;
   const authMethod = typeof metadata["token_endpoint_auth_method"] === "string" ? metadata["token_endpoint_auth_method"] : "none";
 
@@ -167,8 +168,8 @@ export async function authenticateConfidentialClient(client: OauthClient, body: 
     return { ok: false, error: "invalid_client", errorDescription: "Client is missing jwks_uri" };
   }
 
-  const assertionType = body["client_assertion_type"];
-  const assertion = body["client_assertion"];
+  const assertionType = stringField(body, "client_assertion_type");
+  const assertion = stringField(body, "client_assertion");
   if (assertionType !== "urn:ietf:params:oauth:client-assertion-type:jwt-bearer" || !assertion) {
     return { ok: false, error: "invalid_client", errorDescription: "client_assertion is required for this client" };
   }

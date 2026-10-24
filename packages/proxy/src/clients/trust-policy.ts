@@ -53,9 +53,12 @@ function loadPolicy(filePath: string): Policy {
     throw new Error(`Invalid trust policy at ${filePath}:\n${details}`);
   }
 
+  // URL hostnames are always lowercase, so lowercase the configured domains too;
+  // otherwise "Example.com" would silently never match anything.
+  const domains = (list: string[]) => list.map((d) => d.trim().toLowerCase());
   return {
-    allowlist: { clientIds: new Set(result.data.allowlist.clientIds), domains: result.data.allowlist.domains },
-    denylist: { clientIds: new Set(result.data.denylist.clientIds), domains: result.data.denylist.domains },
+    allowlist: { clientIds: new Set(result.data.allowlist.clientIds), domains: domains(result.data.allowlist.domains) },
+    denylist: { clientIds: new Set(result.data.denylist.clientIds), domains: domains(result.data.denylist.domains) },
   };
 }
 

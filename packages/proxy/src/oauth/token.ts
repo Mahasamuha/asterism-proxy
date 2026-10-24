@@ -7,14 +7,15 @@ import { issueRefreshToken, accessTokenScopes, REFRESH_TOKEN_TTL_MS } from "../c
 import { resolveClient } from "../clients/cimd.js";
 import { authenticateConfidentialClient } from "./client-assertion.js";
 import { incrementCounter } from "../metrics.js";
+import { bodyOf, stringField } from "../http-params.js";
 
 const log = createLogger("token");
 
 export const tokenRouter: Router = Router();
 
 tokenRouter.post("/oauth/token", async (req: Request, res: Response) => {
-  const body = req.body as Record<string, string>;
-  const grantType = body["grant_type"];
+  const body = bodyOf(req);
+  const grantType = stringField(body, "grant_type");
 
   if (grantType === "authorization_code") {
     await handleAuthorizationCodeGrant(body, res);
@@ -48,8 +49,14 @@ async function revokeDescendantRefreshTokens(grantId: string, kind: "code_replay
   }
 }
 
-async function handleAuthorizationCodeGrant(body: Record<string, string>, res: Response): Promise<void> {
-  const { code, redirect_uri, client_id, code_verifier, resource } = body;
+async function handleAuthorizationCodeGrant(body: Record<string, unknown>, res: Response): Promise<void> {
+  const code = stringField(body, "code");
+  const redirect_uri = stringField(body, "redirect_uri");
+  const client_id = stringField(body, "client_id");
+  const code_verifier = stringField(body, "code_verifier");
+  // Deliberately NOT stringField: a repeated or object-valued `resource` must
+  // keep failing the mismatch check below with invalid_target, not be ignored.
+  const resource = body["resource"];
 
   if (!code || !redirect_uri || !client_id) {
     res.status(400).json({ error: "invalid_request", error_description: "code, redirect_uri, and client_id are required" });
@@ -118,6 +125,14 @@ async function handleAuthorizationCodeGrant(body: Record<string, string>, res: R
     return;
   }
 
+  // The user may have revoked the grant (via /grants) between consenting and
+  // this exchange; a code for a revoked grant must not yield tokens.
+  const codeGrant = await prisma.grant.findUnique({ where: { id: entry.grantId } });
+  if (!codeGrant || codeGrant.revokedAt !== null) {
+    res.status(400).json({ error: "invalid_grant", error_description: "Grant has been revoked" });
+    return;
+  }
+
   // Mint before the transaction: signing touches the DB on its own
   // connection, and a signing failure should happen before anything is
   // consumed. The JWT is discarded if the claim below is lost.
@@ -178,8 +193,10 @@ async function handleAuthorizationCodeGrant(body: Record<string, string>, res: R
   });
 }
 
-async function handleRefreshTokenGrant(body: Record<string, string>, res: Response): Promise<void> {
-  const { refresh_token, client_id, resource } = body;
+async function handleRefreshTokenGrant(body: Record<string, unknown>, res: Response): Promise<void> {
+  const refresh_token = stringField(body, "refresh_token");
+  const client_id = stringField(body, "client_id");
+  const resource = body["resource"]; // not stringField: see the authorization_code grant
 
   if (!refresh_token || !client_id) {
     res.status(400).json({ error: "invalid_request", error_description: "refresh_token and client_id are required" });
@@ -307,8 +324,10 @@ async function handleRefreshTokenGrant(body: Record<string, string>, res: Respon
   });
 }
 
-async function handleDeviceCodeGrant(body: Record<string, string>, res: Response): Promise<void> {
-  const { device_code, client_id, resource } = body;
+async function handleDeviceCodeGrant(body: Record<string, unknown>, res: Response): Promise<void> {
+  const device_code = stringField(body, "device_code");
+  const client_id = stringField(body, "client_id");
+  const resource = body["resource"]; // not stringField: see the authorization_code grant
 
   if (!device_code || !client_id) {
     res.status(400).json({ error: "invalid_request", error_description: "device_code and client_id are required" });
@@ -396,23 +415,9 @@ async function handleDeviceCodeGrant(body: Record<string, string>, res: Response
     return;
   }
 
-  // Atomically claim (consume) — same TOCTOU close as the other two grants.
-  const claim = await prisma.deviceCode.updateMany({
-    where: { deviceCodeHash, status: "approved" },
-    data: { status: "consumed" },
-  });
-  if (claim.count === 0) {
-    res.status(400).json({ error: "invalid_grant", error_description: "device_code already redeemed" });
-    return;
-  }
-
-  // Consent (T13, reused verbatim by T17's device.ts) already created the
-  // Grant during approval — the same upsert path the authorization_code flow
-  // uses, so this must exist by the time a device_code reaches "approved".
-  const grant = await prisma.grant.findUniqueOrThrow({
-    where: { userId_clientId_resource: { userId, clientId: entry.clientId, resource: entry.resource } },
-  });
-
+  // Mint before the transaction, like the other grants: signing touches the DB
+  // on its own connection, and a signing failure must happen before anything
+  // is consumed. The JWT is discarded if the claim below is lost.
   const { accessToken, expiresIn } = await mintAccessToken({
     userId,
     clientId: entry.clientId,
@@ -420,16 +425,42 @@ async function handleDeviceCodeGrant(body: Record<string, string>, res: Response
     scopes: accessTokenScopes(entry.scopes),
   });
 
-  let refreshToken: string | undefined;
-  if (entry.scopes.includes("offline_access")) {
-    refreshToken = await issueRefreshToken({
-      userId,
-      clientId: entry.clientId,
-      resource: entry.resource,
-      scopes: entry.scopes,
-      grantId: grant.id,
+  // Atomically claim (consume) the code and issue the refresh token in ONE
+  // transaction — same TOCTOU close as the other two grants, and a failure
+  // while issuing rolls the claim back so the device can poll again.
+  //
+  // Consent (T13, reused verbatim by T17's device.ts) created the Grant during
+  // approval, but the user may have revoked it since; a revoked or missing
+  // grant yields no tokens. That outcome is returned (not thrown) so the claim
+  // commits and a dead code can't be polled forever.
+  const issued = await prisma.$transaction(async (tx) => {
+    const claim = await tx.deviceCode.updateMany({
+      where: { deviceCodeHash, status: "approved" },
+      data: { status: "consumed" },
     });
+    if (claim.count === 0) return "lost" as const;
+
+    const grant = await tx.grant.findUnique({
+      where: { userId_clientId_resource: { userId, clientId: entry.clientId, resource: entry.resource } },
+    });
+    if (!grant || grant.revokedAt !== null) return "revoked" as const;
+
+    if (!entry.scopes.includes("offline_access")) return { refreshToken: undefined };
+    const refreshToken = await issueRefreshToken(
+      { userId, clientId: entry.clientId, resource: entry.resource, scopes: entry.scopes, grantId: grant.id },
+      tx
+    );
+    return { refreshToken };
+  });
+  if (issued === "lost") {
+    res.status(400).json({ error: "invalid_grant", error_description: "device_code already redeemed" });
+    return;
   }
+  if (issued === "revoked") {
+    res.status(400).json({ error: "invalid_grant", error_description: "Grant has been revoked" });
+    return;
+  }
+  const { refreshToken } = issued;
 
   incrementCounter("tokens_issued_total", { client_id: entry.clientId, resource: entry.resource });
   incrementCounter("device_flow_outcomes_total", { outcome: "success" });

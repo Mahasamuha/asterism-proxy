@@ -1,11 +1,20 @@
 import path from "node:path";
 import { z } from "zod";
 
+/** Case-insensitive "true"/"false". Anything else is a config error rather than
+ * a silent false (e.g. ENABLE_OIDC=TRUE must not quietly disable OIDC). */
 const boolFromEnv = (defaultValue: boolean) =>
   z
     .string()
     .optional()
-    .transform((v) => (v === undefined ? defaultValue : v === "true"));
+    .transform((v, ctx) => {
+      if (v === undefined) return defaultValue;
+      const normalized = v.trim().toLowerCase();
+      if (normalized === "true") return true;
+      if (normalized === "false") return false;
+      ctx.issues.push({ code: "custom", message: `must be "true" or "false" (case-insensitive), got ${JSON.stringify(v)}`, input: v });
+      return z.NEVER;
+    });
 
 /** The issuer is concatenated with well-known and endpoint paths (RFC 8414
  * §3.1, RFC 9728 §3.1) and must match the `issuer` claim exactly, so it has to

@@ -1,6 +1,7 @@
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { Request, Response } from "express";
 import { config } from "../config.js";
+import { bodyOf, stringField } from "../http-params.js";
 
 export function generateCsrfToken(): string {
   return randomBytes(32).toString("hex");
@@ -26,7 +27,7 @@ export function issueCsrfToken(res: Response, cookieName: string): string {
 
 export function verifyCsrfToken(req: Request, cookieName: string): boolean {
   const cookie = (req.signedCookies as Record<string, string | undefined>)[cookieName];
-  const body = (req.body as Record<string, string>)["csrf_token"] ?? "";
+  const body = stringField(bodyOf(req), "csrf_token") ?? "";
   if (!cookie) return false;
   return safeEqual(cookie, body);
 }

@@ -31,19 +31,8 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 app.set("view engine", "ejs");
 app.set("views", path.join(__dirname, "views"));
 
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
-
-// Required when running behind an ingress/reverse proxy: without it req.ip is the
-// proxy's address, so every client shares one login-throttle bucket (T7).
-if (config.trustProxy !== undefined) {
-  app.set("trust proxy", config.trustProxy);
-}
-
-// COOKIE_SECRET (required, validated in config.ts) signs the session and CSRF
-// cookies. There is deliberately no ephemeral fallback.
-app.use(cookieParser(config.cookieSecret));
-
+// Request id and security headers come first so they are also set on responses
+// produced by the body parsers' own errors (malformed JSON, oversized body).
 app.use((req: Request, res: Response, next: NextFunction) => {
   const raw = req.headers["x-request-id"] as string | undefined;
   // Strip non-printable ASCII and clamp length to prevent log injection.
@@ -58,6 +47,19 @@ app.use((_req: Request, res: Response, next: NextFunction) => {
   res.set("X-Frame-Options", "DENY");
   next();
 });
+
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
+// Required when running behind an ingress/reverse proxy: without it req.ip is the
+// proxy's address, so every client shares one login-throttle bucket (T7).
+if (config.trustProxy !== undefined) {
+  app.set("trust proxy", config.trustProxy);
+}
+
+// COOKIE_SECRET (required, validated in config.ts) signs the session and CSRF
+// cookies. There is deliberately no ephemeral fallback.
+app.use(cookieParser(config.cookieSecret));
 
 app.get("/health", (_req: Request, res: Response) => {
   res.status(200).json({ status: "ok" });
@@ -88,12 +90,13 @@ app.use((err: unknown, req: Request, res: Response, _next: NextFunction) => {
   log.error({ err, path: req.path }, "Unhandled request error");
   if (res.headersSent) return;
   // body-parser (malformed JSON, oversized body, bad charset...) and other
-  // http-errors carry a 4xx status: those are the client's fault. Anything else
+  // http-errors carry a 4xx status: those are the client's fault, and the status
+  // (413 too large, 415 bad charset...) is kept. Anything else
   // is ours; its details are logged above and never returned.
   const e = err as { status?: unknown; statusCode?: unknown } | null;
   const status = typeof e?.status === "number" ? e.status : typeof e?.statusCode === "number" ? e.statusCode : 0;
   if (status >= 400 && status <= 499) {
-    res.status(400).json({ error: "invalid_request", error_description: "The request could not be processed" });
+    res.status(status).json({ error: "invalid_request", error_description: "The request could not be processed" });
     return;
   }
   res.status(500).json({ error: "server_error", error_description: "An internal error occurred" });

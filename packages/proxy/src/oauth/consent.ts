@@ -9,6 +9,7 @@ import { issueCsrfToken, verifyCsrfToken } from "../identity/csrf.js";
 import { DEVICE_FLOW_REDIRECT_URI_SENTINEL } from "./device.js";
 import { isSelfLogin } from "../identity/self-login.js";
 import { incrementCounter } from "../metrics.js";
+import { bodyOf, stringField } from "../http-params.js";
 import type { AuthorizationRequest, Prisma } from "../generated/prisma/client.js";
 
 const log = createLogger("consent");
@@ -110,7 +111,9 @@ async function completeDeviceFlow(
   const outcome = await prisma.$transaction(async (tx) => {
     if (!(await consumeRequest(tx, authRequest.handle))) return "consumed" as const;
     const result = await tx.deviceCode.updateMany({
-      where: { userCode, status: "pending" },
+      // Scoped to this flow's own client and to unexpired codes: the user code
+      // is only a lookup key, and a stale or foreign code must not be approved.
+      where: { userCode, status: "pending", clientId: authRequest.clientId, expiresAt: { gt: new Date() } },
       data: approved ? { status: "approved", userId: authRequest.subject } : { status: "denied" },
     });
     if (result.count === 0) return "stale" as const;
@@ -270,8 +273,8 @@ consentRouter.get("/oauth/consent", async (req: Request, res: Response) => {
 });
 
 consentRouter.post("/oauth/consent", async (req: Request, res: Response) => {
-  const body = req.body as Record<string, string>;
-  const authRequest = await loadFlow(body["flow"]);
+  const body = bodyOf(req);
+  const authRequest = await loadFlow(stringField(body, "flow"));
   if (!authRequest) {
     renderErrorPage(res, "This authorization request is invalid or has expired.");
     return;
@@ -282,7 +285,7 @@ consentRouter.post("/oauth/consent", async (req: Request, res: Response) => {
     return;
   }
 
-  if (body["action"] !== "approve") {
+  if (stringField(body, "action") !== "approve") {
     incrementCounter("consent_total", { outcome: "denied" });
     if (isDeviceFlow(authRequest)) {
       await completeDeviceFlow(res, authRequest, false);

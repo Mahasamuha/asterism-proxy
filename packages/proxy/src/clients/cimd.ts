@@ -4,7 +4,8 @@ import { createLogger } from "../logger.js";
 import { safeFetchJson } from "./safe-fetch.js";
 import { assignTrustLevel, isDenylisted } from "./trust-policy.js";
 import { incrementCounter, recordDuration } from "../metrics.js";
-import type { OauthClient, Prisma } from "../generated/prisma/client.js";
+import { Prisma } from "../generated/prisma/client.js";
+import type { OauthClient } from "../generated/prisma/client.js";
 
 const log = createLogger("cimd");
 
@@ -30,9 +31,9 @@ const SUPPORTED_GRANT_TYPES: readonly string[] = [
 const DEFAULT_GRANT_TYPES = ["authorization_code", "refresh_token"];
 
 // Schemes that must never appear as a redirect target. A registered
-// javascript:/data:/file: URI would still be handed back to the browser as a
-// redirect on authorize.
-const FORBIDDEN_REDIRECT_SCHEMES = new Set(["javascript:", "data:", "file:"]);
+// javascript:/vbscript:/data:/blob:/file: URI would still be handed back to the
+// browser as a redirect on authorize.
+const FORBIDDEN_REDIRECT_SCHEMES = new Set(["javascript:", "vbscript:", "data:", "blob:", "file:"]);
 
 function isLoopbackHost(hostname: string): boolean {
   return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "[::1]";
@@ -40,7 +41,7 @@ function isLoopbackHost(hostname: string): boolean {
 
 /**
  * Whether a document's redirect URI may be registered: it must parse, carry no
- * fragment (RFC 6749 §3.1.2), not use a script/data/file scheme, and use http
+ * fragment (RFC 6749 §3.1.2), not use a script/data/blob/file scheme, and use http
  * only on loopback. https and custom (native-app) schemes are allowed. Entries
  * that fail are dropped by validateDocument, not fatal to the document.
  */
@@ -291,10 +292,17 @@ export async function resolveClient(clientId: string): Promise<OauthClient | nul
 
   const cached = await prisma.oauthClient.findUnique({ where: { clientId } });
   if (cached && (cached.expiresAt === null || cached.expiresAt > new Date())) {
-    return prisma.oauthClient.update({
-      where: { clientId },
-      data: { lastSeenAt: new Date(), trustLevel: assignTrustLevel(clientId, cached.source) },
-    });
+    try {
+      return await prisma.oauthClient.update({
+        where: { clientId },
+        data: { lastSeenAt: new Date(), trustLevel: assignTrustLevel(clientId, cached.source) },
+      });
+    } catch (err) {
+      // The cleanup job can delete the row between the read and this update
+      // (P2025). The cache entry is gone, so carry on as a cache miss.
+      if (!(err instanceof Prisma.PrismaClientKnownRequestError) || err.code !== "P2025") throw err;
+      log.info({ clientId }, "Cached client row vanished mid-resolve; treating as a cache miss");
+    }
   }
 
   if (!isCanonicalClientIdUrl(clientId)) return null;

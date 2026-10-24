@@ -1,6 +1,7 @@
 import { Router, Request, Response, NextFunction } from "express";
 import escHtml from "escape-html";
 import { prisma } from "../db.js";
+import { bodyOf, stringField } from "../http-params.js";
 import { createLogger } from "../logger.js";
 import {
   checkBruteForce,
@@ -45,10 +46,10 @@ localAccountsRouter.post("/setup", async (req: Request, res: Response, next: Nex
     return;
   }
 
-  const body = req.body as Record<string, string>;
-  const username = (body["username"] ?? "").trim();
-  const password = body["password"] ?? "";
-  const confirm = body["confirm_password"] ?? "";
+  const body = bodyOf(req);
+  const username = (stringField(body, "username") ?? "").trim();
+  const password = stringField(body, "password") ?? "";
+  const confirm = stringField(body, "confirm_password") ?? "";
 
   const errors: string[] = [];
   if (!username) errors.push("Username is required.");
@@ -102,10 +103,10 @@ localAccountsRouter.get("/auth/login", (req: Request, res: Response) => {
 });
 
 localAccountsRouter.post("/auth/login", async (req: Request, res: Response) => {
-  const body = req.body as Record<string, string>;
-  const flow = body["flow"];
-  const username = (body["username"] ?? "").trim();
-  const password = body["password"] ?? "";
+  const body = bodyOf(req);
+  const flow = stringField(body, "flow");
+  const username = (stringField(body, "username") ?? "").trim();
+  const password = stringField(body, "password") ?? "";
   const ip = req.ip ?? "unknown";
 
   function rerender(error: string, status = 200): void {
@@ -201,10 +202,10 @@ localAccountsRouter.post("/auth/password", async (req: Request, res: Response) =
     return;
   }
 
-  const body = req.body as Record<string, string>;
-  const currentPassword = body["current_password"] ?? "";
-  const newPassword = body["new_password"] ?? "";
-  const confirm = body["confirm_new_password"] ?? "";
+  const body = bodyOf(req);
+  const currentPassword = stringField(body, "current_password") ?? "";
+  const newPassword = stringField(body, "new_password") ?? "";
+  const confirm = stringField(body, "confirm_new_password") ?? "";
 
   const errors: string[] = [];
   if (newPassword.length < MIN_PASSWORD_LENGTH) errors.push(`New password must be at least ${MIN_PASSWORD_LENGTH} characters.`);

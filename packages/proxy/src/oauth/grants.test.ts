@@ -1,0 +1,206 @@
+import { createHash } from "node:crypto";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { CLIENT_ID, RESOURCE, clientRow, createPrismaMock, getPath, postEmpty, postForm, startRouterApp, type RouterApp } from "../test-helpers/oauth-harness.js";
+import { cookieClient, csrfFrom } from "../test-helpers/http.js";
+
+vi.mock("../db.js", async () => ({ prisma: (await import("../test-helpers/oauth-harness.js")).createPrismaMock() }));
+vi.mock("../resource-registry.js", async () => (await import("../test-helpers/oauth-harness.js")).fakeResourceRegistry());
+vi.mock("../clients/cimd.js", () => ({ resolveClient: vi.fn() }));
+vi.mock("./client-assertion.js", () => ({ authenticateConfidentialClient: vi.fn() }));
+vi.mock("../identity/oidc.js", () => ({ startUpstreamAuth: vi.fn() }));
+vi.mock("../identity/session.js", async (importOriginal) => ({ ...(await importOriginal<typeof import("../identity/session.js")>()), getSessionUserId: vi.fn() }));
+
+import { prisma } from "../db.js";
+import { resolveClient } from "../clients/cimd.js";
+import { getSessionUserId } from "../identity/session.js";
+import { authenticateConfidentialClient } from "./client-assertion.js";
+import { grantsRouter } from "./grants.js";
+
+const db = prisma as unknown as ReturnType<typeof createPrismaMock>;
+const resolve = vi.mocked(resolveClient);
+const session = vi.mocked(getSessionUserId);
+const authenticate = vi.mocked(authenticateConfidentialClient);
+const m = (model: string, method: string) => db[model]![method]!;
+const sha = (s: string) => createHash("sha256").update(s).digest("hex");
+
+let app: RouterApp;
+beforeAll(async () => {
+  app = await startRouterApp(grantsRouter);
+});
+afterAll(() => app.close());
+
+beforeEach(() => {
+  db.reset();
+  resolve.mockReset().mockResolvedValue(clientRow() as never);
+  authenticate.mockReset().mockResolvedValue({ ok: true });
+  session.mockReset().mockResolvedValue("u1");
+  m("refreshToken", "updateMany").mockResolvedValue({ count: 2 });
+  m("authorizationRequest", "create").mockResolvedValue({});
+});
+
+const revoke = (fields: Record<string, string | string[]>) => postForm(app.baseUrl, "/oauth/revoke", fields);
+const rtEntry = (over: Record<string, unknown> = {}) => ({ tokenHash: sha("rt"), clientId: CLIENT_ID, grantId: "g1", ...over });
+
+describe("POST /oauth/revoke (RFC 7009)", () => {
+  it("revokes every live token on the grant when the token belongs to the requesting client (P0)", async () => {
+    m("refreshToken", "findUnique").mockResolvedValue(rtEntry());
+    const r = await revoke({ token: "rt", client_id: CLIENT_ID });
+    expect(r.status).toBe(200);
+    expect(m("refreshToken", "findUnique").mock.calls[0]![0]).toEqual({ where: { tokenHash: sha("rt") } });
+    const call = m("refreshToken", "updateMany").mock.calls[0]![0];
+    expect(call.where).toEqual({ grantId: "g1", revokedAt: null });
+    expect(call.data.revokedAt).toBeInstanceOf(Date);
+  });
+
+  it("answers 200 but revokes nothing for another client's token (P0)", async () => {
+    m("refreshToken", "findUnique").mockResolvedValue(rtEntry({ clientId: "https://other.example.test/c.json" }));
+    const r = await revoke({ token: "rt", client_id: CLIENT_ID });
+    expect(r.status).toBe(200);
+    expect(m("refreshToken", "updateMany")).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["an unknown token (or an access token)", () => m("refreshToken", "findUnique").mockResolvedValue(null)],
+    ["an already-revoked token", () => m("refreshToken", "findUnique").mockResolvedValue(rtEntry())],
+  ])("answers 200 for %s (P0)", async (_n, arrange) => {
+    arrange();
+    m("refreshToken", "updateMany").mockResolvedValue({ count: 0 });
+    const r = await revoke({ token: "whatever", client_id: CLIENT_ID });
+    expect(r.status).toBe(200);
+    expect(r.text).toBe("");
+  });
+
+  it("answers 200 for a client that can no longer be resolved, with no authentication attempted", async () => {
+    resolve.mockResolvedValue(null);
+    m("refreshToken", "findUnique").mockResolvedValue(null);
+    expect((await revoke({ token: "rt", client_id: CLIENT_ID })).status).toBe(200);
+    expect(authenticate).not.toHaveBeenCalled();
+  });
+
+  it("a failing client assertion is rejected and revokes nothing (P0)", async () => {
+    authenticate.mockResolvedValue({ ok: false, error: "invalid_client", errorDescription: "bad" });
+    const r = await revoke({ token: "rt", client_id: CLIENT_ID });
+    expect(r.status).toBe(400);
+    expect(r.json["error"]).toBe("invalid_client");
+    expect(m("refreshToken", "updateMany")).not.toHaveBeenCalled();
+  });
+
+  it("missing token or client_id -> invalid_request", async () => {
+    expect((await revoke({ client_id: CLIENT_ID })).json["error"]).toBe("invalid_request");
+    expect((await revoke({ token: "rt" })).json["error"]).toBe("invalid_request");
+  });
+
+  it("no body at all -> invalid_request, not a crash (bug 1)", async () => {
+    const r = await postEmpty(app.baseUrl, "/oauth/revoke");
+    expect(r.status).toBe(400);
+    expect(r.json["error"]).toBe("invalid_request");
+  });
+
+  it.each([
+    ["token", { token: ["a", "b"], client_id: CLIENT_ID }],
+    ["client_id", { token: "rt", client_id: [CLIENT_ID, CLIENT_ID] }],
+  ])("a repeated %s -> invalid_request (bug 2)", async (_n, fields) => {
+    const r = await revoke(fields);
+    expect(r.status).toBe(400);
+    expect(r.json["error"]).toBe("invalid_request");
+    expect(m("refreshToken", "updateMany")).not.toHaveBeenCalled();
+  });
+});
+
+describe("POST /grants/:id/revoke", () => {
+  // csrfFrom needs a form on the page, so the listing needs at least one grant.
+  beforeEach(() => {
+    m("grant", "findMany").mockResolvedValue([{ id: "g-x", clientId: CLIENT_ID, resource: RESOURCE, scopes: ["read"], grantedAt: new Date() }]);
+  });
+  async function post(id: string, csrf: "valid" | "wrong" | "none" = "valid") {
+    const client = cookieClient();
+    const page = await getPath(app.baseUrl, "/grants", client.fetch);
+    const token = csrf === "valid" ? csrfFrom(page.text) : "0".repeat(64);
+    return postForm(app.baseUrl, `/grants/${id}/revoke`, csrf === "none" ? {} : { csrf_token: token }, client.fetch);
+  }
+
+  it("requires a session (P0)", async () => {
+    session.mockResolvedValue(null);
+    const r = await postForm(app.baseUrl, "/grants/g1/revoke", { csrf_token: "x" });
+    expect(r.status).toBe(401);
+    expect(m("grant", "update")).not.toHaveBeenCalled();
+  });
+
+  it.each([["wrong"], ["none"]] as const)("requires a valid CSRF token (%s) (P0)", async (kind) => {
+    m("grant", "findUnique").mockResolvedValue({ id: "g1", userId: "u1", clientId: CLIENT_ID, resource: RESOURCE });
+    const r = await post("g1", kind);
+    expect(r.status).toBe(403);
+    expect(m("grant", "update")).not.toHaveBeenCalled();
+    expect(db.$transaction).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["an unknown grant", null],
+    ["another user's grant", { id: "g1", userId: "someone-else", clientId: CLIENT_ID, resource: RESOURCE }],
+  ])("%s is a 404 and revokes nothing (P0)", async (_n, row) => {
+    m("grant", "findUnique").mockResolvedValue(row);
+    const r = await post("g1");
+    expect(r.status).toBe(404);
+    expect(m("grant", "update")).not.toHaveBeenCalled();
+    expect(m("refreshToken", "updateMany")).not.toHaveBeenCalled();
+  });
+
+  it("the owner revokes the grant and its refresh tokens in one transaction, then returns to /grants (P0)", async () => {
+    m("grant", "findUnique").mockResolvedValue({ id: "g1", userId: "u1", clientId: CLIENT_ID, resource: RESOURCE });
+    m("grant", "update").mockResolvedValue({});
+    const r = await post("g1");
+    expect(r.status).toBe(302);
+    expect(r.headers.get("location")).toBe("/grants");
+    expect(m("grant", "update").mock.calls[0]![0].where).toEqual({ id: "g1" });
+    expect(m("grant", "update").mock.calls[0]![0].data.revokedAt).toBeInstanceOf(Date);
+    expect(m("refreshToken", "updateMany").mock.calls[0]![0].where).toEqual({ grantId: "g1", revokedAt: null });
+    expect(db.$transaction).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("GET /grants and /auth/logout", () => {
+  it("without a session starts a self-login flow instead of listing anything (P0)", async () => {
+    session.mockResolvedValue(null);
+    const r = await getPath(app.baseUrl, "/grants");
+    expect(r.status).toBe(302);
+    expect(r.headers.get("location")).toMatch(/^\/auth\/login\?flow=[0-9a-f]+$/);
+    expect(m("grant", "findMany")).not.toHaveBeenCalled();
+  });
+
+  it("lists only the signed-in user's live grants (P1)", async () => {
+    m("grant", "findMany").mockResolvedValue([{ id: "g1", clientId: CLIENT_ID, resource: RESOURCE, scopes: ["read", "write"], grantedAt: new Date("2026-01-02T03:04:05Z") }]);
+    const r = await getPath(app.baseUrl, "/grants");
+    expect(m("grant", "findMany").mock.calls[0]![0].where).toEqual({ userId: "u1", revokedAt: null });
+    expect(r.text).toContain("Test client");
+    expect(r.text).toContain("client.example.test");
+    expect(r.text).toContain("Test MCP");
+    expect(r.text).toContain("read, write");
+    expect(r.text).toContain('action="/grants/g1/revoke"');
+    expect(r.headers.getSetCookie().join(";")).toContain("csrf_grants=");
+  });
+
+  it("escapes hostile client names and scopes (P1)", async () => {
+    resolve.mockResolvedValue(clientRow({ metadata: { client_name: "<img src=x onerror=alert(1)>" } }) as never);
+    m("grant", "findMany").mockResolvedValue([{ id: "g1", clientId: CLIENT_ID, resource: RESOURCE, scopes: ["<b>x</b>"], grantedAt: new Date() }]);
+    const r = await getPath(app.baseUrl, "/grants");
+    expect(r.text).not.toContain("<img src=x");
+    expect(r.text).not.toContain("<b>x</b>");
+    expect(r.text).toContain("&lt;img src=x onerror=alert(1)&gt;");
+  });
+
+  it("shows an empty state, and falls back to the client id when the client no longer resolves (P1)", async () => {
+    m("grant", "findMany").mockResolvedValue([]);
+    expect((await getPath(app.baseUrl, "/grants")).text).toContain("No active grants.");
+    resolve.mockResolvedValue(null);
+    m("grant", "findMany").mockResolvedValue([{ id: "g1", clientId: CLIENT_ID, resource: "https://gone.example.test", scopes: [], grantedAt: new Date() }]);
+    const r = await getPath(app.baseUrl, "/grants");
+    expect(r.text).toContain(CLIENT_ID);
+    expect(r.text).toContain("https://gone.example.test");
+  });
+
+  it("POST /auth/logout clears the session cookie", async () => {
+    const r = await postEmpty(app.baseUrl, "/auth/logout");
+    expect(r.status).toBe(200);
+    expect(r.headers.getSetCookie().join(";")).toMatch(/session=;/);
+  });
+});
