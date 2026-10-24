@@ -1,9 +1,10 @@
+import { timingSafeEqual } from "node:crypto";
 import { Router, Request, Response } from "express";
 import { prisma } from "./db.js";
 import { config } from "./config.js";
 import { getOidcConfig } from "./identity/oidc.js";
 import { getSafeFetchRejectionCounts } from "./clients/safe-fetch.js";
-import { snapshotMetrics } from "./metrics.js";
+import { PROMETHEUS_CONTENT_TYPE, renderPrometheus } from "./metrics.js";
 
 export const opsRouter: Router = Router();
 
@@ -35,18 +36,31 @@ opsRouter.get("/ready", async (_req: Request, res: Response) => {
   res.status(ready ? 200 : 503).json({ status: ready ? "ready" : "not_ready", checks });
 });
 
-opsRouter.get("/metrics", (_req: Request, res: Response) => {
-  const { counters, durations } = snapshotMetrics();
-  res.json({
-    counters: { ...counters, ...prefixed("ssrf_rejections_total", getSafeFetchRejectionCounts()) },
-    durations,
-  });
-});
-
-function prefixed(name: string, byReason: Record<string, number>): Record<string, number> {
-  const out: Record<string, number> = {};
-  for (const [reason, count] of Object.entries(byReason)) {
-    out[`${name}{reason=${reason}}`] = count;
+// Metrics are operational detail (client ids, resources, SSRF probe counts),
+// so /metrics is off unless METRICS_TOKEN is set, and then requires it as a
+// bearer token. Unset -> 404, indistinguishable from a route that doesn't exist.
+opsRouter.get("/metrics", (req: Request, res: Response) => {
+  const expected = config.metricsToken;
+  if (!expected) {
+    res.status(404).end();
+    return;
   }
-  return out;
-}
+
+  const header = req.get("authorization") ?? "";
+  const presented = /^Bearer (.+)$/i.exec(header)?.[1] ?? "";
+  const a = Buffer.from(presented);
+  const b = Buffer.from(expected);
+  // timingSafeEqual throws on unequal lengths, so a length mismatch is
+  // rejected up front. That leaks only the token length, which is fixed
+  // public configuration shape (min 32 chars), not secret content.
+  if (a.length !== b.length || !timingSafeEqual(a, b)) {
+    res.status(401).set("WWW-Authenticate", "Bearer").end();
+    return;
+  }
+
+  const ssrf = Object.entries(getSafeFetchRejectionCounts()).map(([reason, value]) => ({
+    labels: { reason },
+    value,
+  }));
+  res.status(200).set("Content-Type", PROMETHEUS_CONTENT_TYPE).send(renderPrometheus({ ssrf_rejections_total: ssrf }));
+});
