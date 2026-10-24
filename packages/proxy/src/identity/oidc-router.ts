@@ -3,8 +3,9 @@ import { createLogger } from "../logger.js";
 import { config } from "../config.js";
 import { prisma } from "../db.js";
 import { handleUpstreamCallback } from "./oidc.js";
-import { isSelfLogin } from "./self-login.js";
-import { setSession } from "./session.js";
+import { isSelfLogin, selfLoginReturnPath } from "./self-login.js";
+import { isFlowBound } from "./flow-binding.js";
+import { startSession } from "./session.js";
 
 const log = createLogger("oidc-router");
 
@@ -17,7 +18,7 @@ oidcRouter.get("/oauth/callback", async (req: Request, res: Response) => {
   const requestUrl = new URL(req.originalUrl, config.issuerUrl).toString();
   let result: Awaited<ReturnType<typeof handleUpstreamCallback>>;
   try {
-    result = await handleUpstreamCallback(requestUrl);
+    result = await handleUpstreamCallback(requestUrl, (handle) => isFlowBound(req, handle));
   } catch (err) {
     // This is a browser redirect target, so show a page rather than the JSON
     // error body. Details are logged only; the page is deliberately generic.
@@ -28,12 +29,11 @@ oidcRouter.get("/oauth/callback", async (req: Request, res: Response) => {
   const { authRequestHandle, userId } = result;
 
   const authRequest = await prisma.authorizationRequest.findUniqueOrThrow({ where: { handle: authRequestHandle } });
+  // A session is set for every flow type: /grants needs one for self-login, and
+  // consent requires a session for flow.subject (same browser that logged in).
+  await startSession(res, userId);
   if (isSelfLogin(authRequest)) {
-    // T18's /grants (and any future proxy account page) needs a session for
-    // OIDC users too — T6 otherwise has no session concept at all, since an
-    // OAuth authorization flow never needed one.
-    setSession(res, userId);
-    res.redirect(authRequest.state || "/grants");
+    res.redirect(selfLoginReturnPath(authRequest.state));
     return;
   }
 

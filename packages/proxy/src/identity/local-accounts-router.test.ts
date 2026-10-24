@@ -7,43 +7,59 @@ const db = vi.hoisted(() => ({
   },
 }));
 const la = vi.hoisted(() => ({
-  checkBruteForce: vi.fn(),
-  recordFailure: vi.fn(),
+  beginLoginAttempt: vi.fn(),
+  beginPasswordChangeAttempt: vi.fn(),
+  beginIpAttempt: vi.fn(),
+  endAttempt: vi.fn(),
+  normalizeUsername: (s: string) => s.normalize("NFKC").trim().toLowerCase(),
   createFirstLocalUser: vi.fn(),
   validateLocalUser: vi.fn(),
   changePassword: vi.fn(),
   localAccountsExist: vi.fn(),
   MIN_PASSWORD_LENGTH: 12,
 }));
-const sess = vi.hoisted(() => ({ getSessionUserId: vi.fn() }));
+const sess = vi.hoisted(() => ({ getSessionUserId: vi.fn(), startSession: vi.fn() }));
 vi.mock("../db.js", () => db);
 vi.mock("./local-accounts.js", () => la);
-vi.mock("./session.js", async (orig) => ({ ...(await orig<typeof import("./session.js")>()), getSessionUserId: sess.getSessionUserId }));
+vi.mock("./session.js", async (orig) => ({ ...(await orig<typeof import("./session.js")>()), getSessionUserId: sess.getSessionUserId, startSession: sess.startSession }));
 
+import { setSession } from "./session.js";
 import { localAccountsRouter } from "./local-accounts-router.js";
 import { startRouterApp, type RouterApp } from "../test-helpers/identity-app.js";
 import { cookieClient, csrfFrom, form } from "../test-helpers/http.js";
+import { bindBrowser, bindRouter } from "../test-helpers/fix-f-bind.js";
 
 const GOOD_PW = "correct horse battery";
 let app: RouterApp;
 
 beforeAll(async () => {
-  app = await startRouterApp([localAccountsRouter]);
+  app = await startRouterApp([localAccountsRouter, bindRouter]);
 });
 afterAll(() => app.close());
 beforeEach(() => {
   vi.resetAllMocks();
   la.localAccountsExist.mockResolvedValue(false);
-  la.checkBruteForce.mockResolvedValue(true);
+  la.beginLoginAttempt.mockResolvedValue({ id: 1, key: "k" });
+  la.beginPasswordChangeAttempt.mockResolvedValue({ id: 2, key: "pwchange:u1" });
+  la.beginIpAttempt.mockResolvedValue({ id: 3, key: null });
+  la.endAttempt.mockResolvedValue(undefined);
+  sess.startSession.mockImplementation(async (res: Parameters<typeof setSession>[0], userId: string) => setSession(res, userId, 0));
   la.createFirstLocalUser.mockResolvedValue("new-user");
   la.validateLocalUser.mockResolvedValue("u1");
-  la.recordFailure.mockResolvedValue(undefined);
   la.MIN_PASSWORD_LENGTH = 12;
 });
 
 /** Loads `path` to get a CSRF cookie + token pair on a fresh jar. */
 async function withCsrf(path: string) {
   const jar = cookieClient();
+  const html = await (await jar.fetch(`${app.baseUrl}${path}`)).text();
+  return { jar, csrf: csrfFrom(html) };
+}
+
+/** Like withCsrf, but the jar is also the browser that started `flow`. */
+async function withCsrfBound(path: string, flow: string) {
+  const jar = cookieClient();
+  await bindBrowser(app.baseUrl, jar, flow);
   const html = await (await jar.fetch(`${app.baseUrl}${path}`)).text();
   return { jar, csrf: csrfFrom(html) };
 }
@@ -177,16 +193,31 @@ describe("POST /auth/login", () => {
     expect(la.validateLocalUser).not.toHaveBeenCalled();
   });
 
-  it("P0 throttled IPs get 429 before anything else is checked", async () => {
-    la.checkBruteForce.mockResolvedValue(false);
+  it("P0 a throttled attempt gets 429 and the password is never evaluated", async () => {
+    la.beginLoginAttempt.mockResolvedValue(null);
     const { jar, csrf } = await withCsrf("/auth/login");
     const res = await post(jar, { username: "a", password: "b", csrf_token: csrf });
     expect(res.status).toBe(429);
     expect(await res.text()).toContain("Too many failed attempts");
     expect(la.validateLocalUser).not.toHaveBeenCalled();
+    expect(la.endAttempt).not.toHaveBeenCalled();
   });
 
-  it("P0 a bad password records a failure for the client IP and re-renders without revealing why", async () => {
+  it("M4 the attempt is recorded for the client IP and the NORMALISED username before the password is evaluated, and a CSRF failure spends none", async () => {
+    const order: string[] = [];
+    la.beginLoginAttempt.mockImplementation(async () => (order.push("begin"), { id: 1, key: "k" }));
+    la.validateLocalUser.mockImplementation(async () => (order.push("validate"), "u1"));
+    const { jar } = await withCsrf("/auth/login");
+    expect((await post(jar, { username: "a", password: "b", csrf_token: "nope" })).status).toBe(403);
+    expect(la.beginLoginAttempt).not.toHaveBeenCalled();
+    const fresh = await withCsrf("/auth/login"); // the refused POST rotated the first jar's CSRF cookie
+    await post(fresh.jar, { username: "  ＡLICE ", password: "b", csrf_token: fresh.csrf });
+    expect(la.beginLoginAttempt).toHaveBeenCalledWith(expect.stringMatching(/127\.0\.0\.1/), "alice");
+    expect(order).toEqual(["begin", "validate"]);
+    expect(la.endAttempt).toHaveBeenCalledWith({ id: 1, key: "k" }, true);
+  });
+
+  it("P0 a bad password settles the attempt as a failure and re-renders without revealing why", async () => {
     la.validateLocalUser.mockRejectedValue(new Error("Account is deactivated"));
     const { jar, csrf } = await withCsrf("/auth/login");
     const res = await post(jar, { username: "a", password: "b", csrf_token: csrf });
@@ -194,7 +225,7 @@ describe("POST /auth/login", () => {
     const html = await res.text();
     expect(html).toContain("Invalid username or password.");
     expect(html).not.toContain("deactivated");
-    expect(la.recordFailure).toHaveBeenCalledWith(expect.stringMatching(/127\.0\.0\.1/));
+    expect(la.endAttempt).toHaveBeenCalledWith({ id: 1, key: "k" }, false);
     expect(jar.cookies.has("session")).toBe(false);
   });
 
@@ -221,8 +252,8 @@ describe("POST /auth/login", () => {
   });
 
   it("P0 an OAuth flow records the subject and continues to consent", async () => {
-    db.prisma.authorizationRequest.findUnique.mockResolvedValue({ handle: "h/1", redirectUri: "https://c.example.test/cb", expiresAt: new Date(Date.now() + 60_000) });
-    const { jar, csrf } = await withCsrf("/auth/login?flow=h/1");
+    db.prisma.authorizationRequest.findUnique.mockResolvedValue({ handle: "h/1", flowType: "oauth", redirectUri: "https://c.example.test/cb", expiresAt: new Date(Date.now() + 60_000) });
+    const { jar, csrf } = await withCsrfBound("/auth/login?flow=h/1", "h/1");
     const res = await post(jar, { username: "a", password: "b", flow: "h/1", csrf_token: csrf });
     expect(res.headers.get("location")).toBe("/oauth/consent?flow=h%2F1");
     expect(db.prisma.authorizationRequest.update).toHaveBeenCalledWith({ where: { handle: "h/1" }, data: { subject: "u1" } });
@@ -230,21 +261,44 @@ describe("POST /auth/login", () => {
 
   it("P0 a self-login flow returns to its stored path (default /grants) and skips consent", async () => {
     const future = new Date(Date.now() + 60_000);
-    db.prisma.authorizationRequest.findUnique.mockResolvedValue({ handle: "s", redirectUri: "urn:mcp-auth:self-login", state: "/grants/x", expiresAt: future });
-    const a = await withCsrf("/auth/login");
+    db.prisma.authorizationRequest.findUnique.mockResolvedValue({ handle: "s", flowType: "self_login", redirectUri: "urn:mcp-auth:self-login", state: "/grants/x", expiresAt: future });
+    const a = await withCsrfBound("/auth/login", "s");
     expect((await post(a.jar, { username: "a", password: "b", flow: "s", csrf_token: a.csrf })).headers.get("location")).toBe("/grants/x");
-    db.prisma.authorizationRequest.findUnique.mockResolvedValue({ handle: "s", redirectUri: "urn:mcp-auth:self-login", state: "", expiresAt: future });
-    const b = await withCsrf("/auth/login");
+    db.prisma.authorizationRequest.findUnique.mockResolvedValue({ handle: "s", flowType: "self_login", redirectUri: "urn:mcp-auth:self-login", state: "", expiresAt: future });
+    const b = await withCsrfBound("/auth/login", "s");
     expect((await post(b.jar, { username: "a", password: "b", flow: "s", csrf_token: b.csrf })).headers.get("location")).toBe("/grants");
+    for (const evil of ["https://evil.example.test/", "//evil.example.test", "/\\evil.example.test"]) {
+      db.prisma.authorizationRequest.findUnique.mockResolvedValue({ handle: "s", flowType: "self_login", redirectUri: "urn:mcp-auth:self-login", state: evil, expiresAt: future });
+      const c = await withCsrfBound("/auth/login", "s");
+      expect((await post(c.jar, { username: "a", password: "b", flow: "s", csrf_token: c.csrf })).headers.get("location")).toBe("/grants");
+    }
+  });
+
+  it("M3: an oauth flow whose redirectUri is the self-login sentinel goes to consent, never to its state", async () => {
+    db.prisma.authorizationRequest.findUnique.mockResolvedValue({ handle: "s", flowType: "oauth", redirectUri: "urn:mcp-auth:self-login", state: "https://evil.example.test/", expiresAt: new Date(Date.now() + 60_000) });
+    const a = await withCsrfBound("/auth/login", "s");
+    expect((await post(a.jar, { username: "a", password: "b", flow: "s", csrf_token: a.csrf })).headers.get("location")).toBe("/oauth/consent?flow=s");
+  });
+
+  it("H2: a login naming a flow from a browser that did not start it is refused before credentials are tried", async () => {
+    const { jar, csrf } = await withCsrf("/auth/login?flow=h1");
+    const res = await post(jar, { username: "a", password: "b", flow: "h1", csrf_token: csrf });
+    expect(res.status).toBe(400);
+    expect(await res.text()).toContain("browser that started it");
+    expect(la.validateLocalUser).not.toHaveBeenCalled();
+    expect(db.prisma.authorizationRequest.update).not.toHaveBeenCalled();
+    expect(jar.cookies.has("session")).toBe(false);
+    const other = await withCsrfBound("/auth/login?flow=h1", "other");
+    expect((await post(other.jar, { username: "a", password: "b", flow: "h1", csrf_token: other.csrf })).status).toBe(400);
   });
 
   it("P0 an expired or unknown flow still logs in but goes to /auth/account without touching the row", async () => {
-    db.prisma.authorizationRequest.findUnique.mockResolvedValueOnce({ handle: "e", redirectUri: "https://c.example.test/cb", expiresAt: new Date(Date.now() - 1) });
-    const a = await withCsrf("/auth/login");
+    db.prisma.authorizationRequest.findUnique.mockResolvedValueOnce({ handle: "e", flowType: "oauth", redirectUri: "https://c.example.test/cb", expiresAt: new Date(Date.now() - 1) });
+    const a = await withCsrfBound("/auth/login", "e");
     const expired = await post(a.jar, { username: "a", password: "b", flow: "e", csrf_token: a.csrf });
     expect(expired.headers.get("location")).toBe("/auth/account");
     db.prisma.authorizationRequest.findUnique.mockResolvedValueOnce(null);
-    const b = await withCsrf("/auth/login");
+    const b = await withCsrfBound("/auth/login", "nope");
     const unknown = await post(b.jar, { username: "a", password: "b", flow: "nope", csrf_token: b.csrf });
     expect(unknown.headers.get("location")).toBe("/auth/account");
     expect(db.prisma.authorizationRequest.update).not.toHaveBeenCalled();
@@ -301,8 +355,10 @@ describe("/auth/account and POST /auth/password", () => {
     la.changePassword.mockRejectedValueOnce(new Error("Current password is incorrect"));
     expect(await post({ current_password: "wrong", new_password: GOOD_PW, confirm_new_password: GOOD_PW })).toContain("Current password is incorrect.");
 
-    la.changePassword.mockResolvedValueOnce(undefined);
+    la.changePassword.mockResolvedValueOnce(5);
     expect(await post({ current_password: "old", new_password: GOOD_PW, confirm_new_password: GOOD_PW })).toContain("Password changed.");
+    // The changing browser is re-issued a cookie at the new epoch.
+    expect(decodeURIComponent(jar.cookies.get("session")!)).toMatch(/^s:u1\.5\./);
     expect(la.changePassword).toHaveBeenLastCalledWith("u1", "old", GOOD_PW);
   });
 

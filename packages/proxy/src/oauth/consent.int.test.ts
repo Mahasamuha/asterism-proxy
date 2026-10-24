@@ -2,6 +2,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { failInTransactions } from "../test-helpers/oauth-faults.js";
 import { REDIRECT_URI, RESOURCE, getPath, postForm, startRouterApp, type RouterApp } from "../test-helpers/oauth-harness.js";
 import { cookieClient, csrfFrom } from "../test-helpers/http.js";
+import { bindBrowser, bindRouter } from "../test-helpers/fix-f-bind.js";
 import { disconnectDb, truncateAll } from "../test-helpers/db.js";
 import { seedClient, seedDeniedClient, seedDeviceCode, seedGrant, seedUser, sha256Hex } from "../test-helpers/seed.js";
 
@@ -13,7 +14,7 @@ import { consentRouter } from "./consent.js";
 
 let app: RouterApp;
 beforeAll(async () => {
-  app = await startRouterApp(consentRouter);
+  app = await startRouterApp(consentRouter, bindRouter);
 });
 afterAll(async () => {
   await app.close();
@@ -28,7 +29,7 @@ async function flow(over: { scopes?: string[]; device?: { userCode: string }; cl
   const handle = `flow-${Math.random().toString(36).slice(2)}`;
   await prisma.authorizationRequest.create({
     data: {
-      handle, clientId: client.clientId, resource: RESOURCE, scopes: over.scopes ?? ["read"], subject: user.id, state: over.device?.userCode ?? "st",
+      handle, flowType: over.device ? "device" : "oauth", clientId: client.clientId, resource: RESOURCE, scopes: over.scopes ?? ["read"], subject: user.id, state: over.device?.userCode ?? "st",
       redirectUri: over.device ? DEVICE_FLOW_REDIRECT_URI_SENTINEL : REDIRECT_URI, codeChallenge: "c".repeat(43), expiresAt: new Date(Date.now() + 60_000),
     },
   });
@@ -38,6 +39,9 @@ async function flow(over: { scopes?: string[]; device?: { userCode: string }; cl
 /** Loads the consent page (CSRF cookie) and returns a function that submits the form. */
 async function consentForm(handle: string) {
   const c = cookieClient();
+  // The flow's own browser: bound to the flow and signed in as its subject.
+  const row = await prisma.authorizationRequest.findUniqueOrThrow({ where: { handle } });
+  await bindBrowser(app.baseUrl, c, handle, row.subject!);
   const page = await getPath(app.baseUrl, `/oauth/consent?flow=${handle}`, c.fetch);
   expect(page.status).toBe(200);
   const csrf = csrfFrom(page.text);
@@ -122,18 +126,13 @@ describe("authorization_code consent (P0)", () => {
     expect(g.revokedAt).toBeNull();
   });
 
-  it("an existing grant for the same resource covering the scopes skips the form and reuses the grant; a wider request does not", async () => {
+  it("an existing grant covering the scopes still shows the form (no auto-approve) and is reused on approve", async () => {
     const f = await flow({ scopes: ["read"] });
     const grant = await seedGrant({ userId: f.user.id, clientId: f.client.clientId, scopes: ["read", "write"] });
-    const r = await getPath(app.baseUrl, `/oauth/consent?flow=${f.handle}`);
-    expect(r.status).toBe(302);
+    const submit = await consentForm(f.handle);
+    expect(await prisma.authCode.count()).toBe(0);
+    expect((await submit()).status).toBe(302);
     expect((await prisma.authCode.findFirstOrThrow()).grantId).toBe(grant.id);
-
-    const wider = await flow({ scopes: ["read", "admin"] });
-    await seedGrant({ userId: wider.user.id, clientId: wider.client.clientId, scopes: ["read"] });
-    const page = await getPath(app.baseUrl, `/oauth/consent?flow=${wider.handle}`);
-    expect(page.status).toBe(200);
-    expect(await prisma.authCode.count()).toBe(1);
   });
 });
 

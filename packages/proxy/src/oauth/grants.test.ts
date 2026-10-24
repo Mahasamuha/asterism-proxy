@@ -198,9 +198,43 @@ describe("GET /grants and /auth/logout", () => {
     expect(r.text).toContain("https://gone.example.test");
   });
 
-  it("POST /auth/logout clears the session cookie", async () => {
-    const r = await postEmpty(app.baseUrl, "/auth/logout");
+  /** A browser that has loaded /grants, so it holds the signed logout CSRF cookie. */
+  async function logoutToken() {
+    m("grant", "findMany").mockResolvedValue([]);
+    const jar = cookieClient();
+    const page = await jar.fetch(`${app.baseUrl}/grants`);
+    const html = await page.text();
+    const form = html.split("<form").find((f) => f.includes('action="/auth/logout"'))!;
+    return { jar, csrf: csrfFrom(form) };
+  }
+
+  it("POST /auth/logout without the CSRF token is refused: nothing is revoked or cleared (M6)", async () => {
+    const { jar } = await logoutToken();
+    for (const fields of [{} as Record<string, string>, { csrf_token: "0".repeat(64) }]) {
+      const r = await postForm(app.baseUrl, "/auth/logout", fields, jar.fetch);
+      expect(r.status).toBe(403);
+      expect(r.headers.getSetCookie().join(";")).not.toMatch(/session=;/);
+    }
+    expect((await postEmpty(app.baseUrl, "/auth/logout")).status).toBe(403);
+    expect(m("user", "update")).not.toHaveBeenCalled();
+  });
+
+  it("POST /auth/logout with the CSRF token bumps the session epoch and clears the cookie (M5, M6)", async () => {
+    m("user", "update").mockResolvedValue({ sessionEpoch: 1 });
+    const { jar, csrf } = await logoutToken();
+    const r = await postForm(app.baseUrl, "/auth/logout", { csrf_token: csrf }, jar.fetch);
     expect(r.status).toBe(200);
     expect(r.headers.getSetCookie().join(";")).toMatch(/session=;/);
+    expect(m("user", "update").mock.calls[0]![0]).toMatchObject({ where: { id: "u1" }, data: { sessionEpoch: { increment: 1 } } });
   });
+
+  it("POST /auth/logout from a browser that never loaded a page with the button is refused and revokes nothing", async () => {
+    session.mockResolvedValue(null);
+    const jar = cookieClient();
+    await jar.fetch(`${app.baseUrl}/grants`, { redirect: "manual" }); // logged out: redirected, no logout token issued
+    const r = await postEmpty(app.baseUrl, "/auth/logout");
+    expect(r.status).toBe(403);
+    expect(m("user", "update")).not.toHaveBeenCalled();
+  });
+
 });

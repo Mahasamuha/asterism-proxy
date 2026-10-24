@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createVerifier, TokenValidationError } from "../../asterism-verify/src/index.js";
-import { cookieClient, form } from "./test-helpers/http.js";
+import { cookieClient, csrfFrom, form } from "./test-helpers/http.js";
 import { pkce } from "./test-helpers/seed.js";
 import { TEST_ISSUER_URL } from "./test-helpers/env.js";
 import {
@@ -179,7 +179,13 @@ describe("device flow, end to end", () => {
     const browser = cookieClient();
     await setupFirstAccount(browser, app.baseUrl);
     browser.cookies.clear();
-    const entry = await browser.fetch(`${app.baseUrl}/oauth/device?user_code=${encodeURIComponent(userCode)}`);
+    // The verification link only shows the pre-filled entry page; login starts on the user's POST.
+    const entryPage = await browser.fetch(`${app.baseUrl}/oauth/device?user_code=${encodeURIComponent(userCode)}`);
+    expect(entryPage.status).toBe(200);
+    const entry = await browser.fetch(`${app.baseUrl}/oauth/device`, {
+      method: "POST",
+      ...form({ csrf_token: csrfFrom(await entryPage.text()), user_code: userCode }),
+    });
     expect(entry.status).toBe(302);
     const consentUrl = await loginForFlow(browser, app.baseUrl, locationOf(entry, app.baseUrl));
     expect(consentUrl.pathname).toBe("/oauth/consent");

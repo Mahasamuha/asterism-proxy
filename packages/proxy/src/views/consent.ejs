@@ -10,6 +10,8 @@
     .domain { font-size: .95rem; color: #555; margin: -0.5rem 0 1rem; }
     .domain strong { color: #111; }
     .warning { color: #92400e; background: #fef3c7; border: 1px solid #fde68a; padding: .6rem .8rem; border-radius: 4px; margin-bottom: 1rem; font-size: .9rem; }
+    .usercode { font-size: 2rem; letter-spacing: .15em; font-weight: 700; text-align: center; margin: .25rem 0 1rem; font-family: ui-monospace, monospace; }
+    .usercode-label { margin: 0; font-size: .85rem; color: #555; text-align: center; }
     .resource { font-size: .9rem; color: #555; margin-bottom: 1rem; }
     ul.scopes { list-style: none; padding: 0; margin: 0 0 1.5rem; }
     ul.scopes li { padding: .5rem 0; border-bottom: 1px solid #eee; font-size: .95rem; }
@@ -26,9 +28,17 @@
     <% if (logoUri) { %>
       <img class="logo" src="<%= logoUri %>" alt="">
     <% } %>
-    <h1><%= clientName %> wants to access <%= resourceServerName %></h1>
+    <% if (isDevice && userCode) { %>
+      <p class="usercode-label">Code shown on your device</p>
+      <p class="usercode"><%= userCode %></p>
+      <p class="warning">Confirm that this code matches the code shown on your device. If you did not start this on your own device, or the codes differ, choose Deny.</p>
+    <% } %>
+    <h1><% if (hasGrant && !isDevice) { %>Continue to <%= clientName %>?<% } else { %><%= clientName %> wants to access <%= resourceServerName %><% } %></h1>
     <% if (clientDomain) { %>
       <p class="domain">Requesting client at <strong><%= clientDomain %></strong></p>
+    <% } %>
+    <% if (claimedBy) { %>
+      <p class="domain">Client identity as claimed by <strong><%= claimedBy %></strong> (not independently verified)</p>
     <% } %>
     <% if (redirectHost) { %>
       <p class="domain">After approval you'll be sent to <strong><%= redirectHost %></strong></p>
@@ -50,7 +60,7 @@
       <input type="hidden" name="flow" value="<%= flow %>">
       <div class="actions">
         <button class="deny" type="submit" name="action" value="deny">Deny</button>
-        <button class="approve" type="submit" name="action" value="approve">Approve</button>
+        <button class="approve" type="submit" name="action" value="approve"><%= (isDevice && userCode) ? "The code matches - Approve" : "Approve" %></button>
       </div>
     </form>
   </div>

@@ -19,9 +19,10 @@
     <% if (error) { %>
       <p class="error"><%= error %></p>
     <% } %>
-    <form method="GET" action="/oauth/device">
+    <form method="POST" action="/oauth/device">
+      <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
       <label for="user_code">Code</label>
-      <input id="user_code" name="user_code" class="code" type="text" placeholder="XXXX-XXXX" autocomplete="off" autofocus required>
+      <input id="user_code" name="user_code" class="code" type="text" value="<%= userCode %>" placeholder="XXXX-XXXX" autocomplete="off" autofocus required>
       <button type="submit">Continue</button>
     </form>
   </div>

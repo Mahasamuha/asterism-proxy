@@ -62,7 +62,7 @@ describe("OIDC against a real provider", () => {
     expect(new URL(callback).searchParams.get("state")).toBe(upstream.searchParams.get("state"));
 
     const restore = idpClaims({ sub: "idp-user-1", email: "idp-user@example.test" });
-    const result = await oidc.handleUpstreamCallback(callback).finally(restore);
+    const result = await oidc.handleUpstreamCallback(callback, () => true).finally(restore);
     expect(result.authRequestHandle).toBe(handle);
     const user = await prisma.user.findUniqueOrThrow({ where: { id: result.userId } });
     expect(user).toMatchObject({ oidcSub: "idp-user-1", oidcIssuer: issuer, email: "idp-user@example.test" });
@@ -73,8 +73,8 @@ describe("OIDC against a real provider", () => {
   it("P0 replaying the same callback URL fails", async () => {
     const handle = await newFlow();
     const callback = await authorizeAt(await oidc.startUpstreamAuth(handle));
-    await oidc.handleUpstreamCallback(callback);
-    await expect(oidc.handleUpstreamCallback(callback)).rejects.toThrow(/Unknown or expired/);
+    await oidc.handleUpstreamCallback(callback, () => true);
+    await expect(oidc.handleUpstreamCallback(callback, () => true)).rejects.toThrow(/Unknown or expired/);
     expect(await prisma.user.count()).toBe(1);
   });
 
@@ -82,7 +82,7 @@ describe("OIDC against a real provider", () => {
     const handle = await newFlow();
     const callback = await authorizeAt(await oidc.startUpstreamAuth(handle));
     await prisma.authorizationRequest.update({ where: { handle }, data: { upstreamNonce: "a-different-nonce" } });
-    await expect(oidc.handleUpstreamCallback(callback)).rejects.toThrow();
+    await expect(oidc.handleUpstreamCallback(callback, () => true)).rejects.toThrow();
     expect(await prisma.user.count()).toBe(0);
     expect((await prisma.authorizationRequest.findUniqueOrThrow({ where: { handle } })).subject).toBeNull();
   });
@@ -91,28 +91,28 @@ describe("OIDC against a real provider", () => {
     const handle = await newFlow();
     const callback = await authorizeAt(await oidc.startUpstreamAuth(handle));
     await prisma.authorizationRequest.update({ where: { handle }, data: { upstreamVerifier: "x".repeat(64) } });
-    await expect(oidc.handleUpstreamCallback(callback)).rejects.toThrow();
+    await expect(oidc.handleUpstreamCallback(callback, () => true)).rejects.toThrow();
     expect(await prisma.user.count()).toBe(0);
   });
 
   it("P0 a state that belongs to no request is rejected", async () => {
     await newFlow();
-    await expect(oidc.handleUpstreamCallback("http://localhost:3000/oauth/callback?code=c&state=nope")).rejects.toThrow(/Unknown or expired/);
+    await expect(oidc.handleUpstreamCallback("http://localhost:3000/oauth/callback?code=c&state=nope", () => true)).rejects.toThrow(/Unknown or expired/);
   });
 
   it("P0 a deactivated user is refused on the next login", async () => {
-    const first = await oidc.handleUpstreamCallback(await authorizeAt(await oidc.startUpstreamAuth(await newFlow("f1"))));
+    const first = await oidc.handleUpstreamCallback(await authorizeAt(await oidc.startUpstreamAuth(await newFlow("f1"))), () => true);
     await prisma.user.update({ where: { id: first.userId }, data: { deactivatedAt: new Date() } });
 
     const callback = await authorizeAt(await oidc.startUpstreamAuth(await newFlow("f2")));
-    await expect(oidc.handleUpstreamCallback(callback)).rejects.toThrow("Account is deactivated");
+    await expect(oidc.handleUpstreamCallback(callback, () => true)).rejects.toThrow("Account is deactivated");
     expect((await prisma.authorizationRequest.findUniqueOrThrow({ where: { handle: "f2" } })).subject).toBeNull();
   });
 
   it("P1 logging in again reuses the (sub, issuer) row and keeps the email when the claim is absent", async () => {
     const restore = idpClaims({ email: "kept@example.test" });
-    const a = await oidc.handleUpstreamCallback(await authorizeAt(await oidc.startUpstreamAuth(await newFlow("f1")))).finally(restore);
-    const b = await oidc.handleUpstreamCallback(await authorizeAt(await oidc.startUpstreamAuth(await newFlow("f2"))));
+    const a = await oidc.handleUpstreamCallback(await authorizeAt(await oidc.startUpstreamAuth(await newFlow("f1"))), () => true).finally(restore);
+    const b = await oidc.handleUpstreamCallback(await authorizeAt(await oidc.startUpstreamAuth(await newFlow("f2"))), () => true);
     expect(b.userId).toBe(a.userId);
     expect(await prisma.user.count()).toBe(1);
     expect((await prisma.user.findUniqueOrThrow({ where: { id: a.userId } })).email).toBe("kept@example.test");

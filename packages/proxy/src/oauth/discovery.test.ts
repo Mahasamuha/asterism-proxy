@@ -21,6 +21,10 @@ beforeEach(() => {
 const PATHS = ["/.well-known/oauth-authorization-server", "/.well-known/openid-configuration"];
 
 describe("authorization server metadata (P1)", () => {
+  it.each(PATHS)("%s advertises RFC 9207 iss support", async (path) => {
+    expect((await getPath(app.baseUrl, path)).json["authorization_response_iss_parameter_supported"]).toBe(true);
+  });
+
   it.each(PATHS)("%s advertises the endpoints under the issuer", async (path) => {
     const r = await getPath(app.baseUrl, path);
     expect(r.status).toBe(200);

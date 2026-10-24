@@ -1,30 +1,117 @@
 import bcrypt from "bcryptjs";
+import { config } from "../config.js";
 import { prisma } from "../db.js";
 import type { Prisma } from "../generated/prisma/client.js";
 import { createLogger } from "../logger.js";
 import { incrementCounter } from "../metrics.js";
+import { MAX_PASSWORD_BYTES } from "./password-policy.js";
 
 const log = createLogger("local-accounts");
 
 const BCRYPT_COST = 12;
-const MAX_FAILURES = 5;
+const MAX_IP_FAILURES = 5;
+const MAX_USERNAME_FAILURES = 10;
+const MAX_PASSWORD_CHANGE_FAILURES = 5;
+const MAX_THROTTLE_KEY_LENGTH = 256;
 const FAILURE_WINDOW_MS = 15 * 60 * 1000;
-export const MIN_PASSWORD_LENGTH = 12;
+export { MIN_PASSWORD_LENGTH } from "./password-policy.js";
 
 // A real, well-formed cost-12 bcrypt hash of a random throwaway string, used so failed lookups take the
 // same time as a real comparison — avoids leaking account existence via timing. It must be a valid
 // 60-character hash: bcrypt.compare returns immediately on a malformed one, defeating the defence.
 const DUMMY_HASH = "$2b$12$ZPPdU3fzm.6eUstXs1Neve8W2zHAqkIit3VGV8MhPi51xB1x7mvyO";
 
-export async function checkBruteForce(ip: string): Promise<boolean> {
-  const since = new Date(Date.now() - FAILURE_WINDOW_MS);
-  const count = await prisma.loginFailure.count({ where: { ip, failedAt: { gte: since } } });
-  return count < MAX_FAILURES;
+/** Canonical form of a username: Unicode NFKC, trimmed, lowercased. Applied at
+ * creation and at login (and used as the throttle key), so "Alice", " alice"
+ * and a fullwidth "ａｌｉｃｅ" are one account and one throttle bucket. */
+export function normalizeUsername(raw: string): string {
+  return raw.normalize("NFKC").trim().toLowerCase();
 }
 
-export async function recordFailure(ip: string): Promise<void> {
-  incrementCounter("local_login_failures_total");
-  await prisma.loginFailure.create({ data: { ip } });
+// ---------------------------------------------------------------------------
+// Login throttle. An attempt is RECORDED BEFORE the password is evaluated, in
+// one transaction that holds a per-key pg_advisory_xact_lock, so the
+// check-and-record is atomic: N concurrent requests cannot all read "under the
+// limit" and then all run bcrypt (the old count -> bcrypt -> record order let
+// 26 of 40 concurrent wrong passwords through a limit of 5). A failure simply
+// leaves its row; a success deletes its own row (successes don't count against
+// the IP) and clears the username's rows. Two independent keys are enforced, so
+// rotating source addresses can't exceed the per-account limit and one address
+// can't spray many accounts.
+// ---------------------------------------------------------------------------
+
+/** Handle for a recorded attempt, passed to endAttempt() once the outcome is known. */
+export interface AttemptSlot {
+  id: number;
+  key: string | null;
+}
+
+interface AttemptLimits {
+  ip: string;
+  /** Per-IP limit; omit to skip the IP check (the row is then stored with `ip` as an inert label). */
+  maxPerIp?: number;
+  key?: string;
+  maxPerKey?: number;
+}
+
+async function reserveAttempt(limits: AttemptLimits): Promise<AttemptSlot | null> {
+  const since = new Date(Date.now() - FAILURE_WINDOW_MS);
+  // Bound the key so a huge username can't bloat the table.
+  const key = limits.key === undefined ? null : limits.key.slice(0, MAX_THROTTLE_KEY_LENGTH);
+  // Locks are always taken in sorted order so two requests sharing both keys can't deadlock.
+  const lockNames = [limits.maxPerIp !== undefined ? `login:ip:${limits.ip}` : null, key !== null ? `login:key:${key}` : null]
+    .filter((k): k is string => k !== null)
+    .sort();
+
+  return prisma.$transaction(
+    async (tx) => {
+      for (const name of lockNames) {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${name}::text, 0::bigint))`;
+      }
+      if (limits.maxPerIp !== undefined) {
+        const byIp = await tx.loginFailure.count({ where: { ip: limits.ip, failedAt: { gte: since } } });
+        if (byIp >= limits.maxPerIp) return null;
+      }
+      if (key !== null && limits.maxPerKey !== undefined) {
+        const byKey = await tx.loginFailure.count({ where: { username: key, failedAt: { gte: since } } });
+        if (byKey >= limits.maxPerKey) return null;
+      }
+      const row = await tx.loginFailure.create({ data: { ip: limits.ip, username: key }, select: { id: true } });
+      return { id: row.id, key };
+    },
+    // Waiting for the per-key lock (and a pooled connection) under a burst must not trip the 5s default.
+    { maxWait: 15_000, timeout: 15_000 }
+  );
+}
+
+/** Records a login attempt for `ip` and the normalised `username`, unless
+ * either is already at its limit, in which case it returns null and nothing
+ * is evaluated. */
+export function beginLoginAttempt(ip: string, username: string): Promise<AttemptSlot | null> {
+  return reserveAttempt({ ip, maxPerIp: MAX_IP_FAILURES, key: username, maxPerKey: MAX_USERNAME_FAILURES });
+}
+
+/** Same, for the current-password check on /auth/password (per user, not per IP:
+ * the caller already holds a session). */
+export function beginPasswordChangeAttempt(userId: string): Promise<AttemptSlot | null> {
+  return reserveAttempt({ ip: "pwchange", key: `pwchange:${userId}`, maxPerKey: MAX_PASSWORD_CHANGE_FAILURES });
+}
+
+/** Records only a per-IP attempt (for /setup's token check). */
+export function beginIpAttempt(ip: string): Promise<AttemptSlot | null> {
+  return reserveAttempt({ ip, maxPerIp: MAX_IP_FAILURES });
+}
+
+/** Settles an attempt. A failure keeps its row (and counts a metric); a
+ * success deletes the row and clears the key's counter. */
+export async function endAttempt(slot: AttemptSlot, success: boolean): Promise<void> {
+  if (!success) {
+    incrementCounter("local_login_failures_total");
+    return;
+  }
+  await prisma.loginFailure.deleteMany({
+    where: slot.key === null ? { id: slot.id } : { OR: [{ id: slot.id }, { username: slot.key }] },
+  });
 }
 
 export async function pruneLoginFailures(): Promise<void> {
@@ -36,6 +123,25 @@ export async function localAccountsExist(): Promise<boolean> {
   return count > 0;
 }
 
+/** bcrypt-hashes `password`, refusing one longer than 72 bytes (bcrypt would
+ * silently drop the excess). Callers validate for a friendly message first;
+ * this is the backstop no caller can skip. */
+async function hashPassword(password: string): Promise<string> {
+  if (Buffer.byteLength(password, "utf8") > MAX_PASSWORD_BYTES) {
+    throw new Error(`Password must be at most ${MAX_PASSWORD_BYTES} bytes when UTF-8 encoded`);
+  }
+  return bcrypt.hash(password, BCRYPT_COST);
+}
+
+/** Startup check: /setup is open to whoever reaches a fresh instance first
+ * unless SETUP_TOKEN is set. Logs a warning (and returns true) while no
+ * account exists and no token is configured. */
+export async function warnIfSetupUnprotected(): Promise<boolean> {
+  if (config.setupToken !== undefined || (await localAccountsExist())) return false;
+  log.warn("No local account exists and SETUP_TOKEN is not set: anyone who can reach /setup can create the first (admin) account. Set SETUP_TOKEN (at least 32 characters) or create the account before exposing this instance.");
+  return true;
+}
+
 /** Creates a LocalUser + linked User row in a single transaction (or in the
  * caller's, when `tx` is given). Throws if the username is already taken. No
  * role is assigned — admin is a scope (§5), not an account attribute. */
@@ -44,7 +150,9 @@ export async function createLocalUser(
   password: string,
   tx?: Prisma.TransactionClient
 ): Promise<string> {
-  const passwordHash = await bcrypt.hash(password, BCRYPT_COST);
+  username = normalizeUsername(username);
+  if (!username) throw new Error("Username is required");
+  const passwordHash = await hashPassword(password);
 
   const run = async (db: Prisma.TransactionClient): Promise<string> => {
     const user = await db.user.create({ data: { email: username }, select: { id: true } });
@@ -78,6 +186,7 @@ export async function createFirstLocalUser(username: string, password: string): 
 /** Validates credentials and returns the User.id on success. Throws on invalid
  * credentials or a deactivated account. */
 export async function validateLocalUser(username: string, password: string): Promise<string> {
+  username = normalizeUsername(username);
   const localUser = await prisma.localUser.findUnique({
     where: { username },
     include: { user: { select: { id: true, deactivatedAt: true } } },
@@ -104,15 +213,21 @@ export async function validateLocalUser(username: string, password: string): Pro
   return localUser.user.id;
 }
 
-/** Changes a logged-in user's password after verifying their current one. */
-export async function changePassword(userId: string, currentPassword: string, newPassword: string): Promise<void> {
+/** Changes a logged-in user's password after verifying their current one, and
+ * bumps the user's session epoch so every other session ends. Returns the new
+ * epoch; the caller re-issues the current browser's cookie with it. */
+export async function changePassword(userId: string, currentPassword: string, newPassword: string): Promise<number> {
   const localUser = await prisma.localUser.findUnique({ where: { userId } });
   if (!localUser) throw new Error("No local account for this user");
 
   const valid = await bcrypt.compare(currentPassword, localUser.passwordHash);
   if (!valid) throw new Error("Current password is incorrect");
 
-  const passwordHash = await bcrypt.hash(newPassword, BCRYPT_COST);
-  await prisma.localUser.update({ where: { id: localUser.id }, data: { passwordHash } });
+  const passwordHash = await hashPassword(newPassword);
+  const [, user] = await prisma.$transaction([
+    prisma.localUser.update({ where: { id: localUser.id }, data: { passwordHash } }),
+    prisma.user.update({ where: { id: userId }, data: { sessionEpoch: { increment: 1 } }, select: { sessionEpoch: true } }),
+  ]);
   log.info({ userId }, "Password changed");
+  return user.sessionEpoch;
 }

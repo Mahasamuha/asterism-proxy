@@ -4,16 +4,23 @@ import { startApp, type StartedApp } from "../test-helpers/app.js";
 import { disconnectDb, truncateAll } from "../test-helpers/db.js";
 import { cookieClient, csrfFrom, form, type CookieClient } from "../test-helpers/http.js";
 import { seedLocalUser } from "../test-helpers/seed.js";
+import { startRouterApp as startIdentityApp, type RouterApp } from "../test-helpers/identity-app.js";
+import { bindBrowser, bindRouter } from "../test-helpers/fix-f-bind.js";
+import { localAccountsRouter } from "./local-accounts-router.js";
 
 const PW = "correct horse battery staple";
 let app: StartedApp;
+// Same router plus a test-only route that makes a jar "the browser that started" a flow.
+let flowApp: RouterApp;
 
 beforeAll(async () => {
   app = await startApp();
+  flowApp = await startIdentityApp([localAccountsRouter, bindRouter]);
 });
 beforeEach(truncateAll);
 afterAll(async () => {
   await app.close();
+  await flowApp.close();
   await disconnectDb();
 });
 
@@ -31,6 +38,14 @@ async function setup(jar: CookieClient, username = "admin", password = PW) {
 async function login(jar: CookieClient, fields: Record<string, string>, loginPath = "/auth/login") {
   const csrf = await csrfFor(jar, loginPath);
   return jar.fetch(url("/auth/login"), { method: "POST", ...form({ ...fields, csrf_token: csrf }) });
+}
+
+/** Like login(), but against flowApp, with the jar bound to `flow` first. */
+async function flowLogin(fields: Record<string, string>, bindFlow: string | null, loginPath = "/auth/login") {
+  const jar = cookieClient();
+  if (bindFlow) await bindBrowser(flowApp.baseUrl, jar, bindFlow);
+  const csrf = csrfFrom(await (await jar.fetch(flowApp.baseUrl + loginPath)).text());
+  return jar.fetch(flowApp.baseUrl + "/auth/login", { method: "POST", ...form({ ...fields, csrf_token: csrf }) });
 }
 
 describe("/setup", () => {
@@ -126,7 +141,7 @@ describe("/auth/login", () => {
     await prisma.authorizationRequest.create({
       data: { handle: "flow-1", clientId: "https://c.example.test/c.json", resource: "https://mcp.example.test", scopes: ["read"], redirectUri: "https://c.example.test/cb", codeChallenge: "x", expiresAt: new Date(Date.now() + 60_000) },
     });
-    const res = await login(cookieClient(), { username: "alice", password, flow: "flow-1" }, "/auth/login?flow=flow-1");
+    const res = await flowLogin({ username: "alice", password, flow: "flow-1" }, "flow-1", "/auth/login?flow=flow-1");
     expect(res.headers.get("location")).toBe("/oauth/consent?flow=flow-1");
     expect((await prisma.authorizationRequest.findUniqueOrThrow({ where: { handle: "flow-1" } })).subject).toBe(user.id);
   });
@@ -134,9 +149,31 @@ describe("/auth/login", () => {
   it("P0 self-login flow: returns to its stored path, skipping consent", async () => {
     const { password } = await seedLocalUser({ username: "alice" });
     await prisma.authorizationRequest.create({
-      data: { handle: "self-1", clientId: "urn:mcp-auth:self", resource: "urn:mcp-auth:self", scopes: [], redirectUri: "urn:mcp-auth:self-login", state: "/grants", codeChallenge: "self-login-no-pkce", expiresAt: new Date(Date.now() + 60_000) },
+      data: { handle: "self-1", clientId: "urn:mcp-auth:self", resource: "urn:mcp-auth:self", scopes: [], flowType: "self_login", redirectUri: "urn:mcp-auth:self-login", state: "/grants", codeChallenge: "self-login-no-pkce", expiresAt: new Date(Date.now() + 60_000) },
     });
-    const res = await login(cookieClient(), { username: "alice", password, flow: "self-1" });
+    const res = await flowLogin({ username: "alice", password, flow: "self-1" }, "self-1");
+    expect(res.headers.get("location")).toBe("/grants");
+  });
+
+  it("P0 a flow login from a browser that did not start the flow is refused and sets no subject or session", async () => {
+    const { password } = await seedLocalUser({ username: "alice" });
+    await prisma.authorizationRequest.create({
+      data: { handle: "flow-2", clientId: "https://c.example.test/c.json", resource: "https://mcp.example.test", scopes: ["read"], redirectUri: "https://c.example.test/cb", codeChallenge: "x", expiresAt: new Date(Date.now() + 60_000) },
+    });
+    const unbound = await flowLogin({ username: "alice", password, flow: "flow-2" }, null);
+    expect(unbound.status).toBe(400);
+    expect(unbound.headers.getSetCookie().join(";")).not.toContain("session=");
+    const other = await flowLogin({ username: "alice", password, flow: "flow-2" }, "some-other-flow");
+    expect(other.status).toBe(400);
+    expect((await prisma.authorizationRequest.findUniqueOrThrow({ where: { handle: "flow-2" } })).subject).toBeNull();
+  });
+
+  it("P0 a self-login row with an external return path falls back to /grants", async () => {
+    const { password } = await seedLocalUser({ username: "alice" });
+    await prisma.authorizationRequest.create({
+      data: { handle: "self-2", flowType: "self_login", clientId: "urn:mcp-auth:self", resource: "urn:mcp-auth:self", scopes: [], redirectUri: "urn:mcp-auth:self-login", state: "https://evil.example/x", codeChallenge: "self-login-no-pkce", expiresAt: new Date(Date.now() + 60_000) },
+    });
+    const res = await flowLogin({ username: "alice", password, flow: "self-2" }, "self-2");
     expect(res.headers.get("location")).toBe("/grants");
   });
 
@@ -145,7 +182,7 @@ describe("/auth/login", () => {
     await prisma.authorizationRequest.create({
       data: { handle: "old", clientId: "https://c.example.test/c.json", resource: "https://mcp.example.test", scopes: ["read"], redirectUri: "https://c.example.test/cb", codeChallenge: "x", expiresAt: new Date(Date.now() - 1000) },
     });
-    const res = await login(cookieClient(), { username: "alice", password, flow: "old" });
+    const res = await flowLogin({ username: "alice", password, flow: "old" }, "old");
     expect(res.headers.get("location")).toBe("/auth/account");
     expect((await prisma.authorizationRequest.findUniqueOrThrow({ where: { handle: "old" } })).subject).toBeNull();
   });

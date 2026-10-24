@@ -6,7 +6,7 @@ import { seedLocalUser, seedUser } from "../test-helpers/seed.js";
 import { getSessionUserId } from "./session.js";
 
 const req = (value: unknown) => ({ signedCookies: { session: value } }) as unknown as Request;
-const cookieFor = (userId: string) => `${userId}.${Date.now()}`;
+const cookieFor = (userId: string, epoch = 0) => `${userId}.${epoch}.${Date.now()}`;
 
 beforeEach(truncateAll);
 afterAll(disconnectDb);
@@ -42,6 +42,16 @@ describe("getSessionUserId against real rows", () => {
     expect(await getSessionUserId(req(cookieFor("no-such-user")))).toBeNull();
     expect(await getSessionUserId(req(cookieFor(`${user.id}x`)))).toBeNull();
     expect(await getSessionUserId(req(cookieFor(`' OR '1'='1`)))).toBeNull();
+  });
+
+  it("P0 rejects a cookie whose epoch is not the user's current one, and the previous cookie format", async () => {
+    const user = await seedUser();
+    expect(await getSessionUserId(req(cookieFor(user.id, 0)))).toBe(user.id);
+    await prisma.user.update({ where: { id: user.id }, data: { sessionEpoch: { increment: 1 } } });
+    expect(await getSessionUserId(req(cookieFor(user.id, 0)))).toBeNull();
+    expect(await getSessionUserId(req(cookieFor(user.id, 2)))).toBeNull();
+    expect(await getSessionUserId(req(cookieFor(user.id, 1)))).toBe(user.id);
+    expect(await getSessionUserId(req(`${user.id}.${Date.now()}`))).toBeNull();
   });
 
   it("P0 still rejects a bare id for a real user", async () => {

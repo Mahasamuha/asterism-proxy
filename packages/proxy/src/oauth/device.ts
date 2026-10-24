@@ -7,6 +7,8 @@ import { resolveClient } from "../clients/cimd.js";
 import { isRegisteredResource, lookupResourceServer } from "../resource-registry.js";
 import { startUpstreamAuth } from "../identity/oidc.js";
 import { bodyOf, stringField } from "../http-params.js";
+import { issueCsrfToken, verifyCsrfToken } from "../identity/csrf.js";
+import { bindFlow } from "../identity/flow-binding.js";
 
 const log = createLogger("device");
 
@@ -14,8 +16,9 @@ export const deviceRouter: Router = Router();
 
 const DEVICE_CODE_TTL_MS = 15 * 60 * 1000;
 // AuthorizationRequest.redirectUri is a browser-flow concept device flow has
-// no use for — this sentinel marks a row as belonging to a device flow
-// rather than an ordinary authorization request, checked by consent.ts.
+// no use for. This value is only an inert placeholder for the non-null column:
+// device rows are identified by AuthorizationRequest.flowType = device, never
+// by this value (a CIMD client controls its own redirect_uris).
 export const DEVICE_FLOW_REDIRECT_URI_SENTINEL = "urn:mcp-auth:device-flow";
 // PKCE doesn't apply to this internal AuthorizationRequest — the polling
 // device (not this browser session) is what eventually calls the token
@@ -44,34 +47,68 @@ function formatUserCode(normalized: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// Per-IP rate limit on user_code entry attempts (§T17) — anonymous, pre-auth
-// guessing against a random code, so this is deliberately separate from
-// local-accounts.ts's per-account LoginFailure tracking. In-memory, same
+// Rate limits on FAILED user_code entries (§T17) — anonymous, pre-auth guessing
+// against a random code (31^8 possibilities), so this is deliberately separate
+// from local-accounts.ts's per-account LoginFailure tracking. In-memory, same
 // tradeoff as every other in-memory limiter in this codebase (T8, T16): a
 // restart clears it, acceptable for a single-instance deployment (§2).
+//
+// Only failures count: a user who enters a valid code is not penalised, so
+// without TRUST_PROXY (every client shares one req.ip) an attacker can't use up
+// the bucket for legitimate users by merely sending requests. Two limits apply:
+//  - per IP (10 failures per window), and
+//  - a global ceiling across all IPs (200 failures per window), so brute force
+//    stays bounded even when the attacker can choose req.ip (a spoofable
+//    X-Forwarded-For behind a mis-set TRUST_PROXY, or many source addresses).
+//    At 200 per 15 minutes, hitting a live 8-character code by guessing is
+//    negligible; the cost is that a sustained attack blocks entry for everyone.
+// The slot is reserved synchronously before the (async) lookup and handed back
+// on success, so concurrent guesses can't all slip under the limit.
 // ---------------------------------------------------------------------------
 
-const CODE_ENTRY_MAX = 10;
+const CODE_ENTRY_MAX_PER_IP = 10;
+const CODE_ENTRY_MAX_GLOBAL = 200;
 const CODE_ENTRY_WINDOW_MS = 15 * 60 * 1000;
-const codeEntryAttempts = new Map<string, { count: number; windowStart: number }>();
+interface FailureWindow {
+  count: number;
+  windowStart: number;
+}
+const failedByIp = new Map<string, FailureWindow>();
+let failedGlobal: FailureWindow = { count: 0, windowStart: Date.now() };
 
-function checkCodeEntryRateLimit(ip: string): boolean {
+/** Clears both limiters. For tests; the limiters are in-memory only. */
+export function resetDeviceEntryLimits(): void {
+  failedByIp.clear();
+  failedGlobal = { count: 0, windowStart: Date.now() };
+}
+
+/** Reserves a failed-entry slot for `ip`. Returns a function that gives the
+ * slot back (call it on success), or null if either limit is reached. */
+function reserveFailedEntry(ip: string): (() => void) | null {
   const now = Date.now();
-  const entry = codeEntryAttempts.get(ip);
-  if (!entry || now - entry.windowStart >= CODE_ENTRY_WINDOW_MS) {
-    codeEntryAttempts.set(ip, { count: 1, windowStart: now });
-    return true;
+  if (now - failedGlobal.windowStart >= CODE_ENTRY_WINDOW_MS) failedGlobal = { count: 0, windowStart: now };
+  let perIp = failedByIp.get(ip);
+  if (!perIp || now - perIp.windowStart >= CODE_ENTRY_WINDOW_MS) {
+    perIp = { count: 0, windowStart: now };
+    failedByIp.set(ip, perIp);
   }
-  if (entry.count >= CODE_ENTRY_MAX) return false;
-  entry.count += 1;
-  return true;
+  if (perIp.count >= CODE_ENTRY_MAX_PER_IP || failedGlobal.count >= CODE_ENTRY_MAX_GLOBAL) return null;
+  perIp.count += 1;
+  failedGlobal.count += 1;
+  const globalAtReserve = failedGlobal;
+  const ipEntry = perIp;
+  return () => {
+    // Only give back into the window the slot was taken from.
+    if (ipEntry.count > 0) ipEntry.count -= 1;
+    if (globalAtReserve.count > 0) globalAtReserve.count -= 1;
+  };
 }
 
 setInterval(
   () => {
     const now = Date.now();
-    for (const [ip, entry] of codeEntryAttempts) {
-      if (now - entry.windowStart >= CODE_ENTRY_WINDOW_MS) codeEntryAttempts.delete(ip);
+    for (const [ip, entry] of failedByIp) {
+      if (now - entry.windowStart >= CODE_ENTRY_WINDOW_MS) failedByIp.delete(ip);
     }
   },
   CODE_ENTRY_WINDOW_MS
@@ -152,16 +189,29 @@ deviceRouter.post("/oauth/device/code", async (req: Request, res: Response) => {
 // login (T6/T7) and T13 consent, exactly like /oauth/authorize.
 // ---------------------------------------------------------------------------
 
+function renderEntry(res: Response, error: string | null, userCode: string, status = 200): void {
+  res.status(status).render("device-entry", { error, csrfToken: issueCsrfToken(res, "csrf_device"), userCode });
+}
+
+// Starting login is a state-changing step taken on the user's own POST, never
+// on a GET: /oauth/device?user_code=… is the verification_uri_complete link an
+// attacker can hand to a victim (device-flow phishing), so following it only
+// shows the entry page pre-filled, and the user must submit it themselves.
 async function startDeviceConsent(req: Request, res: Response, rawCode: string): Promise<void> {
-  const ip = req.ip ?? "unknown";
-  if (!checkCodeEntryRateLimit(ip)) {
-    res.status(429).render("device-entry", { error: "Too many attempts. Please wait and try again." });
+  if (!verifyCsrfToken(req, "csrf_device")) {
+    renderEntry(res, "Invalid or missing CSRF token. Please try again.", normalizeUserCode(rawCode) ? formatUserCode(normalizeUserCode(rawCode)) : "", 403);
+    return;
+  }
+  const release = reserveFailedEntry(req.ip ?? "unknown");
+  if (!release) {
+    renderEntry(res, "Too many attempts. Please wait and try again.", "", 429);
     return;
   }
 
   const userCode = normalizeUserCode(rawCode);
   if (!userCode) {
-    res.render("device-entry", { error: null });
+    release(); // nothing was guessed
+    renderEntry(res, null, "");
     return;
   }
 
@@ -169,14 +219,16 @@ async function startDeviceConsent(req: Request, res: Response, rawCode: string):
     where: { userCode, status: "pending", expiresAt: { gt: new Date() } },
   });
   if (!entry) {
-    res.render("device-entry", { error: "Invalid or expired code. Please try again." });
+    renderEntry(res, "Invalid or expired code. Please try again.", ""); // the reserved slot stays: this was a failed entry
     return;
   }
+  release(); // a valid code is not a failure
 
   const handle = randomBytes(24).toString("hex");
   await prisma.authorizationRequest.create({
     data: {
       handle,
+      flowType: "device",
       clientId: entry.clientId,
       resource: entry.resource,
       scopes: entry.scopes,
@@ -186,6 +238,8 @@ async function startDeviceConsent(req: Request, res: Response, rawCode: string):
       expiresAt: entry.expiresAt,
     },
   });
+  bindFlow(req, res, handle);
+  res.clearCookie("csrf_device");
 
   if (config.enableLocalAccounts && !config.enableOidc) {
     res.redirect(`/auth/login?flow=${encodeURIComponent(handle)}`);
@@ -195,9 +249,10 @@ async function startDeviceConsent(req: Request, res: Response, rawCode: string):
   res.redirect(upstreamUrl);
 }
 
-deviceRouter.get("/oauth/device", async (req: Request, res: Response) => {
-  const rawCode = typeof req.query["user_code"] === "string" ? req.query["user_code"] : "";
-  await startDeviceConsent(req, res, rawCode);
+deviceRouter.get("/oauth/device", (req: Request, res: Response) => {
+  const raw = typeof req.query["user_code"] === "string" ? req.query["user_code"] : "";
+  const normalized = normalizeUserCode(raw).slice(0, 8);
+  renderEntry(res, null, normalized ? formatUserCode(normalized) : "");
 });
 
 deviceRouter.post("/oauth/device", async (req: Request, res: Response) => {

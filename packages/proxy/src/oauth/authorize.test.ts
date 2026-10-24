@@ -248,11 +248,11 @@ describe("happy path and identity-provider dispatch (P1)", () => {
     expect(r.headers.get("location")).toBe("https://idp.example.test/auth");
   });
 
-  it("?idp=local picks local login when both providers are enabled", async () => {
+  it("?idp=local is ignored when OIDC is enabled: the link cannot force password login", async () => {
     config.enableOidc = true;
     const r = await authorize({ idp: "local" });
-    expect(r.headers.get("location")).toContain("/auth/login?flow=");
-    expect(upstream).not.toHaveBeenCalled();
+    expect(r.headers.get("location")).toBe("https://idp.example.test/auth");
+    expect(upstream).toHaveBeenCalled();
   });
 
   it("?idp=local is ignored when local accounts are disabled", async () => {
@@ -260,5 +260,78 @@ describe("happy path and identity-provider dispatch (P1)", () => {
     config.enableLocalAccounts = false;
     const r = await authorize({ idp: "local" });
     expect(r.headers.get("location")).toBe("https://idp.example.test/auth");
+  });
+});
+
+describe("flow type, binding, fragment, reserved URIs and RFC 9207 iss", () => {
+  it("creates the row with flowType oauth and sets the signed flow-binding cookie", async () => {
+    const r = await authorize();
+    expect(created().mock.calls[0]![0].data.flowType).toBe("oauth");
+    const cookie = r.headers.getSetCookie().find((c) => c.startsWith("flow_binding="))!;
+    expect(cookie).toMatch(/HttpOnly/i);
+    expect(cookie).toMatch(/SameSite=Lax/i);
+    expect(cookie).toMatch(/Path=\//);
+    expect(decodeURIComponent(cookie)).toContain("flow_binding=s:");
+  });
+
+  it.each(["urn:mcp-auth:self-login", "urn:mcp-auth:device-flow", "urn:mcp-auth:x"])("rejects a client that registers %s: error page, no redirect, no row", async (uri) => {
+    resolve.mockResolvedValue(clientRow({ metadata: { redirect_uris: [uri] } }) as never);
+    const r = await authorize({ redirect_uri: uri, state: "https://evil.example.test/" });
+    expect(r.status).toBe(400);
+    expect(r.headers.get("location")).toBeNull();
+    expect(created()).not.toHaveBeenCalled();
+  });
+
+  it("rejects a redirect_uri with a fragment, even a registered one", async () => {
+    resolve.mockResolvedValue(clientRow({ metadata: { redirect_uris: [`${REDIRECT_URI}#frag`] } }) as never);
+    const r = await authorize({ redirect_uri: `${REDIRECT_URI}#frag` });
+    expect(r.status).toBe(400);
+    expect(r.headers.get("location")).toBeNull();
+    expect(created()).not.toHaveBeenCalled();
+  });
+
+  it("adds iss to error redirects", async () => {
+    const r = await authorize({ response_type: "token" });
+    expect(errorRedirect(r).searchParams.get("iss")).toBe(config.issuerUrl);
+  });
+});
+
+describe("strict redirect_uri forms (M11)", () => {
+  beforeEach(() => {
+    resolve.mockResolvedValue(clientRow({ metadata: { redirect_uris: ["http://127.0.0.1/cb"] } }) as never);
+  });
+
+  it.each([
+    ["userinfo", "http://evil@127.0.0.1:53211/cb"],
+    ["userinfo with a password", "http://user:pw@127.0.0.1:53211/cb"],
+    ["an empty userinfo", "http://@127.0.0.1:53211/cb"],
+    ["a dot-segment", "http://127.0.0.1:53211/x/../cb"],
+    ["a single-dot segment", "http://127.0.0.1:53211/x/./cb"],
+    ["an encoded dot-segment", "http://127.0.0.1:53211/x/%2e%2e/cb"],
+    ["a mixed-case encoded dot-segment", "http://127.0.0.1:53211/x/%2E%2e/cb"],
+    ["an encoded slash hiding a dot-segment", "http://127.0.0.1:53211/x/%2e%2e%2fcb"],
+    ["a backslash dot-segment", "http://127.0.0.1:53211/x\\..\\cb"],
+  ])("rejects a requested redirect_uri with %s: error page, no redirect, no row", async (_name, uri) => {
+    const r = await authorize({ redirect_uri: uri, state: "s" });
+    expect(r.status).toBe(400);
+    expect(r.headers.get("location")).toBeNull();
+    expect(created()).not.toHaveBeenCalled();
+  });
+
+  it("rejects the same forms even when the registered list contains them verbatim", async () => {
+    for (const uri of ["http://evil@127.0.0.1/cb", "http://127.0.0.1/x/../cb"]) {
+      resolve.mockResolvedValue(clientRow({ metadata: { redirect_uris: [uri] } }) as never);
+      const r = await authorize({ redirect_uri: uri });
+      expect(r.status).toBe(400);
+      expect(r.headers.get("location")).toBeNull();
+    }
+    expect(created()).not.toHaveBeenCalled();
+  });
+
+  it("still accepts the ordinary loopback and https forms", async () => {
+    expect((await authorize({ redirect_uri: "http://127.0.0.1:53211/cb" })).status).toBe(302);
+    resolve.mockResolvedValue(clientRow() as never);
+    expect((await authorize({ redirect_uri: REDIRECT_URI })).status).toBe(302);
+    expect(created()).toHaveBeenCalledTimes(2);
   });
 });

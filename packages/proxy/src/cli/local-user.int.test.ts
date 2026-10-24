@@ -3,7 +3,7 @@ import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import { prisma } from "../db.js";
 import { disconnectDb, truncateAll } from "../test-helpers/db.js";
 import { runCli } from "../test-helpers/identity-cli.js";
-import { seedLocalUser } from "../test-helpers/seed.js";
+import { seedClient, seedGrant, seedLocalUser, seedRefreshToken } from "../test-helpers/seed.js";
 
 beforeEach(truncateAll);
 afterAll(disconnectDb);
@@ -60,6 +60,28 @@ describe("local-user deactivate / list / usage", () => {
     // The exact query getSessionUserId uses: the session is now rejected.
     const session = await prisma.user.findFirst({ where: { id: user.id, deactivatedAt: null, OR: [{ localUser: null }, { localUser: { isActive: true } }] } });
     expect(session).toBeNull();
+  });
+
+  it("M2 deactivate also revokes the user's grants and refresh tokens, and only theirs", async () => {
+    const { user } = await seedLocalUser({ username: "alice" });
+    const other = await seedLocalUser({ username: "bob" });
+    const client = await seedClient();
+    const g1 = await seedGrant({ userId: user.id, clientId: client.clientId });
+    const g2 = await seedGrant({ userId: user.id, clientId: client.clientId, resource: "https://other.example.test" });
+    const t1 = await seedRefreshToken({ userId: user.id, clientId: client.clientId, grantId: g1.id });
+    await seedRefreshToken({ userId: user.id, clientId: client.clientId, grantId: g2.id });
+    const og = await seedGrant({ userId: other.user.id, clientId: client.clientId });
+    const ot = await seedRefreshToken({ userId: other.user.id, clientId: client.clientId, grantId: og.id });
+
+    const res = await runCli("local-user", ["deactivate", "alice"]);
+    expect(res.code).toBe(0);
+    expect(res.stdout).toContain("Revoked 2 grant(s) and 2 refresh token(s).");
+    expect(res.stdout).toContain("Outstanding access tokens remain valid until they expire (at most 15 minutes).");
+    expect(await prisma.grant.count({ where: { userId: user.id, revokedAt: null } })).toBe(0);
+    expect(await prisma.refreshToken.count({ where: { userId: user.id, revokedAt: null } })).toBe(0);
+    expect((await prisma.refreshToken.findUniqueOrThrow({ where: { tokenHash: t1.row.tokenHash } })).revokedAt).not.toBeNull();
+    expect((await prisma.grant.findUniqueOrThrow({ where: { id: og.id } })).revokedAt).toBeNull();
+    expect((await prisma.refreshToken.findUniqueOrThrow({ where: { tokenHash: ot.row.tokenHash } })).revokedAt).toBeNull();
   });
 
   it("P1 deactivating an unknown user fails", async () => {

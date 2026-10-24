@@ -184,4 +184,28 @@ describe("request id and security headers", () => {
     const bad = await fetch(`${base}/oauth/token`, { method: "POST", headers: { "content-type": "application/json" }, body: "{" });
     expect(bad.headers.get("x-content-type-options")).toBe("nosniff");
   });
+
+  const CSP = "default-src 'none'; style-src 'self' 'unsafe-inline'; img-src https:; form-action 'self'; frame-ancestors 'none'; base-uri 'none'";
+
+  it("P1 sets Referrer-Policy and the strict CSP on every response, hides x-powered-by, and sends no HSTS over http", async () => {
+    const base = await boot();
+    const responses = [
+      await fetch(`${base}/health`),
+      await fetch(`${base}/nope`),
+      await fetch(`${base}/oauth/token`, { method: "POST", headers: { "content-type": "application/json" }, body: "{" }),
+    ];
+    for (const res of responses) {
+      expect(res.headers.get("referrer-policy")).toBe("no-referrer");
+      expect(res.headers.get("content-security-policy")).toBe(CSP);
+      expect(res.headers.get("x-powered-by")).toBeNull();
+      expect(res.headers.get("strict-transport-security")).toBeNull();
+    }
+  });
+
+  it("P1 sends HSTS only when ISSUER_URL is https, including on body-parser errors", async () => {
+    const base = await boot({ ISSUER_URL: "https://auth.example.test" });
+    const ok = await fetch(`${base}/health`);
+    const bad = await fetch(`${base}/oauth/token`, { method: "POST", headers: { "content-type": "application/json" }, body: "{" });
+    for (const res of [ok, bad]) expect(res.headers.get("strict-transport-security")).toBe("max-age=31536000");
+  });
 });

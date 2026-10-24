@@ -7,7 +7,7 @@ import { createLogger } from "../logger.js";
 import { resolveClient } from "../clients/cimd.js";
 import { authenticateConfidentialClient } from "./client-assertion.js";
 import { lookupResourceServer } from "../resource-registry.js";
-import { getSessionUserId, clearSession } from "../identity/session.js";
+import { getSessionUserId, clearSession, revokeSessions } from "../identity/session.js";
 import { issueCsrfToken, verifyCsrfToken } from "../identity/csrf.js";
 import { createSelfLoginRequest } from "../identity/self-login.js";
 import { startUpstreamAuth } from "../identity/oidc.js";
@@ -32,7 +32,7 @@ async function requireSession(req: Request, res: Response, returnTo: string): Pr
   const userId = await getSessionUserId(req);
   if (userId) return userId;
 
-  const handle = await createSelfLoginRequest(returnTo);
+  const handle = await createSelfLoginRequest(returnTo, req, res);
   if (config.enableLocalAccounts && !config.enableOidc) {
     res.redirect(`/auth/login?flow=${encodeURIComponent(handle)}`);
     return null;
@@ -49,8 +49,19 @@ async function requireSession(req: Request, res: Response, returnTo: string): Pr
 // is on.
 // ---------------------------------------------------------------------------
 
-grantsRouter.post("/auth/logout", (_req: Request, res: Response) => {
+// Logout is state-changing, so it needs the signed CSRF token issued with the
+// page that shows the button (/grants or /auth/account); otherwise any site
+// could sign a user out with a cross-site form post. A valid session's epoch is
+// bumped, which ends that user's sessions everywhere (a copied cookie included).
+grantsRouter.post("/auth/logout", async (req: Request, res: Response) => {
+  if (!verifyCsrfToken(req, "csrf_logout")) {
+    renderErrorPage(res, 403, "Invalid or missing CSRF token. Please reload the page and try again.");
+    return;
+  }
+  const userId = await getSessionUserId(req);
+  if (userId) await revokeSessions(userId);
   clearSession(res);
+  res.clearCookie("csrf_logout");
   res.send(`<!DOCTYPE html>
 <html lang="en">
 <head><meta charset="utf-8"><title>Signed out</title></head>
@@ -99,6 +110,7 @@ grantsRouter.get("/grants", async (req: Request, res: Response) => {
   );
 
   const csrfToken = issueCsrfToken(res, "csrf_grants");
+  const logoutToken = issueCsrfToken(res, "csrf_logout");
 
   const rowsHtml = rows.length
     ? rows
@@ -143,7 +155,7 @@ grantsRouter.get("/grants", async (req: Request, res: Response) => {
     <thead><tr><th>Client</th><th>Server</th><th>Scopes</th><th>Granted</th><th></th></tr></thead>
     <tbody>${rowsHtml}</tbody>
   </table>
-  <form method="POST" action="/auth/logout" style="margin-top:1.5rem"><button type="submit">Sign out</button></form>
+  <form method="POST" action="/auth/logout" style="margin-top:1.5rem"><input type="hidden" name="csrf_token" value="${escHtml(logoutToken)}"><button type="submit">Sign out</button></form>
 </body>
 </html>`);
 });

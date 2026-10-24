@@ -20,12 +20,14 @@ import { grantsRouter } from "./oauth/grants.js";
 import { getOidcConfig } from "./identity/oidc.js";
 import { oidcRouter } from "./identity/oidc-router.js";
 import { localAccountsRouter } from "./identity/local-accounts-router.js";
+import { warnIfSetupUnprotected } from "./identity/local-accounts.js";
 import { opsRouter } from "./ops.js";
 import { pruneExpiredRows } from "./cleanup.js";
 
 const log = createLogger("server");
 
 export const app: Express = express();
+app.disable("x-powered-by");
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 app.set("view engine", "ejs");
@@ -42,9 +44,19 @@ app.use((req: Request, res: Response, next: NextFunction) => {
   next();
 });
 
+// The EJS views use inline <style> blocks (no scripts, no event handlers), so
+// 'unsafe-inline' is allowed for styles only. img-src is https-only for a client
+// logo; forms post to this origin only.
+const CONTENT_SECURITY_POLICY =
+  "default-src 'none'; style-src 'self' 'unsafe-inline'; img-src https:; form-action 'self'; frame-ancestors 'none'; base-uri 'none'";
+const sendHsts = new URL(config.issuerUrl).protocol === "https:";
+
 app.use((_req: Request, res: Response, next: NextFunction) => {
   res.set("X-Content-Type-Options", "nosniff");
   res.set("X-Frame-Options", "DENY");
+  res.set("Referrer-Policy", "no-referrer");
+  res.set("Content-Security-Policy", CONTENT_SECURITY_POLICY);
+  if (sendHsts) res.set("Strict-Transport-Security", "max-age=31536000");
   next();
 });
 
@@ -83,6 +95,12 @@ if (config.enableOidc) {
 if (config.enableLocalAccounts) {
   app.use(localAccountsRouter);
 }
+
+// Unmatched routes. Express's built-in final handler would answer these itself
+// and overwrite our Content-Security-Policy with its own, so answer here.
+app.use((_req: Request, res: Response) => {
+  res.status(404).type("text/plain").send("Not Found");
+});
 
 // Centralized error boundary (§10): route handlers throw, Express 5 forwards
 // rejected async handlers here automatically. Never leak internals.
@@ -125,6 +143,10 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   // DB-level lock instead.
   const signingKey = await ensureActiveSigningKey();
   log.info({ kid: signingKey.kid }, "Active signing key ready");
+
+  if (config.enableLocalAccounts) {
+    await warnIfSetupUnprotected().catch((err) => log.warn({ err }, "Could not check whether /setup is exposed"));
+  }
 
   server.listen(config.port, () => {
     log.info({ port: config.port }, "Proxy listening");

@@ -11,12 +11,14 @@
 // `add` reads the password from stdin, never argv (which leaks via ps and shell
 // history). On a TTY it prompts twice with echo off; otherwise (piped, for
 // scripting) it reads one line. Needs -i with docker exec for either to work.
-// `deactivate` sets LocalUser.isActive=false; existing session cookies stop
-// validating immediately (see identity/session.ts). Never prints passwords or hashes.
+// `deactivate` sets LocalUser.isActive=false and revokes the user's grants and
+// refresh tokens; existing session cookies stop validating immediately (see
+// identity/session.ts). Never prints passwords or hashes.
 import readline from "node:readline";
 import { Writable } from "node:stream";
 import { prisma } from "../db.js";
-import { createLocalUser, MIN_PASSWORD_LENGTH } from "../identity/local-accounts.js";
+import { createLocalUser, normalizeUsername } from "../identity/local-accounts.js";
+import { passwordProblem } from "../identity/password-policy.js";
 
 const USAGE = `Usage:
   local-user add <username>      (password read from stdin)
@@ -68,11 +70,12 @@ async function readPassword(): Promise<string> {
   return first;
 }
 
-async function add(username: string): Promise<void> {
+async function add(rawUsername: string): Promise<void> {
+  const username = normalizeUsername(rawUsername);
+  if (!username) throw new Error("Username must not be empty");
   const password = await readPassword();
-  if (password.length < MIN_PASSWORD_LENGTH) {
-    throw new Error(`Password must be at least ${MIN_PASSWORD_LENGTH} characters`);
-  }
+  const problem = passwordProblem(password);
+  if (problem) throw new Error(`Password ${problem}`);
   if (await prisma.localUser.findUnique({ where: { username }, select: { id: true } })) {
     throw new Error(`Username "${username}" is already taken`);
   }
@@ -80,10 +83,25 @@ async function add(username: string): Promise<void> {
   console.log(`Created local user ${username}`);
 }
 
-async function deactivate(username: string): Promise<void> {
-  const { count } = await prisma.localUser.updateMany({ where: { username }, data: { isActive: false } });
-  if (count === 0) throw new Error(`No local user "${username}"`);
+async function deactivate(rawUsername: string): Promise<void> {
+  const username = normalizeUsername(rawUsername);
+  const now = new Date();
+  // One transaction: a deactivated user must not keep working grants or
+  // refresh tokens (the token endpoint also checks, but revoking makes it final).
+  const result = await prisma.$transaction(async (tx) => {
+    const row = await tx.localUser.findUnique({ where: { username }, select: { userId: true } });
+    if (!row) return null;
+    await tx.localUser.update({ where: { username }, data: { isActive: false } });
+    // Bump the session epoch so cookies issued before this stay dead even if the account is reactivated.
+    await tx.user.update({ where: { id: row.userId }, data: { sessionEpoch: { increment: 1 } } });
+    const g = await tx.grant.updateMany({ where: { userId: row.userId, revokedAt: null }, data: { revokedAt: now } });
+    const t = await tx.refreshToken.updateMany({ where: { userId: row.userId, revokedAt: null }, data: { revokedAt: now } });
+    return { grants: g.count, tokens: t.count };
+  });
+  if (!result) throw new Error(`No local user "${username}"`);
   console.log(`Deactivated ${username}; existing sessions are rejected immediately.`);
+  console.log(`Revoked ${result.grants} grant(s) and ${result.tokens} refresh token(s).`);
+  console.log("Outstanding access tokens remain valid until they expire (at most 15 minutes).");
 }
 
 async function list(): Promise<void> {

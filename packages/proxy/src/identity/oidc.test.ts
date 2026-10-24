@@ -125,52 +125,59 @@ describe("startUpstreamAuth", () => {
 
 describe("handleUpstreamCallback: rejection paths", () => {
   it("P0 rejects a callback with no state before touching the database", async () => {
-    await expect(oidc.handleUpstreamCallback(callbackUrl(null))).rejects.toThrow("Missing state parameter");
+    await expect(oidc.handleUpstreamCallback(callbackUrl(null), () => true)).rejects.toThrow("Missing state parameter");
     expect(db.prisma.authorizationRequest.findFirst).not.toHaveBeenCalled();
   });
 
   it("P0 rejects an unknown state", async () => {
     db.prisma.authorizationRequest.findFirst.mockResolvedValue(null);
-    await expect(oidc.handleUpstreamCallback(callbackUrl("zzz"))).rejects.toThrow(/Unknown or expired/);
+    await expect(oidc.handleUpstreamCallback(callbackUrl("zzz"), () => true)).rejects.toThrow(/Unknown or expired/);
     expect(oc.authorizationCodeGrant).not.toHaveBeenCalled();
   });
 
   it("P0 rejects an expired authorization request without consuming it", async () => {
     db.prisma.authorizationRequest.findFirst.mockResolvedValue(authRequest({ expiresAt: new Date(NOW - 1) }));
-    await expect(oidc.handleUpstreamCallback(callbackUrl())).rejects.toThrow(/expired/);
+    await expect(oidc.handleUpstreamCallback(callbackUrl(), () => true)).rejects.toThrow(/expired/);
     expect(db.prisma.authorizationRequest.updateMany).not.toHaveBeenCalled();
     expect(oc.authorizationCodeGrant).not.toHaveBeenCalled();
   });
 
+  it("P0 a callback from a browser that did not start the flow is refused before the state is consumed (login CSRF)", async () => {
+    await expect(oidc.handleUpstreamCallback(callbackUrl(), () => false)).rejects.toThrow(/does not belong/);
+    expect(db.prisma.authorizationRequest.updateMany).not.toHaveBeenCalled();
+    expect(oc.authorizationCodeGrant).not.toHaveBeenCalled();
+    expect(db.prisma.user.upsert).not.toHaveBeenCalled();
+  });
+
   it("P0 rejects a request that never went through startUpstreamAuth", async () => {
     db.prisma.authorizationRequest.findFirst.mockResolvedValue(authRequest({ upstreamNonce: null }));
-    await expect(oidc.handleUpstreamCallback(callbackUrl())).rejects.toThrow(/not started/);
+    await expect(oidc.handleUpstreamCallback(callbackUrl(), () => true)).rejects.toThrow(/not started/);
     db.prisma.authorizationRequest.findFirst.mockResolvedValue(authRequest({ upstreamVerifier: null }));
-    await expect(oidc.handleUpstreamCallback(callbackUrl())).rejects.toThrow(/not started/);
+    await expect(oidc.handleUpstreamCallback(callbackUrl(), () => true)).rejects.toThrow(/not started/);
   });
 
   it("P0 a replayed callback (state already consumed) never reaches the code exchange", async () => {
     db.prisma.authorizationRequest.updateMany.mockResolvedValue({ count: 0 });
-    await expect(oidc.handleUpstreamCallback(callbackUrl())).rejects.toThrow(/Unknown or expired/);
+    await expect(oidc.handleUpstreamCallback(callbackUrl(), () => true)).rejects.toThrow(/Unknown or expired/);
     expect(oc.authorizationCodeGrant).not.toHaveBeenCalled();
     expect(db.prisma.user.upsert).not.toHaveBeenCalled();
   });
 
   it("P0 consumes the state (compare-and-clear) before exchanging the code", async () => {
-    await oidc.handleUpstreamCallback(callbackUrl());
+    await oidc.handleUpstreamCallback(callbackUrl(), () => true);
     expect(db.prisma.authorizationRequest.updateMany).toHaveBeenCalledWith({ where: { handle: "h1", upstreamState: "st" }, data: { upstreamState: null } });
     expect(db.prisma.authorizationRequest.updateMany.mock.invocationCallOrder[0]).toBeLessThan(oc.authorizationCodeGrant.mock.invocationCallOrder[0]!);
   });
 
   it("P0 a failed code exchange propagates and leaves the state consumed (no retry)", async () => {
     oc.authorizationCodeGrant.mockRejectedValue(new Error("nonce mismatch"));
-    await expect(oidc.handleUpstreamCallback(callbackUrl())).rejects.toThrow("nonce mismatch");
+    await expect(oidc.handleUpstreamCallback(callbackUrl(), () => true)).rejects.toThrow("nonce mismatch");
     expect(db.prisma.user.upsert).not.toHaveBeenCalled();
     expect(db.prisma.authorizationRequest.update).not.toHaveBeenCalled();
   });
 
   it("P0 passes the stored state, nonce and PKCE verifier to the exchange", async () => {
-    await oidc.handleUpstreamCallback(callbackUrl());
+    await oidc.handleUpstreamCallback(callbackUrl(), () => true);
     const [, url, checks] = oc.authorizationCodeGrant.mock.calls[0] as [unknown, URL, Record<string, string>];
     expect(url.toString()).toBe(callbackUrl());
     expect(checks).toEqual({ expectedState: "st", expectedNonce: "nonce", pkceCodeVerifier: "verifier" });
@@ -178,19 +185,19 @@ describe("handleUpstreamCallback: rejection paths", () => {
 
   it("P0 a token response with no ID token claims is rejected", async () => {
     grantResult(undefined);
-    await expect(oidc.handleUpstreamCallback(callbackUrl())).rejects.toThrow(/no claims/);
+    await expect(oidc.handleUpstreamCallback(callbackUrl(), () => true)).rejects.toThrow(/no claims/);
   });
 
   it("P0 a deactivated user is rejected and the request gets no subject", async () => {
     db.prisma.user.upsert.mockResolvedValue({ id: "user-1", deactivatedAt: new Date(NOW - 1000) });
-    await expect(oidc.handleUpstreamCallback(callbackUrl())).rejects.toThrow("Account is deactivated");
+    await expect(oidc.handleUpstreamCallback(callbackUrl(), () => true)).rejects.toThrow("Account is deactivated");
     expect(db.prisma.authorizationRequest.update).not.toHaveBeenCalled();
   });
 });
 
 describe("handleUpstreamCallback: user resolution", () => {
   it("P1 upserts on (sub, configured issuer) and links the user to the request", async () => {
-    const result = await oidc.handleUpstreamCallback(callbackUrl());
+    const result = await oidc.handleUpstreamCallback(callbackUrl(), () => true);
     expect(result).toEqual({ authRequestHandle: "h1", userId: "user-1" });
     const arg = db.prisma.user.upsert.mock.calls[0]?.[0] as { where: unknown; create: Record<string, unknown>; update: Record<string, unknown> };
     expect(arg.where).toEqual({ oidcSub_oidcIssuer: { oidcSub: "sub-1", oidcIssuer: "https://idp.example.test" } });
@@ -203,7 +210,7 @@ describe("handleUpstreamCallback: user resolution", () => {
     for (const claims of [{ sub: "s" }, { sub: "s", email: "" }, { sub: "s", email: 42 }]) {
       db.prisma.user.upsert.mockClear();
       grantResult(claims);
-      await oidc.handleUpstreamCallback(callbackUrl());
+      await oidc.handleUpstreamCallback(callbackUrl(), () => true);
       const arg = db.prisma.user.upsert.mock.calls[0]?.[0] as { create: { email: string }; update: Record<string, unknown> };
       expect(arg.create.email).toBe("");
       expect("email" in arg.update).toBe(false);
@@ -212,7 +219,7 @@ describe("handleUpstreamCallback: user resolution", () => {
 
   it("P1 stores last-known claims minus the volatile/one-time ones", async () => {
     grantResult({ sub: "s", iss: "x", aud: "cid", name: "N", iat: 1, exp: 2, nbf: 3, nonce: "n", at_hash: "h", c_hash: "h", auth_time: 5 });
-    await oidc.handleUpstreamCallback(callbackUrl());
+    await oidc.handleUpstreamCallback(callbackUrl(), () => true);
     const arg = db.prisma.user.upsert.mock.calls[0]?.[0] as { create: { lastKnownClaims: object }; update: { lastKnownClaims: object } };
     expect(arg.create.lastKnownClaims).toEqual({ sub: "s", iss: "x", aud: "cid", name: "N" });
     expect(arg.update.lastKnownClaims).toEqual(arg.create.lastKnownClaims);

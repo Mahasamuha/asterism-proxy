@@ -51,6 +51,10 @@ const envSchema = z
     // Bearer token for /metrics; unset disables the endpoint.
     METRICS_TOKEN: z.string().min(32, "METRICS_TOKEN must be at least 32 characters").optional(),
 
+    // Optional first-account guard. When set, /setup requires it; when unset,
+    // whoever reaches a fresh instance first can claim it (a startup warning says so).
+    SETUP_TOKEN: z.string().min(32, "SETUP_TOKEN must be at least 32 characters").optional(),
+
     ENABLE_OIDC: boolFromEnv(true),
     OIDC_ISSUER: z.url().optional(),
     OIDC_CLIENT_ID: z.string().min(1).optional(),
@@ -112,6 +116,7 @@ export const config = {
   // Numeric strings become hop counts; anything else is passed to Express as-is.
   trustProxy: env.TRUST_PROXY === undefined ? undefined : /^\d+$/.test(env.TRUST_PROXY) ? Number(env.TRUST_PROXY) : env.TRUST_PROXY,
   metricsToken: env.METRICS_TOKEN,
+  setupToken: env.SETUP_TOKEN,
 
   enableOidc: env.ENABLE_OIDC,
   // Non-null exactly when enableOidc is true — superRefine above rejects

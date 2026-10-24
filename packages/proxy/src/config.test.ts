@@ -146,6 +146,12 @@ describe("other settings", () => {
     expect((await loadConfigWith({ METRICS_TOKEN: undefined })).metricsToken).toBeUndefined();
   });
 
+  it("SETUP_TOKEN must be at least 32 characters when set, and is optional", async () => {
+    await expect(loadConfigWith({ SETUP_TOKEN: "short" })).rejects.toThrow(/SETUP_TOKEN/);
+    expect((await loadConfigWith({ SETUP_TOKEN: "s".repeat(32) })).setupToken).toBe("s".repeat(32));
+    expect((await loadConfigWith({ SETUP_TOKEN: undefined })).setupToken).toBeUndefined();
+  });
+
   it("applies defaults for PORT, LOG_LEVEL and the config paths", async () => {
     const c = await loadConfigWith({ PORT: undefined, LOG_LEVEL: undefined, RESOURCE_SERVERS_PATH: undefined, TRUST_POLICY_PATH: undefined });
     expect(c.port).toBe(3000);

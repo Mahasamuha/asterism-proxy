@@ -10,7 +10,8 @@ vi.mock("../identity/oidc.js", () => ({ startUpstreamAuth: vi.fn() }));
 import { prisma } from "../db.js";
 import { config } from "../config.js";
 import { resolveClient } from "../clients/cimd.js";
-import { DEVICE_FLOW_REDIRECT_URI_SENTINEL, deviceRouter } from "./device.js";
+import { DEVICE_FLOW_REDIRECT_URI_SENTINEL, deviceRouter, resetDeviceEntryLimits } from "./device.js";
+import { csrfFrom } from "../test-helpers/http.js";
 
 const db = prisma as unknown as ReturnType<typeof createPrismaMock>;
 const resolve = vi.mocked(resolveClient);
@@ -24,18 +25,36 @@ beforeAll(async () => {
 });
 afterAll(() => app.close());
 
-// The user-code attempt limiter is per IP and in-memory (no reset hook), so
-// every test presents its own address through X-Forwarded-For.
+// The user-code limiters are in-memory (reset in beforeEach); every test also
+// presents its own address through X-Forwarded-For.
 let ipCounter = 0;
 const freshIp = () => `10.1.${Math.floor(ipCounter / 250)}.${(ipCounter++ % 250) + 1}`;
 const from = (ip: string) => (url: string, init: RequestInit = {}) => fetch(url, { ...init, headers: { ...(init.headers as Record<string, string>), "x-forwarded-for": ip } });
 
 beforeEach(() => {
+  resetDeviceEntryLimits();
   db.reset();
   resolve.mockReset().mockResolvedValue(clientRow() as never);
   m("deviceCode", "create").mockResolvedValue({});
   m("authorizationRequest", "create").mockResolvedValue({});
 });
+
+/** GETs the entry page (CSRF cookie) then POSTs the code, like a user would. */
+async function enterCode(ip: string, userCode: string | string[]) {
+  const jar = new Map<string, string>();
+  const doFetch = async (url: string, init: RequestInit = {}) => {
+    const headers = { ...(init.headers as Record<string, string>), "x-forwarded-for": ip, cookie: [...jar].map(([k, v]) => `${k}=${v}`).join("; ") };
+    const res = await fetch(url, { ...init, headers, redirect: "manual" });
+    for (const line of res.headers.getSetCookie()) {
+      const [pair] = line.split(";");
+      const eq = pair!.indexOf("=");
+      jar.set(pair!.slice(0, eq), pair!.slice(eq + 1));
+    }
+    return res;
+  };
+  const page = await getPath(app.baseUrl, "/oauth/device", doFetch);
+  return postForm(app.baseUrl, "/oauth/device", { csrf_token: csrfFrom(page.text), user_code: userCode }, doFetch);
+}
 
 const requestCode = (fields: Record<string, string | string[]>) => postForm(app.baseUrl, "/oauth/device/code", fields);
 
@@ -125,7 +144,7 @@ describe("GET/POST /oauth/device (user-code entry)", () => {
 
   it("looks up pending, unexpired codes only (P0)", async () => {
     m("deviceCode", "findFirst").mockResolvedValue(null);
-    const r = await getPath(app.baseUrl, "/oauth/device?user_code=ABCD-2345", from(freshIp()));
+    const r = await enterCode(freshIp(), "ABCD-2345");
     expect(r.text).toContain("Invalid or expired code");
     const where = m("deviceCode", "findFirst").mock.calls[0]![0].where;
     expect(where.status).toBe("pending");
@@ -134,36 +153,61 @@ describe("GET/POST /oauth/device (user-code entry)", () => {
 
   it("normalizes case, dashes and spaces before lookup", async () => {
     m("deviceCode", "findFirst").mockResolvedValue(null);
-    await getPath(app.baseUrl, "/oauth/device?user_code=abcd%20-%202345", from(freshIp()));
+    await enterCode(freshIp(), "abcd - 2345");
     expect(m("deviceCode", "findFirst").mock.calls[0]![0].where.userCode).toBe("ABCD2345");
   });
 
   it("a valid code starts the login flow with the device sentinel and the user code in state", async () => {
     const entry = pending();
     m("deviceCode", "findFirst").mockResolvedValue(entry);
-    const r = await postForm(app.baseUrl, "/oauth/device", { user_code: "ABCD-2345" }, from(freshIp()));
+    const r = await enterCode(freshIp(), "ABCD-2345");
     expect(r.status).toBe(302);
+    expect(r.headers.getSetCookie().join(";")).toContain("flow_binding=");
     const data = m("authorizationRequest", "create").mock.calls[0]![0].data;
-    expect(data).toMatchObject({ clientId: CLIENT_ID, resource: RESOURCE, scopes: ["read"], redirectUri: DEVICE_FLOW_REDIRECT_URI_SENTINEL, state: "ABCD2345" });
+    expect(data).toMatchObject({ clientId: CLIENT_ID, resource: RESOURCE, scopes: ["read"], flowType: "device", redirectUri: DEVICE_FLOW_REDIRECT_URI_SENTINEL, state: "ABCD2345" });
     expect(data.expiresAt).toEqual(entry.expiresAt);
     expect(r.headers.get("location")).toBe(`/auth/login?flow=${data.handle}`);
   });
 
-  it("an empty or missing code re-renders the entry form without a lookup", async () => {
-    const r = await getPath(app.baseUrl, "/oauth/device", from(freshIp()));
+  it("GET never starts a flow or looks up the code: it shows the entry page pre-filled (H1)", async () => {
+    m("deviceCode", "findFirst").mockResolvedValue(pending());
+    const r = await getPath(app.baseUrl, "/oauth/device?user_code=abcd2345", from(freshIp()));
+    expect(r.status).toBe(200);
+    expect(r.text).toContain('value="ABCD-2345"');
+    expect(r.text).toContain('method="POST"');
+    expect(r.text).toContain('name="csrf_token"');
+    expect(m("deviceCode", "findFirst")).not.toHaveBeenCalled();
+    expect(m("authorizationRequest", "create")).not.toHaveBeenCalled();
+  });
+
+  it("GET with an HTML-ish user_code is escaped in the pre-fill", async () => {
+    const r = await getPath(app.baseUrl, '/oauth/device?user_code="><script>1</script>', from(freshIp()));
+    expect(r.text).not.toContain("<script>1</script>");
+  });
+
+  it("POST without a CSRF token starts nothing (H1)", async () => {
+    m("deviceCode", "findFirst").mockResolvedValue(pending());
+    const r = await postForm(app.baseUrl, "/oauth/device", { user_code: "ABCD-2345" }, from(freshIp()));
+    expect(r.status).toBe(403);
+    expect(m("deviceCode", "findFirst")).not.toHaveBeenCalled();
+    expect(m("authorizationRequest", "create")).not.toHaveBeenCalled();
+  });
+
+  it("an empty code re-renders the entry form without a lookup", async () => {
+    const r = await enterCode(freshIp(), "");
     expect(r.status).toBe(200);
     expect(m("deviceCode", "findFirst")).not.toHaveBeenCalled();
   });
 
-  it("POST with no body re-renders the entry form (bug 1)", async () => {
+  it("POST with no body is refused without a crash (bug 1)", async () => {
     const r = await postEmpty(app.baseUrl, "/oauth/device");
-    expect(r.status).toBe(200);
+    expect(r.status).toBe(403);
     expect(r.text).toContain("<form");
     expect(m("deviceCode", "findFirst")).not.toHaveBeenCalled();
   });
 
   it("POST with a repeated user_code re-renders the entry form (bug 2)", async () => {
-    const r = await postForm(app.baseUrl, "/oauth/device", { user_code: ["ABCD2345", "ABCD2345"] }, from(freshIp()));
+    const r = await enterCode(freshIp(), ["ABCD2345", "ABCD2345"]);
     expect(r.status).toBe(200);
     expect(m("deviceCode", "findFirst")).not.toHaveBeenCalled();
   });
@@ -172,14 +216,58 @@ describe("GET/POST /oauth/device (user-code entry)", () => {
     m("deviceCode", "findFirst").mockResolvedValue(null);
     const ip = freshIp();
     for (let i = 1; i <= 10; i++) {
-      const r = await getPath(app.baseUrl, "/oauth/device?user_code=ABCD2345", from(ip));
+      const r = await enterCode(ip, "ABCD2345");
       expect(r.status).toBe(200);
     }
-    const blocked = await getPath(app.baseUrl, "/oauth/device?user_code=ABCD2345", from(ip));
+    const blocked = await enterCode(ip, "ABCD2345");
     expect(blocked.status).toBe(429);
     expect(blocked.text).toContain("Too many attempts");
     expect(m("deviceCode", "findFirst")).toHaveBeenCalledTimes(10);
     // A different address is unaffected.
-    expect((await getPath(app.baseUrl, "/oauth/device?user_code=ABCD2345", from(freshIp()))).status).toBe(200);
+    expect((await enterCode(freshIp(), "ABCD2345")).status).toBe(200);
+  });
+});
+
+describe("user-code entry limiters count failures only (M10)", () => {
+  const pending = () => ({ clientId: CLIENT_ID, resource: RESOURCE, scopes: ["read"], expiresAt: new Date(Date.now() + 600_000) });
+
+  it("successful entries never use up the per-IP budget", async () => {
+    m("deviceCode", "findFirst").mockResolvedValue(pending());
+    const ip = freshIp();
+    for (let i = 0; i < 25; i++) expect((await enterCode(ip, "ABCD2345")).status).toBe(302);
+    // ...and the IP still has its full 10 failures.
+    m("deviceCode", "findFirst").mockResolvedValue(null);
+    for (let i = 0; i < 10; i++) expect((await enterCode(ip, "WXYZ2345")).status).toBe(200);
+    expect((await enterCode(ip, "WXYZ2345")).status).toBe(429);
+  });
+
+  it("empty submissions are not failures", async () => {
+    const ip = freshIp();
+    for (let i = 0; i < 15; i++) expect((await enterCode(ip, "")).status).toBe(200);
+    m("deviceCode", "findFirst").mockResolvedValue(null);
+    expect((await enterCode(ip, "WXYZ2345")).status).toBe(200);
+  });
+
+  it("a global ceiling of 200 failures stops guessing even from addresses never seen before", async () => {
+    m("deviceCode", "findFirst").mockResolvedValue(null);
+    for (let i = 0; i < 200; i++) expect((await enterCode(`172.16.${Math.floor(i / 250)}.${(i % 250) + 1}`, "WXYZ2345")).status).toBe(200);
+    const blocked = await enterCode("172.31.0.1", "WXYZ2345");
+    expect(blocked.status).toBe(429);
+    expect(m("deviceCode", "findFirst")).toHaveBeenCalledTimes(200);
+  });
+
+  it("successes do not count toward the global ceiling either", async () => {
+    m("deviceCode", "findFirst").mockResolvedValue(pending());
+    for (let i = 0; i < 210; i++) expect((await enterCode(`172.17.${Math.floor(i / 250)}.${(i % 250) + 1}`, "ABCD2345")).status).toBe(302);
+    m("deviceCode", "findFirst").mockResolvedValue(null);
+    expect((await enterCode("172.31.0.2", "WXYZ2345")).status).toBe(200);
+  });
+
+  it("concurrent wrong guesses from one IP cannot run past the per-IP limit", async () => {
+    m("deviceCode", "findFirst").mockResolvedValue(null);
+    const ip = freshIp();
+    const results = await Promise.all(Array.from({ length: 30 }, () => enterCode(ip, "WXYZ2345")));
+    expect(results.filter((r) => r.status === 200)).toHaveLength(10);
+    expect(m("deviceCode", "findFirst")).toHaveBeenCalledTimes(10);
   });
 });
