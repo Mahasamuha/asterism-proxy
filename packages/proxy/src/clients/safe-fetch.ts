@@ -17,6 +17,7 @@ export type SafeFetchRejectReason =
   | "timeout"
   | "response_too_large"
   | "too_many_redirects"
+  | "invalid_redirect"
   | "http_error"
   | "invalid_content_type"
   | "invalid_json"
@@ -54,37 +55,40 @@ export function getSafeFetchRejectionCounts(): Record<string, number> {
 // a subtle bug has a real exploit path, so lean on an audited primitive.
 // ---------------------------------------------------------------------------
 
+// IANA special-purpose address registries (IPv4 and IPv6). Anything here is refused,
+// including ranges that are technically routable (6to4, Teredo, NAT64), since none of
+// them is a legitimate host for a client metadata document.
+const SPECIAL_USE_IPV4: Array<[string, number]> = [
+  ["0.0.0.0", 8], ["10.0.0.0", 8], ["100.64.0.0", 10], ["127.0.0.0", 8],
+  ["169.254.0.0", 16], ["172.16.0.0", 12], ["192.0.0.0", 24], ["192.0.2.0", 24],
+  ["192.88.99.0", 24], ["192.168.0.0", 16], ["198.18.0.0", 15], ["198.51.100.0", 24],
+  ["203.0.113.0", 24], ["224.0.0.0", 4], ["240.0.0.0", 4],
+];
+const SPECIAL_USE_IPV6: Array<[string, number]> = [
+  // ::ffff:0:0/96 (IPv4-mapped) is deliberately absent from this list: listing it would
+  // match every IPv4 address. It is blocked for IPv6 addresses only, via mappedList below.
+  // ::/96 covers "::", "::1" and the deprecated IPv4-compatible form (e.g. ::7f00:1).
+  ["::", 96], ["64:ff9b::", 96], ["64:ff9b:1::", 48],
+  ["100::", 64], ["2001::", 23], ["2001:db8::", 32], ["2002::", 16], ["3fff::", 20],
+  ["5f00::", 16], ["fc00::", 7], ["fe80::", 10], ["ff00::", 8],
+];
+
 const blockList = new BlockList();
+for (const [net, prefix] of SPECIAL_USE_IPV4) blockList.addSubnet(net, prefix, "ipv4");
+for (const [net, prefix] of SPECIAL_USE_IPV6) blockList.addSubnet(net, prefix, "ipv6");
 
-for (const [net, prefix] of [
-  ["0.0.0.0", 8],
-  ["10.0.0.0", 8],
-  ["127.0.0.0", 8],
-  ["169.254.0.0", 16],
-  ["172.16.0.0", 12],
-  ["192.168.0.0", 16],
-  ["100.64.0.0", 10],
-  ["192.0.0.0", 24],
-  ["198.18.0.0", 15],
-  ["224.0.0.0", 4],
-  ["240.0.0.0", 4],
-] as const) {
-  blockList.addSubnet(net, prefix, "ipv4");
-}
+// IPv4-mapped IPv6 (::ffff:0:0/96) is kept in its own list and only consulted
+// for family-6 addresses. BlockList.check() internally maps an IPv4 address
+// into this range, so putting the subnet in the main list above would match
+// *every* IPv4 address and block all public IPv4 hosts. Mapped addresses that
+// wrap a private IPv4 are also caught by the IPv4 rules; the blanket block
+// here additionally refuses mapped forms of public addresses, per §T8.
+const mappedList = new BlockList();
+mappedList.addSubnet("::ffff:0:0", 96, "ipv6");
 
-blockList.addAddress("::", "ipv6");
-blockList.addAddress("::1", "ipv6");
-for (const [net, prefix] of [
-  ["fc00::", 7],
-  ["fe80::", 10],
-  ["ff00::", 8],
-  ["::ffff:0:0", 96],
-] as const) {
-  blockList.addSubnet(net, prefix, "ipv6");
-}
-
-function isBlockedAddress(address: string, family: 4 | 6): boolean {
-  return blockList.check(address, family === 4 ? "ipv4" : "ipv6");
+export function isBlockedAddress(address: string, family: 4 | 6): boolean {
+  if (family === 4) return blockList.check(address, "ipv4");
+  return blockList.check(address, "ipv6") || mappedList.check(address, "ipv6");
 }
 
 function isLoopbackAddress(address: string, family: 4 | 6): boolean {
@@ -232,18 +236,40 @@ function performRequest(
         method: "GET",
         headers: { Host: url.host, Accept: "application/json" },
         signal,
+        // No pooled keep-alive socket: a reused socket would skip the pinned
+        // lookup below and talk to whatever address it was first opened to.
+        agent: false,
         // Pin the connection to the address we already validated instead of
         // letting the socket layer re-resolve DNS — this is the anti-rebinding
         // measure. The Host header / TLS servername above still use the
         // original hostname, which is what the request.
-        lookup: (_hostname, _opts, callback) => {
-          callback(null, resolved.address, resolved.family);
+        //
+        // Node 20+ (autoSelectFamily) calls lookup with `all: true` and expects
+        // an array of { address, family }; the single-address callback form is
+        // an ERR_INVALID_IP_ADDRESS there. Both forms are answered with the
+        // same pre-validated address, so neither can reach an unvalidated one.
+        lookup: (_hostname, opts, callback) => {
+          if (opts.all) {
+            callback(null, [{ address: resolved.address, family: resolved.family }]);
+          } else {
+            callback(null, resolved.address, resolved.family);
+          }
         },
       } satisfies http.RequestOptions,
       (res) => {
         const statusCode = res.statusCode ?? 0;
         const chunks: Buffer[] = [];
         let total = 0;
+
+        // Reject early on a declared length over the cap, before reading any
+        // body. The streaming check below still covers a missing or lying header.
+        const declaredLength = Number(res.headers["content-length"]);
+        if (Number.isFinite(declaredLength) && declaredLength > maxBytes) {
+          res.destroy();
+          req.destroy();
+          rejectPromise(new SafeFetchError("response_too_large", `Declared Content-Length ${declaredLength} exceeds ${maxBytes} bytes`));
+          return;
+        }
 
         res.on("data", (chunk: Buffer) => {
           total += chunk.length;
@@ -292,15 +318,20 @@ export interface SafeFetchOptions {
   // headers (T9 needs Cache-Control's max-age) without widening this
   // function's return type beyond the parsed JSON body.
   onHeaders?: (headers: http.IncomingHttpHeaders) => void;
+  // Redirects to follow, each independently revalidated. 0 makes any redirect
+  // response a rejection — CIMD (T9) uses that, since a document accepted from
+  // a redirect target is not what the client_id URL actually serves.
+  maxRedirects?: number;
 }
 
 const DEFAULT_MAX_BYTES = 16 * 1024;
 const DEFAULT_TIMEOUT_MS = 3000;
-const MAX_REDIRECTS = 1;
+const DEFAULT_MAX_REDIRECTS = 1;
 
 export async function safeFetchJson(url: string, options: SafeFetchOptions = {}): Promise<unknown> {
   const maxBytes = options.maxBytes ?? DEFAULT_MAX_BYTES;
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const maxRedirects = options.maxRedirects ?? DEFAULT_MAX_REDIRECTS;
   // One deadline for the whole call, including any redirect hop — "total
   // timeout ... covering connect and read" is the budget for safeFetchJson()
   // as a whole, not per-hop.
@@ -323,13 +354,19 @@ export async function safeFetchJson(url: string, options: SafeFetchOptions = {})
     }
 
     if (response.statusCode >= 300 && response.statusCode < 400 && response.headers.location) {
-      if (redirectCount >= MAX_REDIRECTS) {
-        reject("too_many_redirects", `Exceeded ${MAX_REDIRECTS} redirect(s) fetching ${url}`);
+      if (redirectCount >= maxRedirects) {
+        reject("too_many_redirects", `Exceeded ${maxRedirects} redirect(s) fetching ${url}`);
       }
       // Resolved against the current URL, then independently revalidated
       // against every check above on the next loop iteration — a redirect
       // target is never trusted just because the first hop passed.
-      currentUrl = new URL(response.headers.location, parsed).toString();
+      // The Location header is attacker-controlled, so a malformed one is a
+      // typed rejection rather than a raw TypeError out of new URL().
+      try {
+        currentUrl = new URL(response.headers.location, parsed).toString();
+      } catch {
+        reject("invalid_redirect", `Malformed Location header fetching ${url}`);
+      }
       continue;
     }
 
@@ -338,12 +375,11 @@ export async function safeFetchJson(url: string, options: SafeFetchOptions = {})
     }
 
     const contentType = response.headers["content-type"] ?? "";
-    // Exact media-type match (ignoring a ;charset=... suffix), not a substring
-    // check — .includes() would also accept a deceptive type like
-    // "text/html; boundary=application/json".
-    const mediaType = contentType.split(";")[0]?.trim().toLowerCase();
-    if (mediaType !== "application/json") {
-      reject("invalid_content_type", `Expected application/json, got "${contentType}"`);
+    // application/json or application/<x>+json, with optional parameters
+    // (;charset=...). Anchored, not a substring check — .includes() would also
+    // accept a deceptive type like "text/html; boundary=application/json".
+    if (!/^application\/([\w.+-]+\+)?json\s*(;|$)/i.test(contentType)) {
+      reject("invalid_content_type", `Expected a JSON content type, got "${contentType}"`);
     }
 
     try {

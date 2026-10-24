@@ -93,6 +93,24 @@ model OauthClient {
   @@map("oauth_clients")
 }
 
+// CIMD clients refused at resolution. Complements trust-policy.yaml's static
+// denylist so an operator can block a client without a restart or redeploy.
+enum DenyKind {
+  client_id
+  domain
+}
+
+model DeniedClient {
+  id        String   @id @default(cuid())
+  kind      DenyKind
+  value     String   // exact client_id URL, or a host (matches subdomains too)
+  reason    String?
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@unique([kind, value])
+  @@map("denied_clients")
+}
+
 // ---------- Flow state ----------
 
 model AuthorizationRequest {

@@ -4,7 +4,7 @@ import escHtml from "escape-html";
 import { prisma } from "../db.js";
 import { config } from "../config.js";
 import { createLogger } from "../logger.js";
-import { resolveClient } from "../clients/cimd.js";
+import { isRegisteredRedirectUri, resolveClient } from "../clients/cimd.js";
 import { isRegisteredResource, lookupResourceServer } from "../resource-registry.js";
 import { startUpstreamAuth } from "../identity/oidc.js";
 
@@ -13,6 +13,8 @@ const log = createLogger("authorize");
 export const authorizeRouter: Router = Router();
 
 const AUTHORIZATION_REQUEST_TTL_MS = 10 * 60 * 1000;
+const MAX_STATE_LENGTH = 512;
+const CODE_CHALLENGE_PATTERN = /^[A-Za-z0-9_-]{43,128}$/;
 
 function renderErrorPage(res: Response, message: string): void {
   res.status(400).send(`<!DOCTYPE html>
@@ -47,11 +49,14 @@ authorizeRouter.get("/oauth/authorize", async (req: Request, res: Response) => {
     return;
   }
 
-  // ---- Stage 2: redirect_uri exact-match. Still no redirect on failure. ----
+  // ---- Stage 2: redirect_uri match (exact, except the RFC 8252 §7.3 loopback
+  // port exception in isRegisteredRedirectUri). Still no redirect on failure.
+  // The requested value, not the registered one, is what's stored and later
+  // compared exactly at the token endpoint. ----
   const redirectUri = singleQueryValue(query["redirect_uri"]);
   const metadata = client.metadata as { redirect_uris?: unknown } | null;
   const registeredRedirectUris = Array.isArray(metadata?.redirect_uris) ? (metadata.redirect_uris as unknown[]) : [];
-  if (!redirectUri || !registeredRedirectUris.includes(redirectUri)) {
+  if (!redirectUri || !isRegisteredRedirectUri(registeredRedirectUris.filter((u): u is string => typeof u === "string"), redirectUri)) {
     log.warn({ clientId, redirectUri }, "Authorization request with an unregistered redirect_uri");
     renderErrorPage(res, "redirect_uri is missing or not registered for this client.");
     return;
@@ -61,12 +66,21 @@ authorizeRouter.get("/oauth/authorize", async (req: Request, res: Response) => {
   // redirects to it with `error` (and `state`, if the client sent one). ----
   const state = singleQueryValue(query["state"]);
 
+  // fail() echoes state back to the client, so an over-long one is dropped
+  // from the echo and rejected below instead.
+  const stateTooLong = state !== undefined && state.length > MAX_STATE_LENGTH;
+
   function fail(error: string, errorDescription?: string): void {
     const target = new URL(redirectUri!);
     target.searchParams.set("error", error);
     if (errorDescription) target.searchParams.set("error_description", errorDescription);
-    if (state) target.searchParams.set("state", state);
+    if (state && !stateTooLong) target.searchParams.set("state", state);
     res.redirect(target.toString());
+  }
+
+  if (stateTooLong) {
+    fail("invalid_request", `state must be at most ${MAX_STATE_LENGTH} characters`);
+    return;
   }
 
   const responseType = singleQueryValue(query["response_type"]);
@@ -81,6 +95,12 @@ authorizeRouter.get("/oauth/authorize", async (req: Request, res: Response) => {
     // PKCE is mandatory, S256 only (§1.7) — a missing challenge or any method
     // other than S256 (including the RFC 7636 "plain" default) is rejected.
     fail("invalid_request", "code_challenge is required and code_challenge_method must be S256");
+    return;
+  }
+  // An S256 challenge is a base64url SHA-256 digest: 43 chars unpadded, but
+  // RFC 7636 §4.2 allows 43-128 characters of the unreserved base64url set.
+  if (!CODE_CHALLENGE_PATTERN.test(codeChallenge)) {
+    fail("invalid_request", "code_challenge must be 43 to 128 base64url characters");
     return;
   }
 
