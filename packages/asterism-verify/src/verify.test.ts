@@ -129,6 +129,42 @@ describe("verify: issuer, time and claims", () => {
   });
 });
 
+describe("verify: sub, iat and message hygiene", () => {
+  it("P0 an empty or non-string sub is missing_claims", async () => {
+    const v = createVerifier(config());
+    expect(await reasonOf(v.verify(await sign(key, claims({ sub: "" }))))).toBe("missing_claims");
+    expect(await reasonOf(v.verify(await sign(key, claims({ sub: 7 }))))).toBe("missing_claims");
+  });
+
+  it("P0 an iat more than 60 s in the future is not_yet_valid; within 60 s is accepted", async () => {
+    const v = createVerifier(config());
+    expect((await v.verify(await sign(key, claims({ iat: NOW + 60 })))).subject).toBe("user-1");
+    expect(await reasonOf(v.verify(await sign(key, claims({ iat: NOW + 61 }))))).toBe("not_yet_valid");
+    expect(await reasonOf(v.verify(await sign(key, claims({ iat: NOW + 86400 * 365 }))))).toBe("not_yet_valid");
+    expect(await reasonOf(v.verify(await sign(key, claims({ iat: "soon" }))))).toBe("missing_claims");
+  });
+
+  it("P0 error messages never include the expected audience or issuer", async () => {
+    const v = createVerifier(config());
+    const bad = [
+      claims({ aud: "https://other.example.test" }),
+      claims({ aud: undefined }),
+      claims({ aud: [AUD] }),
+      claims({ iss: "https://evil.example.test" }),
+      claims({ sub: "" }),
+      claims({ client_id: undefined }),
+      claims({ aud: undefined, iss: undefined }),
+    ];
+    for (const c of bad) {
+      const err = await v.verify(await sign(key, c)).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(TokenValidationError);
+      const msg = (err as Error).message;
+      expect(msg).not.toContain(AUD);
+      expect(msg).not.toContain(issuer);
+    }
+  });
+});
+
 describe("verify: kid and signature", () => {
   it("P0 an unknown kid is unknown_kid", async () => {
     const other = await makeEs256Key("kid-other");
@@ -213,17 +249,37 @@ describe("verify: JWKS availability and discovery", () => {
   });
 
   it("P1 discovery tolerates a trailing slash on the issuer", async () => {
-    server.routes["/.well-known/oauth-authorization-server"] = { body: { jwks_uri: `${server.url}/jwks` } };
+    server.routes["/.well-known/oauth-authorization-server"] = { body: { issuer: `${server.url}/`, jwks_uri: `${server.url}/jwks` } };
     const v = createVerifier({ issuer: `${server.url}/`, audience: AUD });
     expect((await v.verify(await sign(key, claims({ iss: `${server.url}/` })))).subject).toBe("user-1");
   });
 
   it("P1 inserts the well-known segment before the path of an issuer that has one (RFC 8414 3.1)", async () => {
     const tenantIssuer = `${server.url}/tenant/a`;
-    server.routes["/.well-known/oauth-authorization-server/tenant/a"] = { body: { jwks_uri: `${server.url}/jwks` } };
+    server.routes["/.well-known/oauth-authorization-server/tenant/a"] = { body: { issuer: tenantIssuer, jwks_uri: `${server.url}/jwks` } };
     const v = createVerifier({ issuer: tenantIssuer, audience: AUD });
     expect((await v.verify(await sign(key, claims({ iss: tenantIssuer })))).subject).toBe("user-1");
     expect(server.hits[0]).toBe("/.well-known/oauth-authorization-server/tenant/a");
+  });
+
+  it("P0 a discovery issuer mismatch or a non-https jwks_uri is jwks_unavailable", async () => {
+    server.routes["/.well-known/oauth-authorization-server"] = { body: { issuer: "https://evil.example.test", jwks_uri: `${server.url}/jwks` } };
+    const v1 = createVerifier({ issuer: server.url, audience: AUD });
+    expect(await reasonOf(v1.verify(await sign(key, claims({ iss: server.url }))))).toBe("jwks_unavailable");
+    server.routes["/.well-known/oauth-authorization-server"] = { body: { issuer: server.url, jwks_uri: "http://keys.example.test/jwks" } };
+    const v2 = createVerifier({ issuer: server.url, audience: AUD });
+    expect(await reasonOf(v2.verify(await sign(key, claims({ iss: server.url }))))).toBe("jwks_unavailable");
+    const v3 = createVerifier(config({ jwksUri: "http://keys.example.test/jwks" }));
+    expect(await reasonOf(v3.verify(await sign(key, claims())))).toBe("jwks_unavailable");
+  });
+
+  it("P0 maxStaleMs flows through VerifierConfig: past it, verify says jwks_unavailable", async () => {
+    const v = createVerifier(config({ maxStaleMs: 60_000 }));
+    const t = await sign(key, claims({ exp: NOW + 3 * 3600 }));
+    await v.verify(t);
+    server.routes["/jwks"] = { status: 503 };
+    vi.setSystemTime(NOW_MS + 30_000 + 3600_000);
+    expect(await reasonOf(v.verify(t))).toBe("jwks_unavailable");
   });
 
   it("P1 discovery failures are jwks_unavailable (HTTP error, no jwks_uri)", async () => {
@@ -256,7 +312,7 @@ describe("verify: fetch timeouts", () => {
       seen.push(init?.signal);
       return real(input, init);
     });
-    server.routes["/.well-known/oauth-authorization-server"] = { body: { jwks_uri: `${server.url}/jwks` } };
+    server.routes["/.well-known/oauth-authorization-server"] = { body: { issuer: server.url, jwks_uri: `${server.url}/jwks` } };
     await createVerifier({ issuer: server.url, audience: AUD }).verify(await sign(key, claims({ iss: server.url })));
     expect(seen).toHaveLength(2);
     expect(seen.every((s) => s instanceof AbortSignal)).toBe(true);

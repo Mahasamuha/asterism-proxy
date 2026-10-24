@@ -17,7 +17,7 @@ import {
   type VerifierConfig,
 } from "./index.js";
 
-expectTypeOf<VerifierConfig>().toEqualTypeOf<{ issuer: string; audience: string; jwksUri?: string }>();
+expectTypeOf<VerifierConfig>().toEqualTypeOf<{ issuer: string; audience: string; jwksUri?: string; maxStaleMs?: number }>();
 expectTypeOf<Principal>().toEqualTypeOf<{ subject: string; clientId: string; scopes: string[]; expiresAt: Date }>();
 
 // Adding a reason is allowed; removing or renaming one is a breaking change.

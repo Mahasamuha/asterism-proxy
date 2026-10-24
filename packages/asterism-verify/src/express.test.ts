@@ -102,6 +102,28 @@ describe("createBearerAuthMiddleware", () => {
     expect(res.status).toBe(401);
   });
 
+  it("P0 jwks_unavailable is a 503 with Retry-After and no challenge, not a 401", async () => {
+    const bad = await startRouteServer({ "/jwks": { status: 500 } });
+    const a = express();
+    a.use("/mcp", createBearerAuthMiddleware({ ...cfg(), jwksUri: `${bad.url}/jwks` }));
+    a.get("/mcp", (_req, res) => res.json({ ok: true }));
+    const srv = a.listen(0, "127.0.0.1");
+    await new Promise<void>((r) => srv.once("listening", r));
+    try {
+      const res = await fetch(`http://127.0.0.1:${(srv.address() as AddressInfo).port}/mcp`, { headers: { authorization: `Bearer ${await token()}` } });
+      expect(res.status).toBe(503);
+      expect(res.headers.get("retry-after")).toBe("30");
+      expect(res.headers.get("www-authenticate")).toBeNull();
+      expect(res.headers.get("content-type")).toMatch(/json/);
+      const body = (await res.json()) as { error: string };
+      expect(body.error).toBe("temporarily_unavailable");
+    } finally {
+      srv.closeAllConnections();
+      await new Promise((r) => srv.close(r));
+      await bad.close();
+    }
+  });
+
   it("P1 a valid token reaches the handler with req.principal set", async () => {
     const res = await get({ authorization: `Bearer ${await token()}` });
     expect(res.status).toBe(200);
