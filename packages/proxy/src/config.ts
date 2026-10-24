@@ -33,6 +33,15 @@ const envSchema = z
     PORT: z.coerce.number().int().positive().default(3000),
     LOG_LEVEL: z.string().default("warn"),
 
+    // Signs the session and CSRF cookies. Required (no ephemeral fallback) so
+    // sessions survive restarts and a missing secret can't silently weaken them.
+    COOKIE_SECRET: z.string().min(32, "COOKIE_SECRET is required and must be at least 32 characters"),
+    // Express "trust proxy" setting: a hop count (number), or a string such as
+    // "loopback" or a CIDR list. Needed behind an ingress so req.ip is the client.
+    TRUST_PROXY: z.string().min(1).optional(),
+    // Bearer token for /metrics; unset disables the endpoint.
+    METRICS_TOKEN: z.string().min(32, "METRICS_TOKEN must be at least 32 characters").optional(),
+
     ENABLE_OIDC: boolFromEnv(true),
     OIDC_ISSUER: z.url().optional(),
     OIDC_CLIENT_ID: z.string().min(1).optional(),
@@ -53,6 +62,13 @@ const envSchema = z
         code: "custom",
         message: "at least one identity provider must be enabled: set ENABLE_OIDC=true or ENABLE_LOCAL_ACCOUNTS=true",
         path: ["ENABLE_OIDC"],
+      });
+    }
+    if (env.ENABLE_DCR) {
+      ctx.addIssue({
+        code: "custom",
+        message: "ENABLE_DCR is not supported yet (PLAN T10 is deferred)",
+        path: ["ENABLE_DCR"],
       });
     }
     if (env.ENABLE_OIDC) {
@@ -82,6 +98,11 @@ export const config = {
   issuerUrl: env.ISSUER_URL,
   port: env.PORT,
   logLevel: env.LOG_LEVEL,
+
+  cookieSecret: env.COOKIE_SECRET,
+  // Numeric strings become hop counts; anything else is passed to Express as-is.
+  trustProxy: env.TRUST_PROXY === undefined ? undefined : /^\d+$/.test(env.TRUST_PROXY) ? Number(env.TRUST_PROXY) : env.TRUST_PROXY,
+  metricsToken: env.METRICS_TOKEN,
 
   enableOidc: env.ENABLE_OIDC,
   // Non-null exactly when enableOidc is true — superRefine above rejects

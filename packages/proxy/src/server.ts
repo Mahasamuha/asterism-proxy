@@ -1,6 +1,6 @@
 import express, { Express, NextFunction, Request, Response } from "express";
 import { createServer } from "node:http";
-import { randomUUID, randomBytes } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import cookieParser from "cookie-parser";
@@ -17,6 +17,7 @@ import { tokenRouter } from "./oauth/token.js";
 import { deviceRouter } from "./oauth/device.js";
 import { consentRouter } from "./oauth/consent.js";
 import { grantsRouter } from "./oauth/grants.js";
+import { getOidcConfig } from "./identity/oidc.js";
 import { oidcRouter } from "./identity/oidc-router.js";
 import { localAccountsRouter } from "./identity/local-accounts-router.js";
 import { opsRouter } from "./ops.js";
@@ -33,16 +34,15 @@ app.set("views", path.join(__dirname, "views"));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// COOKIE_SECRET signs the session and CSRF cookies used by local-account login
-// (T7) and, later, consent (T13). An ephemeral secret is generated at startup
-// if unset — fine within a process, but sessions won't survive a restart;
-// set COOKIE_SECRET for that.
-const cookieSecret = process.env["COOKIE_SECRET"] ?? (() => {
-  const ephemeral = randomBytes(32).toString("hex");
-  log.warn("COOKIE_SECRET is not set — using an ephemeral secret. Set COOKIE_SECRET for cross-restart cookie validity.");
-  return ephemeral;
-})();
-app.use(cookieParser(cookieSecret));
+// Required when running behind an ingress/reverse proxy: without it req.ip is the
+// proxy's address, so every client shares one login-throttle bucket (T7).
+if (config.trustProxy !== undefined) {
+  app.set("trust proxy", config.trustProxy);
+}
+
+// COOKIE_SECRET (required, validated in config.ts) signs the session and CSRF
+// cookies. There is deliberately no ephemeral fallback.
+app.use(cookieParser(config.cookieSecret));
 
 app.use((req: Request, res: Response, next: NextFunction) => {
   const raw = req.headers["x-request-id"] as string | undefined;
@@ -87,11 +87,33 @@ if (config.enableLocalAccounts) {
 app.use((err: unknown, req: Request, res: Response, _next: NextFunction) => {
   log.error({ err, path: req.path }, "Unhandled request error");
   if (res.headersSent) return;
-  res.status(400).json({ error: "invalid_request", error_description: "The request could not be processed" });
+  // body-parser (malformed JSON, oversized body, bad charset...) and other
+  // http-errors carry a 4xx status: those are the client's fault. Anything else
+  // is ours; its details are logged above and never returned.
+  const e = err as { status?: unknown; statusCode?: unknown } | null;
+  const status = typeof e?.status === "number" ? e.status : typeof e?.statusCode === "number" ? e.statusCode : 0;
+  if (status >= 400 && status <= 499) {
+    res.status(400).json({ error: "invalid_request", error_description: "The request could not be processed" });
+    return;
+  }
+  res.status(500).json({ error: "server_error", error_description: "An internal error occurred" });
 });
 
 if (import.meta.url === `file://${process.argv[1]}`) {
   const server = createServer(app);
+
+  // Fail fast on an unreachable or misconfigured OIDC provider rather than
+  // booting and failing every login. getOidcConfig() throws on a first-call
+  // discovery failure (the stale-config fallback only applies once a config is
+  // cached), so a failure here is exactly what we want to catch.
+  if (config.enableOidc) {
+    try {
+      await getOidcConfig();
+    } catch (err) {
+      log.error({ err, issuer: config.oidc?.issuer }, "OIDC discovery failed at startup; check OIDC_ISSUER and that the provider is reachable");
+      process.exit(1);
+    }
+  }
 
   // Ensure a signing key exists before accepting any traffic. This runs before
   // server.listen() so it can't race with a concurrent request also finding no
