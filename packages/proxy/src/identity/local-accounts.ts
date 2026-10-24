@@ -10,9 +10,10 @@ const MAX_FAILURES = 5;
 const FAILURE_WINDOW_MS = 15 * 60 * 1000;
 export const MIN_PASSWORD_LENGTH = 12;
 
-// A real bcrypt hash of a password nobody could type, used so failed lookups take the
-// same time as a real comparison — avoids leaking account existence via timing.
-const DUMMY_HASH = "$2a$12$invalidhashpadding000000000000000000000000000000000000000";
+// A real, well-formed cost-12 bcrypt hash of a random throwaway string, used so failed lookups take the
+// same time as a real comparison — avoids leaking account existence via timing. It must be a valid
+// 60-character hash: bcrypt.compare returns immediately on a malformed one, defeating the defence.
+const DUMMY_HASH = "$2b$12$ZPPdU3fzm.6eUstXs1Neve8W2zHAqkIit3VGV8MhPi51xB1x7mvyO";
 
 export async function checkBruteForce(ip: string): Promise<boolean> {
   const since = new Date(Date.now() - FAILURE_WINDOW_MS);
