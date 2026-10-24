@@ -24,6 +24,10 @@ function buildMetadata(): Record<string, unknown> {
     code_challenge_methods_supported: ["S256"],
     token_endpoint_auth_methods_supported: ["none", "private_key_jwt"],
 
+    // RFC 7009 (T18). Same client authentication rules as the token endpoint.
+    revocation_endpoint: `${issuer}/oauth/revoke`,
+    revocation_endpoint_auth_methods_supported: ["none", "private_key_jwt"],
+
     // CIMD (draft-ietf-oauth-client-id-metadata-document) — not an RFC 8414 field,
     // but the mechanism this proxy exists to add over Constellation's original AS.
     client_id_metadata_document_supported: true,

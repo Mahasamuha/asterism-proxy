@@ -58,10 +58,23 @@ async function getClientJwks(jwksUri: string): Promise<jose.JWK[]> {
 
 // ---------------------------------------------------------------------------
 // jti replay protection. In-memory only, same tradeoff as the JWKS cache
-// above: a restart reopens a narrow replay window for assertions whose
-// validity period spans it. Acceptable for the single-instance deployment
-// this proxy targets (§2) — revisit if that ever changes.
+// above: a restart reopens a replay window for assertions whose validity
+// period spans it. Acceptable for the single-instance deployment this proxy
+// targets (§2) — revisit if that ever changes. The MAX_ASSERTION_LIFETIME_S
+// cap below bounds both the map (entries live at most ~6 minutes) and that
+// restart replay window to the same ~6 minutes.
 // ---------------------------------------------------------------------------
+
+/** Longest assertion lifetime accepted (exp - now). Short on purpose: the jti
+ * store is in memory, so the cap is what keeps replay protection meaningful. */
+const MAX_ASSERTION_LIFETIME_S = 300;
+/** Clock skew tolerated between the client and this server, both for the
+ * lifetime cap and for an iat in the future. */
+const CLOCK_SKEW_S = 60;
+
+/** Asymmetric algorithms only. HS* is excluded: the "secret" would be a key
+ * published in the client's public jwks_uri. */
+const ALLOWED_ALGORITHMS = ["ES256", "ES384", "PS256", "RS256", "EdDSA"];
 
 const seenJti = new Map<string, number>(); // key: `${clientId}:${jti}` -> expiry (ms epoch)
 
@@ -82,7 +95,11 @@ export class ClientAssertionError extends Error {}
  * to the token endpoint URL, exp, and an unused jti within its validity
  * window. */
 export async function verifyClientAssertion(clientId: string, jwksUri: string, assertion: string): Promise<void> {
-  const keys = await getClientJwks(jwksUri);
+  // Drop symmetric ("oct") keys. A client's jwks_uri is a public document, so
+  // an oct key in it would let anyone who can fetch it forge HS* assertions as
+  // that client. The algorithms allow-list below already excludes HS*; this is
+  // the second layer, so a symmetric key can never be selected at all.
+  const keys = (await getClientJwks(jwksUri)).filter((k) => k.kty !== "oct");
   const jwkSet = jose.createLocalJWKSet({ keys });
   const tokenEndpoint = `${config.issuerUrl}/oauth/token`;
 
@@ -92,6 +109,8 @@ export async function verifyClientAssertion(clientId: string, jwksUri: string, a
       issuer: clientId,
       subject: clientId,
       audience: tokenEndpoint,
+      algorithms: ALLOWED_ALGORITHMS,
+      clockTolerance: CLOCK_SKEW_S,
     }));
   } catch (err) {
     throw new ClientAssertionError(err instanceof Error ? err.message : "client_assertion verification failed");
@@ -102,6 +121,17 @@ export async function verifyClientAssertion(clientId: string, jwksUri: string, a
   }
   if (typeof payload.exp !== "number") {
     throw new ClientAssertionError("client_assertion is missing exp");
+  }
+
+  // Cap the lifetime explicitly (rather than via maxTokenAge, which keys off
+  // iat — optional here) so a long-lived assertion can't outlast the
+  // in-memory jti store and its restart replay window.
+  const nowS = Math.floor(Date.now() / 1000);
+  if (payload.exp - nowS > MAX_ASSERTION_LIFETIME_S + CLOCK_SKEW_S) {
+    throw new ClientAssertionError(`client_assertion exp is too far in the future (max lifetime ${MAX_ASSERTION_LIFETIME_S}s)`);
+  }
+  if (typeof payload.iat === "number" && payload.iat - nowS > CLOCK_SKEW_S) {
+    throw new ClientAssertionError("client_assertion iat is in the future");
   }
 
   const key = `${clientId}:${payload.jti}`;

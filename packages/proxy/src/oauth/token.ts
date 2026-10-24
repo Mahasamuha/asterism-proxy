@@ -32,18 +32,19 @@ tokenRouter.post("/oauth/token", async (req: Request, res: Response) => {
   res.status(400).json({ error: "unsupported_grant_type" });
 });
 
-/** A replayed (already-consumed) code revokes every refresh token on the same
- * grant — §T14. Idempotent: a second call for an already-revoked chain is a
+/** A replayed (already-consumed) code, or reuse of an already-rotated refresh
+ * token, revokes every refresh token on the same grant — §T14. `kind` labels
+ * the refresh_reuse_detected_total counter (T20). Idempotent: a second call for an already-revoked chain is a
  * harmless no-op, which matters because the atomic-claim race below can call
  * this a second time for the same replay. */
-async function revokeDescendantRefreshTokens(grantId: string): Promise<void> {
+async function revokeDescendantRefreshTokens(grantId: string, kind: "code_replay" | "refresh_reuse"): Promise<void> {
   const result = await prisma.refreshToken.updateMany({
     where: { grantId, revokedAt: null },
     data: { revokedAt: new Date() },
   });
   if (result.count > 0) {
-    incrementCounter("refresh_reuse_detected_total");
-    log.warn({ grantId, revokedCount: result.count }, "Authorization code replay: revoked descendant refresh tokens");
+    incrementCounter("refresh_reuse_detected_total", { kind });
+    log.warn({ grantId, kind, revokedCount: result.count }, "Code replay or refresh-token reuse: revoked descendant refresh tokens");
   }
 }
 
@@ -70,7 +71,7 @@ async function handleAuthorizationCodeGrant(body: Record<string, string>, res: R
   }
 
   if (entry.consumedAt !== null) {
-    await revokeDescendantRefreshTokens(entry.grantId);
+    await revokeDescendantRefreshTokens(entry.grantId, "code_replay");
     res.status(400).json({ error: "invalid_grant", error_description: "Authorization code already used" });
     return;
   }
@@ -159,7 +160,7 @@ async function handleAuthorizationCodeGrant(body: Record<string, string>, res: R
   if (!issued) {
     // Treated exactly like the ordinary replay case above, including revoking
     // descendant refresh tokens (idempotent if the other request already did so).
-    await revokeDescendantRefreshTokens(entry.grantId);
+    await revokeDescendantRefreshTokens(entry.grantId, "code_replay");
     res.status(400).json({ error: "invalid_grant", error_description: "Authorization code already used" });
     return;
   }
@@ -222,7 +223,7 @@ async function handleRefreshTokenGrant(body: Record<string, string>, res: Respon
   if (entry.rotatedTo !== null) {
     // Reuse of an already-rotated token is a strong signal of theft — revoke
     // the entire grant's refresh chain, not just this one token.
-    await revokeDescendantRefreshTokens(entry.grantId);
+    await revokeDescendantRefreshTokens(entry.grantId, "refresh_reuse");
     res.status(400).json({ error: "invalid_grant", error_description: "Refresh token already used" });
     return;
   }
@@ -289,7 +290,7 @@ async function handleRefreshTokenGrant(body: Record<string, string>, res: Respon
     return true;
   });
   if (!rotated) {
-    await revokeDescendantRefreshTokens(entry.grantId);
+    await revokeDescendantRefreshTokens(entry.grantId, "refresh_reuse");
     res.status(400).json({ error: "invalid_grant", error_description: "Refresh token already used" });
     return;
   }
@@ -307,7 +308,7 @@ async function handleRefreshTokenGrant(body: Record<string, string>, res: Respon
 }
 
 async function handleDeviceCodeGrant(body: Record<string, string>, res: Response): Promise<void> {
-  const { device_code, client_id } = body;
+  const { device_code, client_id, resource } = body;
 
   if (!device_code || !client_id) {
     res.status(400).json({ error: "invalid_request", error_description: "device_code and client_id are required" });
@@ -334,34 +335,45 @@ async function handleDeviceCodeGrant(body: Record<string, string>, res: Response
     return;
   }
 
-  // Dedicated polling rate limit (§T17): polling faster than the code's own
-  // interval raises that interval and returns slow_down, mirroring
-  // Constellation's device-poll bucket but scoped per device_code rather
-  // than per HTTP route.
-  const now = new Date();
-  if (entry.lastPolledAt && now.getTime() - entry.lastPolledAt.getTime() < entry.pollInterval * 1000) {
-    await prisma.deviceCode.update({
-      where: { deviceCodeHash },
-      data: { lastPolledAt: now, pollInterval: entry.pollInterval + 5 },
-    });
-    res.status(400).json({ error: "slow_down" });
+  // Same rule as the other grants: a device_code is bound to the resource it
+  // was issued for and can't be redirected to another.
+  if (resource !== undefined && resource !== entry.resource) {
+    res.status(400).json({ error: "invalid_target", error_description: "resource does not match the device code" });
     return;
   }
-  await prisma.deviceCode.update({ where: { deviceCodeHash }, data: { lastPolledAt: now } });
 
-  if (entry.status === "pending") {
-    res.status(400).json({ error: "authorization_pending" });
-    return;
-  }
+  // Terminal states answer immediately and are never subject to slow_down
+  // (RFC 8628 §3.5 applies the polling interval to authorization_pending).
+  // Throttling them would only mislead a client that's already been told the
+  // final outcome.
   if (entry.status === "denied") {
     await prisma.deviceCode.delete({ where: { deviceCodeHash } }).catch(() => {});
     incrementCounter("device_flow_outcomes_total", { outcome: "denied" });
     res.status(400).json({ error: "access_denied" });
     return;
   }
-  if (entry.status !== "approved") {
+  if (entry.status !== "pending" && entry.status !== "approved") {
     // "consumed" (already redeemed) or any other unexpected value.
     res.status(400).json({ error: "invalid_grant", error_description: "device_code already redeemed" });
+    return;
+  }
+
+  // Dedicated polling rate limit (§T17), only while still pending: polling
+  // faster than the code's own interval raises that interval and returns
+  // slow_down, mirroring Constellation's device-poll bucket but scoped per
+  // device_code rather than per HTTP route.
+  if (entry.status === "pending") {
+    const now = new Date();
+    if (entry.lastPolledAt && now.getTime() - entry.lastPolledAt.getTime() < entry.pollInterval * 1000) {
+      await prisma.deviceCode.update({
+        where: { deviceCodeHash },
+        data: { lastPolledAt: now, pollInterval: entry.pollInterval + 5 },
+      });
+      res.status(400).json({ error: "slow_down" });
+      return;
+    }
+    await prisma.deviceCode.update({ where: { deviceCodeHash }, data: { lastPolledAt: now } });
+    res.status(400).json({ error: "authorization_pending" });
     return;
   }
 

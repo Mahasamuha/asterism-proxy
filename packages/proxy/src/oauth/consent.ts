@@ -7,6 +7,7 @@ import { resolveClient } from "../clients/cimd.js";
 import { lookupResourceServer } from "../resource-registry.js";
 import { issueCsrfToken, verifyCsrfToken } from "../identity/csrf.js";
 import { DEVICE_FLOW_REDIRECT_URI_SENTINEL } from "./device.js";
+import { isSelfLogin } from "../identity/self-login.js";
 import { incrementCounter } from "../metrics.js";
 import type { AuthorizationRequest, Prisma } from "../generated/prisma/client.js";
 
@@ -36,6 +37,10 @@ async function loadFlow(handle: string | undefined): Promise<(AuthorizationReque
   if (!authRequest) return null;
   if (authRequest.expiresAt < new Date()) return null;
   if (!authRequest.subject) return null;
+  // Self-login rows (proxy account pages) get a subject the same way OAuth
+  // flows do, but carry no client, resource, or PKCE challenge — they must never
+  // reach consent or mint a code, even if someone feeds their handle here.
+  if (isSelfLogin(authRequest)) return null;
   return authRequest as AuthorizationRequest & { subject: string };
 }
 
