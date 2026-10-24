@@ -1,11 +1,11 @@
-import { Router, Request, Response } from "express";
+import { Router, Request, Response, NextFunction } from "express";
 import escHtml from "escape-html";
 import { prisma } from "../db.js";
 import { createLogger } from "../logger.js";
 import {
   checkBruteForce,
   recordFailure,
-  createLocalUser,
+  createFirstLocalUser,
   validateLocalUser,
   changePassword,
   localAccountsExist,
@@ -23,18 +23,20 @@ export const localAccountsRouter: Router = Router();
 // GET/POST /setup — self-disabling first-account creation
 // ---------------------------------------------------------------------------
 
-localAccountsRouter.get("/setup", async (_req: Request, res: Response) => {
+// Once an account exists these fall through with next(), so /setup answers with
+// the same 404 as any unknown route (not 410, which would confirm the endpoint).
+localAccountsRouter.get("/setup", async (_req: Request, res: Response, next: NextFunction) => {
   if (await localAccountsExist()) {
-    res.status(410).send(gonePage());
+    next();
     return;
   }
   const csrfToken = issueCsrfToken(res, "csrf_setup");
   res.send(setupFormPage([], csrfToken));
 });
 
-localAccountsRouter.post("/setup", async (req: Request, res: Response) => {
+localAccountsRouter.post("/setup", async (req: Request, res: Response, next: NextFunction) => {
   if (await localAccountsExist()) {
-    res.status(410).send(gonePage());
+    next();
     return;
   }
 
@@ -57,9 +59,11 @@ localAccountsRouter.post("/setup", async (req: Request, res: Response) => {
     return;
   }
 
-  let userId: string;
+  let userId: string | null;
   try {
-    userId = await createLocalUser(username, password);
+    // Re-checks "no account exists" under an advisory lock; the early check above
+    // is only a fast path.
+    userId = await createFirstLocalUser(username, password);
   } catch (err) {
     const msg = err instanceof Error ? err.message : "";
     if (msg.toLowerCase().includes("unique")) {
@@ -68,6 +72,10 @@ localAccountsRouter.post("/setup", async (req: Request, res: Response) => {
       log.error({ err, username }, "Failed to create first user via setup");
       res.send(setupFormPage(["Setup failed. Please try again."], issueCsrfToken(res, "csrf_setup")));
     }
+    return;
+  }
+  if (userId === null) {
+    next(); // lost the race to a concurrent first POST
     return;
   }
 
@@ -153,8 +161,8 @@ localAccountsRouter.post("/auth/login", async (req: Request, res: Response) => {
 // GET /auth/account, POST /auth/password
 // ---------------------------------------------------------------------------
 
-function requireSession(req: Request, res: Response): string | null {
-  const userId = getSessionUserId(req);
+async function requireSession(req: Request, res: Response): Promise<string | null> {
+  const userId = await getSessionUserId(req);
   if (!userId) {
     res.redirect("/auth/login");
     return null;
@@ -163,7 +171,7 @@ function requireSession(req: Request, res: Response): string | null {
 }
 
 localAccountsRouter.get("/auth/account", async (req: Request, res: Response) => {
-  const userId = requireSession(req, res);
+  const userId = await requireSession(req, res);
   if (!userId) return;
 
   const localUser = await prisma.localUser.findUnique({ where: { userId } });
@@ -178,7 +186,7 @@ localAccountsRouter.get("/auth/account", async (req: Request, res: Response) => 
 });
 
 localAccountsRouter.post("/auth/password", async (req: Request, res: Response) => {
-  const userId = requireSession(req, res);
+  const userId = await requireSession(req, res);
   if (!userId) return;
 
   const localUser = await prisma.localUser.findUnique({ where: { userId } });
@@ -239,12 +247,6 @@ function setupFormPage(errors: string[], csrfToken?: string): string {
     <button type="submit">Create account</button>
   </form>
 </body></html>`;
-}
-
-function gonePage(): string {
-  return `<!DOCTYPE html>
-<html lang="en"><head><meta charset="utf-8"><title>Setup complete</title></head>
-<body><h1>Setup complete</h1><p>An account already exists. <a href="/auth/login">Sign in</a>.</p></body></html>`;
 }
 
 function accountPage(username: string, errors: string[], csrfToken: string, notice?: string): string {
