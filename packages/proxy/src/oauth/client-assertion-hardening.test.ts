@@ -112,3 +112,58 @@ describe("client JWKS cache (finding 5)", () => {
     expect(fetchJson).toHaveBeenCalledTimes(2);
   });
 });
+
+describe("jti store limits (second-pass finding 1)", () => {
+  const clientId = "https://j.example.test/client.json";
+  const uri = "https://j.example.test/jwks.json";
+
+  it("rejects a jti longer than 256 characters and stores nothing for it", async () => {
+    const key = await makeEs256Key("k1");
+    serve(uri, [key]);
+    await expect(mod.verifyClientAssertion(clientId, uri, await sign(clientId, key, { jti: "j".repeat(257) }))).rejects.toThrow(/jti is too long/);
+    expect(mod.seenJtiKeysForTests()).toHaveLength(0);
+    await expect(mod.verifyClientAssertion(clientId, uri, await sign(clientId, key, { jti: "j".repeat(256) }))).resolves.toBeUndefined();
+  });
+
+  it("keys the store by a SHA-256 digest, not by the attacker-sized jti", async () => {
+    const key = await makeEs256Key("k1");
+    serve(uri, [key]);
+    await mod.verifyClientAssertion(clientId, uri, await sign(clientId, key, { jti: "plain-jti-value" }));
+    const keys = mod.seenJtiKeysForTests();
+    expect(keys).toHaveLength(1);
+    expect(keys[0]).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it("fails closed once the store is full: a new assertion is refused, live entries are never evicted", async () => {
+    const key = await makeEs256Key("k1");
+    serve(uri, [key]);
+    const live = await sign(clientId, key, { jti: "live" });
+    await mod.verifyClientAssertion(clientId, uri, live);
+    mod.fillReplayCacheForTests(mod.MAX_SEEN_JTI - 1, Date.now() + 600_000);
+    expect(mod.seenJtiKeysForTests()).toHaveLength(mod.MAX_SEEN_JTI);
+
+    await expect(mod.verifyClientAssertion(clientId, uri, await sign(clientId, key, { jti: "fresh" }))).rejects.toThrow(/replay cache full/);
+    expect(mod.seenJtiKeysForTests()).toHaveLength(mod.MAX_SEEN_JTI);
+    // The replay of the live assertion is still caught: nothing was evicted to make room.
+    await expect(mod.verifyClientAssertion(clientId, uri, live)).rejects.toThrow(/already been used/);
+  });
+
+  it("reports a full store to the client as invalid_client", async () => {
+    const key = await makeEs256Key("k1");
+    serve(uri, [key]);
+    mod.fillReplayCacheForTests(mod.MAX_SEEN_JTI, Date.now() + 600_000);
+    const client = { clientId, metadata: { token_endpoint_auth_method: "private_key_jwt", jwks_uri: uri } } as never;
+    const result = await mod.authenticateConfidentialClient(client, {
+      client_assertion_type: "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
+      client_assertion: await sign(clientId, key),
+    });
+    expect(result).toMatchObject({ ok: false, error: "invalid_client", errorDescription: expect.stringContaining("replay cache full") });
+  });
+
+  it("makes room by dropping expired entries only", async () => {
+    const key = await makeEs256Key("k1");
+    serve(uri, [key]);
+    mod.fillReplayCacheForTests(mod.MAX_SEEN_JTI, Date.now() - 1);
+    await expect(mod.verifyClientAssertion(clientId, uri, await sign(clientId, key))).resolves.toBeUndefined();
+  });
+});

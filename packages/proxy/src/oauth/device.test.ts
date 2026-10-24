@@ -80,7 +80,8 @@ describe("POST /oauth/device/code", () => {
   it("user codes never contain the confusable characters 0 O 1 I L (P0)", async () => {
     const seen = new Set<string>();
     for (let i = 0; i < 60; i++) {
-      const r = await requestCode({ client_id: CLIENT_ID, resource: RESOURCE });
+      // A fresh address each time: one address may only create 30 codes a minute.
+      const r = await postForm(app.baseUrl, "/oauth/device/code", { client_id: CLIENT_ID, resource: RESOURCE }, from(freshIp()));
       for (const ch of (r.json["user_code"] as string).replace("-", "")) seen.add(ch);
     }
     expect([...seen].join("")).toMatch(/^[A-HJKMNP-Z2-9]+$/);
@@ -141,6 +142,31 @@ describe("POST /oauth/device/code", () => {
 
 describe("GET/POST /oauth/device (user-code entry)", () => {
   const pending = (over: Record<string, unknown> = {}) => ({ clientId: CLIENT_ID, resource: RESOURCE, scopes: ["read"], expiresAt: new Date(Date.now() + 600_000), ...over });
+
+  it("with OIDC on, the entry POST redirects to the identity provider and allows exactly that origin in form-action", async () => {
+    const { startUpstreamAuth } = await import("../identity/oidc.js");
+    vi.mocked(startUpstreamAuth).mockResolvedValue("https://idp.example.test/authorize?client_id=x&state=y");
+    m("deviceCode", "findFirst").mockResolvedValue(pending());
+    const saved = { oidc: config.enableOidc, local: config.enableLocalAccounts };
+    config.enableOidc = true;
+    try {
+      const r = await enterCode(freshIp(), "ABCD-2345");
+      expect(r.status).toBe(302);
+      expect(r.headers.get("location")).toMatch(/^https:\/\/idp\.example\.test\/authorize/);
+      expect(r.headers.get("content-security-policy")).toContain("form-action 'self' https://idp.example.test;");
+    } finally {
+      config.enableOidc = saved.oidc;
+      config.enableLocalAccounts = saved.local;
+    }
+  });
+
+  it("the same-origin redirect to the local login keeps the app-wide policy (no override)", async () => {
+    m("deviceCode", "findFirst").mockResolvedValue(pending());
+    const r = await enterCode(freshIp(), "ABCD-2345");
+    expect(r.status).toBe(302);
+    expect(r.headers.get("location")).toMatch(/^\/auth\/login\?flow=/);
+    expect(r.headers.get("content-security-policy")).toBeNull();
+  });
 
   it("looks up pending, unexpired codes only (P0)", async () => {
     m("deviceCode", "findFirst").mockResolvedValue(null);
@@ -248,19 +274,12 @@ describe("user-code entry limiters count failures only (M10)", () => {
     expect((await enterCode(ip, "WXYZ2345")).status).toBe(200);
   });
 
-  it("a global ceiling of 200 failures stops guessing even from addresses never seen before", async () => {
+  it("has no global ceiling: failures from many addresses never lock out an address that has none of its own", async () => {
     m("deviceCode", "findFirst").mockResolvedValue(null);
-    for (let i = 0; i < 200; i++) expect((await enterCode(`172.16.${Math.floor(i / 250)}.${(i % 250) + 1}`, "WXYZ2345")).status).toBe(200);
-    const blocked = await enterCode("172.31.0.1", "WXYZ2345");
-    expect(blocked.status).toBe(429);
-    expect(m("deviceCode", "findFirst")).toHaveBeenCalledTimes(200);
-  });
-
-  it("successes do not count toward the global ceiling either", async () => {
-    m("deviceCode", "findFirst").mockResolvedValue(pending());
-    for (let i = 0; i < 210; i++) expect((await enterCode(`172.17.${Math.floor(i / 250)}.${(i % 250) + 1}`, "ABCD2345")).status).toBe(302);
-    m("deviceCode", "findFirst").mockResolvedValue(null);
-    expect((await enterCode("172.31.0.2", "WXYZ2345")).status).toBe(200);
+    for (let i = 0; i < 250; i++) expect((await enterCode(`172.16.${Math.floor(i / 250)}.${(i % 250) + 1}`, "WXYZ2345")).status).toBe(200);
+    // A 251st address is still evaluated (it used to get a 429 after 200 failures in total).
+    expect((await enterCode("172.31.0.1", "WXYZ2345")).status).toBe(200);
+    expect(m("deviceCode", "findFirst")).toHaveBeenCalledTimes(251);
   });
 
   it("concurrent wrong guesses from one IP cannot run past the per-IP limit", async () => {

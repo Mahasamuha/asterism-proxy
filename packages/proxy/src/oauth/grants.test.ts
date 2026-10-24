@@ -15,6 +15,7 @@ import { resolveClient } from "../clients/cimd.js";
 import { getSessionUserId } from "../identity/session.js";
 import { authenticateConfidentialClient } from "./client-assertion.js";
 import { grantsRouter } from "./grants.js";
+import { resetRateLimiters } from "../rate-limit.js";
 
 const db = prisma as unknown as ReturnType<typeof createPrismaMock>;
 const resolve = vi.mocked(resolveClient);
@@ -30,6 +31,7 @@ beforeAll(async () => {
 afterAll(() => app.close());
 
 beforeEach(() => {
+  resetRateLimiters();
   db.reset();
   resolve.mockReset().mockResolvedValue(clientRow() as never);
   authenticate.mockReset().mockResolvedValue({ ok: true });
@@ -78,11 +80,46 @@ describe("POST /oauth/revoke (RFC 7009)", () => {
   });
 
   it("a failing client assertion is rejected and revokes nothing (P0)", async () => {
+    m("refreshToken", "findUnique").mockResolvedValue(rtEntry());
     authenticate.mockResolvedValue({ ok: false, error: "invalid_client", errorDescription: "bad" });
     const r = await revoke({ token: "rt", client_id: CLIENT_ID });
     expect(r.status).toBe(400);
     expect(r.json["error"]).toBe("invalid_client");
     expect(m("refreshToken", "updateMany")).not.toHaveBeenCalled();
+  });
+
+  // The client is authenticated only for a token that exists and is its own, so
+  // an unauthenticated caller can't make this endpoint verify assertions (JWKS
+  // fetch, signature check, jti store) just by sending arbitrary tokens.
+  it("never authenticates the client for a token that does not exist, and still answers 200", async () => {
+    m("refreshToken", "findUnique").mockResolvedValue(null);
+    const r = await revoke({ token: "nope", client_id: CLIENT_ID, client_assertion: "x".repeat(60_000) });
+    expect(r.status).toBe(200);
+    expect(r.text).toBe("");
+    expect(authenticate).not.toHaveBeenCalled();
+    expect(m("refreshToken", "updateMany")).not.toHaveBeenCalled();
+  });
+
+  it("never authenticates the client for another client's token, and still answers 200", async () => {
+    m("refreshToken", "findUnique").mockResolvedValue(rtEntry({ clientId: "https://other.example.test/c.json" }));
+    expect((await revoke({ token: "rt", client_id: CLIENT_ID })).status).toBe(200);
+    expect(authenticate).not.toHaveBeenCalled();
+    expect(m("refreshToken", "updateMany")).not.toHaveBeenCalled();
+  });
+
+  it("authenticates the client once the token is found to be its own", async () => {
+    m("refreshToken", "findUnique").mockResolvedValue(rtEntry());
+    expect((await revoke({ token: "rt", client_id: CLIENT_ID })).status).toBe(200);
+    expect(authenticate).toHaveBeenCalledTimes(1);
+  });
+
+  it("answers 429 temporarily_unavailable after 60 requests a minute from one address", async () => {
+    m("refreshToken", "findUnique").mockResolvedValue(null);
+    for (let i = 0; i < 60; i++) expect((await revoke({ token: "t", client_id: CLIENT_ID })).status).toBe(200);
+    const r = await revoke({ token: "t", client_id: CLIENT_ID });
+    expect(r.status).toBe(429);
+    expect(r.json["error"]).toBe("temporarily_unavailable");
+    expect(m("refreshToken", "findUnique")).toHaveBeenCalledTimes(60);
   });
 
   it("missing token or client_id -> invalid_request", async () => {

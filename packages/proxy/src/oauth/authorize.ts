@@ -8,6 +8,7 @@ import { isRegisteredRedirectUri, resolveClient } from "../clients/cimd.js";
 import { isRegisteredResource, lookupResourceServer } from "../resource-registry.js";
 import { startUpstreamAuth } from "../identity/oidc.js";
 import { bindFlow } from "../identity/flow-binding.js";
+import { rowCreationRetryAfter } from "../rate-limit.js";
 
 const log = createLogger("authorize");
 
@@ -17,8 +18,8 @@ const AUTHORIZATION_REQUEST_TTL_MS = 10 * 60 * 1000;
 const MAX_STATE_LENGTH = 512;
 const CODE_CHALLENGE_PATTERN = /^[A-Za-z0-9_-]{43,128}$/;
 
-function renderErrorPage(res: Response, message: string): void {
-  res.status(400).send(`<!DOCTYPE html>
+function renderErrorPage(res: Response, message: string, status = 400): void {
+  res.status(status).send(`<!DOCTYPE html>
 <html lang="en">
 <head><meta charset="utf-8"><title>Authorization Error</title></head>
 <body>
@@ -158,6 +159,16 @@ authorizeRouter.get("/oauth/authorize", async (req: Request, res: Response) => {
   const unknownScope = requestedScopes.find((scope) => scope !== "offline_access" && !declaredScopeNames.has(scope));
   if (unknownScope) {
     fail("invalid_scope", `Scope not declared by ${resource}: ${unknownScope}`);
+    return;
+  }
+
+  // Everything above is validation; from here the request inserts a row, which
+  // an unauthenticated caller could otherwise do without limit.
+  const retryAfter = rowCreationRetryAfter(req);
+  if (retryAfter > 0) {
+    log.warn({ clientId, ip: req.ip }, "Authorization request rate limit exceeded");
+    res.set("Retry-After", String(retryAfter));
+    renderErrorPage(res, "Too many authorization requests from this address. Please wait a minute and try again.", 429);
     return;
   }
 

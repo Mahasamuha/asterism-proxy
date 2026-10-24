@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { IncomingHttpHeaders } from "node:http";
 import * as jose from "jose";
 import { safeFetchJson } from "../clients/safe-fetch.js";
@@ -101,17 +102,40 @@ const CLOCK_SKEW_S = 60;
  * published in the client's public jwks_uri. */
 const ALLOWED_ALGORITHMS = ["ES256", "ES384", "PS256", "RS256", "EdDSA"];
 
-const seenJti = new Map<string, number>(); // key: `${clientId}:${jti}` -> expiry (ms epoch)
+/** Longest jti accepted. A jti is attacker-chosen (any client published by
+ * anyone can send assertions), so its size must be bounded before it is kept. */
+const MAX_JTI_LENGTH = 256;
+/** Most entries the jti store holds. Entries live at most ~6 minutes, so this
+ * is a cap on distinct assertions per ~6 minutes. */
+export const MAX_SEEN_JTI = 50_000;
 
-setInterval(
-  () => {
-    const now = Date.now();
-    for (const [key, expiresAt] of seenJti) {
-      if (expiresAt <= now) seenJti.delete(key);
-    }
-  },
-  5 * 60 * 1000
-).unref();
+// key: SHA-256 hex of `${clientId}\0${jti}` -> expiry (ms epoch). Hashing keeps
+// every key 64 bytes however large the jti, and the NUL separator keeps
+// ("a:b", "c") and ("a", "b:c") from colliding (a client_id is a URL, so it
+// contains ":").
+const seenJti = new Map<string, number>();
+
+function jtiKey(clientId: string, jti: string): string {
+  return createHash("sha256").update(clientId).update("\0").update(jti).digest("hex");
+}
+
+function sweepSeenJti(now: number): void {
+  for (const [key, expiresAt] of seenJti) {
+    if (expiresAt <= now) seenJti.delete(key);
+  }
+}
+
+setInterval(() => sweepSeenJti(Date.now()), 5 * 60 * 1000).unref();
+
+/** The store's keys. For tests. */
+export function seenJtiKeysForTests(): string[] {
+  return [...seenJti.keys()];
+}
+
+/** Adds `count` filler entries expiring at `expiresAt`. For tests. */
+export function fillReplayCacheForTests(count: number, expiresAt: number): void {
+  for (let i = 0; i < count; i++) seenJti.set(jtiKey("filler", String(i)), expiresAt);
+}
 
 export class ClientAssertionError extends Error {}
 
@@ -161,6 +185,9 @@ export async function verifyClientAssertion(clientId: string, jwksUri: string, a
   if (typeof payload.jti !== "string" || payload.jti.length === 0) {
     throw new ClientAssertionError("client_assertion is missing jti");
   }
+  if (payload.jti.length > MAX_JTI_LENGTH) {
+    throw new ClientAssertionError(`client_assertion jti is too long (max ${MAX_JTI_LENGTH} characters)`);
+  }
   if (typeof payload.exp !== "number") {
     throw new ClientAssertionError("client_assertion is missing exp");
   }
@@ -176,9 +203,20 @@ export async function verifyClientAssertion(clientId: string, jwksUri: string, a
     throw new ClientAssertionError("client_assertion iat is in the future");
   }
 
-  const key = `${clientId}:${payload.jti}`;
+  const key = jtiKey(clientId, payload.jti);
   if (seenJti.has(key)) {
     throw new ClientAssertionError("client_assertion jti has already been used");
+  }
+  // Fail closed when full. Evicting a live entry to make room would reopen
+  // replay for that assertion, so the only entries ever dropped are expired
+  // ones; if none are, new assertions are refused until some expire (at most
+  // ~6 minutes). This trades availability for replay safety on purpose.
+  if (seenJti.size >= MAX_SEEN_JTI) {
+    sweepSeenJti(Date.now());
+    if (seenJti.size >= MAX_SEEN_JTI) {
+      log.warn({ clientId, entries: seenJti.size }, "jti replay cache is full; refusing new client assertions");
+      throw new ClientAssertionError("replay cache full");
+    }
   }
   // Keep the entry until jwtVerify would no longer accept this assertion
   // (exp plus the clock tolerance), or the sweep could drop it while a replay

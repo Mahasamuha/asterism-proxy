@@ -23,6 +23,7 @@ import { localAccountsRouter } from "./identity/local-accounts-router.js";
 import { warnIfSetupUnprotected } from "./identity/local-accounts.js";
 import { opsRouter } from "./ops.js";
 import { pruneExpiredRows } from "./cleanup.js";
+import { CONTENT_SECURITY_POLICY } from "./security-headers.js";
 
 const log = createLogger("server");
 
@@ -44,11 +45,8 @@ app.use((req: Request, res: Response, next: NextFunction) => {
   next();
 });
 
-// The EJS views use inline <style> blocks (no scripts, no event handlers), so
-// 'unsafe-inline' is allowed for styles only. img-src is https-only for a client
-// logo; forms post to this origin only.
-const CONTENT_SECURITY_POLICY =
-  "default-src 'none'; style-src 'self' 'unsafe-inline'; img-src https:; form-action 'self'; frame-ancestors 'none'; base-uri 'none'";
+// The policy (and the per-response widening of form-action for the consent
+// redirect) lives in security-headers.ts.
 const sendHsts = new URL(config.issuerUrl).protocol === "https:";
 
 app.use((_req: Request, res: Response, next: NextFunction) => {

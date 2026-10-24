@@ -4,6 +4,7 @@ const db = vi.hoisted(() => ({
   prisma: {
     authorizationRequest: { findUnique: vi.fn(), update: vi.fn() },
     localUser: { findUnique: vi.fn() },
+    user: { findUniqueOrThrow: vi.fn() },
   },
 }));
 const la = vi.hoisted(() => ({
@@ -38,6 +39,7 @@ beforeAll(async () => {
 afterAll(() => app.close());
 beforeEach(() => {
   vi.resetAllMocks();
+  db.prisma.user.findUniqueOrThrow.mockResolvedValue({ deviceEpoch: 0 });
   la.localAccountsExist.mockResolvedValue(false);
   la.beginLoginAttempt.mockResolvedValue({ id: 1, key: "k" });
   la.beginPasswordChangeAttempt.mockResolvedValue({ id: 2, key: "pwchange:u1" });

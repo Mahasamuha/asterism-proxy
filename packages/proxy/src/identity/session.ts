@@ -28,10 +28,11 @@ export function setSession(res: Response, userId: string, sessionEpoch: number):
   });
 }
 
-/** Signs `userId` in at its current session epoch (a fresh login). */
-export async function startSession(res: Response, userId: string): Promise<void> {
+/** Signs `userId` in at its current session epoch (a fresh login). Returns that epoch. */
+export async function startSession(res: Response, userId: string): Promise<number> {
   const user = await prisma.user.findUniqueOrThrow({ where: { id: userId }, select: { sessionEpoch: true } });
   setSession(res, userId, user.sessionEpoch);
+  return user.sessionEpoch;
 }
 
 /** Ends every session of `userId` by bumping its epoch. Returns the new epoch. */

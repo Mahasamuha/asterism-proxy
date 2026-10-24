@@ -9,6 +9,8 @@ import { startUpstreamAuth } from "../identity/oidc.js";
 import { bodyOf, stringField } from "../http-params.js";
 import { issueCsrfToken, verifyCsrfToken } from "../identity/csrf.js";
 import { bindFlow } from "../identity/flow-binding.js";
+import { rowCreationRetryAfter } from "../rate-limit.js";
+import { allowFormRedirectTo } from "../security-headers.js";
 
 const log = createLogger("device");
 
@@ -47,60 +49,62 @@ function formatUserCode(normalized: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// Rate limits on FAILED user_code entries (§T17) — anonymous, pre-auth guessing
-// against a random code (31^8 possibilities), so this is deliberately separate
-// from local-accounts.ts's per-account LoginFailure tracking. In-memory, same
-// tradeoff as every other in-memory limiter in this codebase (T8, T16): a
-// restart clears it, acceptable for a single-instance deployment (§2).
+// Rate limit on FAILED user_code entries (§T17) — anonymous, pre-auth guessing
+// against a random code (31^8, about 8.5e11 possibilities), so this is
+// deliberately separate from local-accounts.ts's per-account LoginFailure
+// tracking. In-memory, same tradeoff as every other in-memory limiter in this
+// codebase (T8, T16): a restart clears it, acceptable for a single-instance
+// deployment (§2).
 //
 // Only failures count: a user who enters a valid code is not penalised, so
 // without TRUST_PROXY (every client shares one req.ip) an attacker can't use up
-// the bucket for legitimate users by merely sending requests. Two limits apply:
-//  - per IP (10 failures per window), and
-//  - a global ceiling across all IPs (200 failures per window), so brute force
-//    stays bounded even when the attacker can choose req.ip (a spoofable
-//    X-Forwarded-For behind a mis-set TRUST_PROXY, or many source addresses).
-//    At 200 per 15 minutes, hitting a live 8-character code by guessing is
-//    negligible; the cost is that a sustained attack blocks entry for everyone.
+// the bucket for legitimate users by merely sending requests. The limit is per
+// IP (10 failures per window). There is deliberately no global ceiling across
+// all IPs: a live code is valid for 15 minutes and a guess has about a 1 in
+// 8.5e11 chance, so even an attacker who can pick req.ip (a spoofable
+// X-Forwarded-For behind a mis-set TRUST_PROXY) would need on the order of
+// 1e10 guesses per window to matter, far beyond what the endpoint can serve; a
+// global cap would only let that same attacker lock every legitimate user out.
 // The slot is reserved synchronously before the (async) lookup and handed back
 // on success, so concurrent guesses can't all slip under the limit.
 // ---------------------------------------------------------------------------
 
 const CODE_ENTRY_MAX_PER_IP = 10;
-const CODE_ENTRY_MAX_GLOBAL = 200;
 const CODE_ENTRY_WINDOW_MS = 15 * 60 * 1000;
+/** Addresses tracked at once; the oldest-inserted is dropped beyond this, so a
+ * client that can vary req.ip cannot grow the map without bound. */
+const CODE_ENTRY_MAX_TRACKED_IPS = 100_000;
 interface FailureWindow {
   count: number;
   windowStart: number;
 }
 const failedByIp = new Map<string, FailureWindow>();
-let failedGlobal: FailureWindow = { count: 0, windowStart: Date.now() };
 
-/** Clears both limiters. For tests; the limiters are in-memory only. */
+/** Clears the limiter. For tests; it is in-memory only. */
 export function resetDeviceEntryLimits(): void {
   failedByIp.clear();
-  failedGlobal = { count: 0, windowStart: Date.now() };
 }
 
 /** Reserves a failed-entry slot for `ip`. Returns a function that gives the
- * slot back (call it on success), or null if either limit is reached. */
+ * slot back (call it on success), or null if the limit is reached. */
 function reserveFailedEntry(ip: string): (() => void) | null {
   const now = Date.now();
-  if (now - failedGlobal.windowStart >= CODE_ENTRY_WINDOW_MS) failedGlobal = { count: 0, windowStart: now };
   let perIp = failedByIp.get(ip);
   if (!perIp || now - perIp.windowStart >= CODE_ENTRY_WINDOW_MS) {
     perIp = { count: 0, windowStart: now };
+    failedByIp.delete(ip); // re-inserting moves it to the newest position
     failedByIp.set(ip, perIp);
+    if (failedByIp.size > CODE_ENTRY_MAX_TRACKED_IPS) {
+      const oldest = failedByIp.keys().next();
+      if (!oldest.done) failedByIp.delete(oldest.value);
+    }
   }
-  if (perIp.count >= CODE_ENTRY_MAX_PER_IP || failedGlobal.count >= CODE_ENTRY_MAX_GLOBAL) return null;
+  if (perIp.count >= CODE_ENTRY_MAX_PER_IP) return null;
   perIp.count += 1;
-  failedGlobal.count += 1;
-  const globalAtReserve = failedGlobal;
   const ipEntry = perIp;
   return () => {
     // Only give back into the window the slot was taken from.
     if (ipEntry.count > 0) ipEntry.count -= 1;
-    if (globalAtReserve.count > 0) globalAtReserve.count -= 1;
   };
 }
 
@@ -151,6 +155,16 @@ deviceRouter.post("/oauth/device/code", async (req: Request, res: Response) => {
   const unknownScope = requestedScopes.find((scope) => scope !== "offline_access" && !declaredScopeNames.has(scope));
   if (unknownScope) {
     res.status(400).json({ error: "invalid_scope", error_description: `Scope not declared by ${resource}: ${unknownScope}` });
+    return;
+  }
+
+  // Validation done; from here the request inserts a row, which an
+  // unauthenticated caller could otherwise do without limit.
+  const retryAfter = rowCreationRetryAfter(req);
+  if (retryAfter > 0) {
+    log.warn({ clientId, ip: req.ip }, "Device code request rate limit exceeded");
+    res.set("Retry-After", String(retryAfter));
+    res.status(429).json({ error: "temporarily_unavailable", error_description: "Too many requests from this address; slow down and retry later" });
     return;
   }
 
@@ -246,6 +260,9 @@ async function startDeviceConsent(req: Request, res: Response, rawCode: string):
     return;
   }
   const upstreamUrl = await startUpstreamAuth(handle);
+  // This POST is answered with a redirect to the identity provider, another
+  // origin; the app-wide form-action 'self' would make Chromium/Safari refuse it.
+  allowFormRedirectTo(res, upstreamUrl);
   res.redirect(upstreamUrl);
 }
 

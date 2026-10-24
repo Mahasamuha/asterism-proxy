@@ -463,3 +463,50 @@ describe("device flow approve/deny (P0)", () => {
     expect(m("deviceCode", "updateMany")).not.toHaveBeenCalled();
   });
 });
+
+// Chromium (and Safari) enforce form-action on the redirect that follows a form
+// submission, so the POST that answers with a 302 to the client's redirect_uri
+// must name that target in its own Content-Security-Policy (second-pass finding 2).
+describe("form-action on the consent POST's redirect to the client", () => {
+  const csp = (r: { headers: Headers }) => r.headers.get("content-security-policy");
+
+  it.each([
+    ["https", "https://client.example.test/cb", "https://client.example.test"],
+    ["http loopback (any port)", "http://127.0.0.1:53124/cb", "http://127.0.0.1:53124"],
+    ["http localhost", "http://localhost:8080/cb", "http://localhost:8080"],
+    ["a private-use scheme", "myapp://auth/callback", "myapp:"],
+    ["a private-use scheme without authority", "com.example.app:/cb", "com.example.app:"],
+  ])("approve to %s allows exactly that origin or scheme", async (_n, redirectUri, source) => {
+    m("authorizationRequest", "findUnique").mockResolvedValue(flowRow({ redirectUri }));
+    const r = await submit();
+    expect(r.status).toBe(302);
+    expect(csp(r)).toContain(`form-action 'self' ${source};`);
+    // Everything else in the policy is unchanged.
+    expect(csp(r)!.replace(` ${source}`, "")).toMatch(/^default-src 'none'; style-src 'self' 'unsafe-inline'; img-src https:; form-action 'self'; frame-ancestors 'none'; base-uri 'none'$/);
+  });
+
+  it("deny redirects with the same per-response allowance", async () => {
+    m("authorizationRequest", "findUnique").mockResolvedValue(flowRow({ redirectUri: "http://127.0.0.1:5000/cb" }));
+    const r = await submit({ action: "deny" });
+    expect(r.status).toBe(302);
+    expect(r.headers.get("location")).toContain("error=access_denied");
+    expect(csp(r)).toContain("form-action 'self' http://127.0.0.1:5000;");
+  });
+
+  it("responses that do not redirect to the client carry no override (the app-wide policy applies)", async () => {
+    const wrongCsrf = await submit({}, { csrf: "0".repeat(64) });
+    expect(wrongCsrf.status).toBe(400);
+    expect(csp(wrongCsrf)).toBeNull();
+
+    m("authorizationRequest", "deleteMany").mockResolvedValue({ count: 0 });
+    const used = await submit();
+    expect(used.status).toBe(400);
+    expect(csp(used)).toBeNull();
+
+    m("authorizationRequest", "deleteMany").mockResolvedValue({ count: 1 });
+    m("authorizationRequest", "findUnique").mockResolvedValue(deviceFlow());
+    const device = await submit();
+    expect(device.status).toBe(200);
+    expect(csp(device)).toBeNull();
+  });
+});

@@ -20,6 +20,10 @@ model User {
   // Bumped on logout, password change and deactivation; the signed session
   // cookie carries it, so a bump revokes every session issued before it.
   sessionEpoch    Int       @default(0) @map("session_epoch")
+  // Binds device cookies (identity/device-cookie.ts). Bumped by a password change
+  // and by deactivation, NOT by logout, so signing out keeps the owner's browser exempt
+  // from the per-username lockout.
+  deviceEpoch     Int       @default(0) @map("device_epoch")
   lastKnownClaims Json?     @map("last_known_claims")
 
   localUser     LocalUser?
@@ -44,18 +48,35 @@ model LocalUser {
   @@map("local_users")
 }
 
+// Which throttle a LoginFailure row belongs to. Every query and every advisory
+// lock key includes it, so a username can never be crafted to land in another
+// namespace (it used to share one column with "pwchange:<userId>").
+enum LoginFailureKind {
+  // A local login attempt: `username` is the normalised username, `ip` the client.
+  login
+  // A login attempt that presented a valid device cookie: `username` is the
+  // cookie's nonce. Counts toward the per-IP limit, not the username lock.
+  device
+  // A current-password check on /auth/password: `username` is the User.id.
+  password_change
+  // A SETUP_TOKEN guess on /setup: IP-only, `username` is null.
+  setup
+
+  @@map("login_failure_kind")
+}
+
 model LoginFailure {
-  id       Int      @id @default(autoincrement())
-  ip       String
-  // Normalised throttle key for the per-account limit (login username, or
-  // "pwchange:<userId>" for the password-change check). Null for IP-only rows.
+  id   Int              @id @default(autoincrement())
+  kind LoginFailureKind
+  ip   String
+  // Throttle key within `kind` (see the enum). Null for IP-only rows.
   username String?
   // One row per attempt, recorded BEFORE the password is evaluated. A success
-  // deletes its own IP row and clears the username's rows.
+  // deletes its own IP row and clears the key's rows.
   failedAt DateTime @default(now()) @map("failed_at")
 
   @@index([ip, failedAt])
-  @@index([username, failedAt])
+  @@index([kind, username, failedAt])
   @@map("login_failures")
 }
 

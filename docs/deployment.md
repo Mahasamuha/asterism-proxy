@@ -3,10 +3,15 @@
 ## Reverse proxy and client addresses
 
 `TRUST_PROXY` tells Express which hops to believe in `X-Forwarded-For`. Set it to
-a hop count (for example `1` for a single ingress) or to the specific addresses
-or CIDRs of your proxies. Never set it to `true`: that trusts every hop, so any
-client can forge its address and sidestep per-IP login and device-code throttling.
-Leave it unset when the app is exposed directly.
+a hop count (for example `1` for a single ingress), or to a comma-separated list of
+the specific IPs or CIDRs of your proxies, optionally using the Express keywords
+`loopback`, `linklocal` and `uniquelocal`. The value is validated at startup, and
+the process refuses to start on anything else. `true`, `false` and `yes` are
+rejected with a message that points at the hop count: `true` would trust every hop,
+so any client could forge its address and sidestep every per-IP limit. Surrounding
+spaces are trimmed (`" 1"` is 1 hop, not the address `0.0.0.1`). Leave it unset when
+the app is exposed directly. Without it every client shares the proxy's address, so
+the per-IP limits below would apply to all users at once.
 
 ## Metrics
 
@@ -22,6 +27,26 @@ Run the proxy behind TLS and set `ISSUER_URL` to its public `https://` URL. When
 on every response; it sends none for an http issuer. Every response also carries a
 strict `Content-Security-Policy`, `Referrer-Policy: no-referrer`, `X-Frame-Options: DENY`
 and `X-Content-Type-Options: nosniff`.
+
+The policy says `form-action 'self'`. Chromium and Safari also apply `form-action`
+to the redirect that follows a form submission, so the responses that answer a form
+POST with a redirect to another origin widen it for that one response only:
+
+- `POST /oauth/consent` (approve, deny and the access-denied redirect) adds exactly
+  the origin of the client's `redirect_uri` for http(s) (for example
+  `http://127.0.0.1:53124`), or its scheme for a private-use scheme (for example
+  `myapp:`);
+- `POST /oauth/device` adds the origin of the identity provider's authorization URL
+  when OIDC is on.
+
+Every other response keeps `form-action 'self'`; the login, setup, password and
+grant-revocation POSTs redirect within the origin, which `'self'` covers.
+
+**Verified by tests only.** The tests assert the header per response (http loopback,
+https and custom-scheme redirect URIs, and that other responses are unchanged), but
+no browser was driven. Before relying on this, complete a full authorization flow
+(consent, then the redirect back to the client) in Chrome, ideally also Safari, with
+a loopback client and one using a custom scheme, and confirm the redirect is followed.
 
 ## Client metadata fetching
 
@@ -54,9 +79,42 @@ be listed under `environment:` in `docker-compose.yml` (it already is).
   concurrent guesses cannot get past the limits. Limits are 5 attempts per IP and 10
   per normalised username in 15 minutes (a success clears the username's count and
   doesn't count against the IP). The current-password check on `/auth/password` is
-  limited to 5 per user per 15 minutes. A determined attacker can therefore lock a
-  known username out for up to 15 minutes; behind a proxy, set `TRUST_PROXY` so the
-  per-IP limit sees real client addresses.
+  limited to 5 per user per 15 minutes. The kinds of attempt (`login`, `device`,
+  `password_change`, `setup`) are stored and locked separately (`login_failures.kind`),
+  so no username can land in another throttle's bucket; behind a proxy, set
+  `TRUST_PROXY` so the per-IP limit sees real client addresses.
+- **Device cookies.** Counting failures per username lets anyone who knows a username
+  keep its owner locked out. A successful local login therefore also sets a
+  `device_<tag>` cookie (signed with `COOKIE_SECRET`, HttpOnly, SameSite=Lax, 180
+  days; `Secure` over https). Its signed value binds the normalised username, the
+  user's `deviceEpoch` (a separate counter on `users`), a random nonce and the issue
+  time. A login that presents a valid cookie for the submitted username is exempt
+  from the per-username limit, so the owner's browser still gets in while an attacker
+  is locked out. It remains subject to the per-IP limit (5 per 15 minutes) and to a
+  per-cookie limit of 5 failed attempts per 15 minutes, so a stolen cookie cannot be
+  used to brute-force the password. Failures with a device cookie do not count toward
+  the username lock. A forged, edited, expired or other-user's cookie is ignored (the
+  normal username limit applies). `deviceEpoch` is bumped by a password change and by
+  `local-user deactivate`, which kill every device cookie of that user; the next
+  successful login issues a new one. Logout bumps only the session epoch, so signing
+  out ends sessions but keeps the device cookie. Nothing is stored server-side, so a
+  single cookie cannot be revoked on its own.
+- **Request limits on unauthenticated endpoints** (in memory per process, keyed by
+  `req.ip`, so set `TRUST_PROXY` behind an ingress; a restart clears them). `POST
+  /oauth/token` and `POST /oauth/revoke` share 60 requests a minute per address and
+  answer 429 `temporarily_unavailable` with `Retry-After`. `GET /oauth/authorize`,
+  `POST /oauth/device/code` and `GET /grants` without a session (the requests that
+  insert a row) share 30 a minute per address and answer 429 (an error page, or
+  JSON for the device endpoint). Requests that fail validation insert nothing and do
+  not count.
+- **Client assertion replay cache.** `private_key_jwt` assertions are remembered
+  in memory until they expire (about 6 minutes) to reject replays. A `jti` longer than
+  256 characters is refused and the cache holds at most 50,000 entries. When it is
+  full, new assertions are refused with `invalid_client` ("replay cache full") and a
+  warning is logged, rather than evicting live entries, which would reopen replay.
+  `POST /oauth/revoke` only authenticates the client for a refresh token that exists
+  and belongs to that `client_id`; any other request gets the same 200 without
+  verifying anything.
 - **Usernames** are normalised (Unicode NFKC, trimmed, lowercased) at creation and
   at login. The migration that introduced this renames existing rows to that form.
   If two existing accounts collapse to the same name, only the earliest-created one
@@ -67,10 +125,10 @@ be listed under `environment:` in `docker-compose.yml` (it already is).
   `local-user deactivate` bump it, which ends that user's sessions in every browser
   (the browser that changed the password stays signed in). Deploying this version
   signs everyone out once, because the cookie format changed.
-- **Device codes.** Failed user-code entries are limited to 10 per IP and 200 in
-  total per 15 minutes (in memory, reset on restart). Successful entries don't
-  count. When the global ceiling is reached, entry fails for everyone until the
-  window passes.
+- **Device codes.** Failed user-code entries are limited to 10 per IP per
+  15 minutes (in memory, reset on restart). Successful entries don't count. There
+  is no global ceiling across IPs: with 31^8 possible codes, guessing a live one is
+  negligible, and a global cap would only let an attacker lock everyone out.
 
 ## docker compose
 

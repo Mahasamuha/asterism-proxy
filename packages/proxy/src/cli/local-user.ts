@@ -92,8 +92,8 @@ async function deactivate(rawUsername: string): Promise<void> {
     const row = await tx.localUser.findUnique({ where: { username }, select: { userId: true } });
     if (!row) return null;
     await tx.localUser.update({ where: { username }, data: { isActive: false } });
-    // Bump the session epoch so cookies issued before this stay dead even if the account is reactivated.
-    await tx.user.update({ where: { id: row.userId }, data: { sessionEpoch: { increment: 1 } } });
+    // Bump both epochs so session and device cookies issued before this stay dead even if the account is reactivated.
+    await tx.user.update({ where: { id: row.userId }, data: { sessionEpoch: { increment: 1 }, deviceEpoch: { increment: 1 } } });
     const g = await tx.grant.updateMany({ where: { userId: row.userId, revokedAt: null }, data: { revokedAt: now } });
     const t = await tx.refreshToken.updateMany({ where: { userId: row.userId, revokedAt: null }, data: { revokedAt: now } });
     return { grants: g.count, tokens: t.count };

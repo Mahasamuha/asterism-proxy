@@ -9,6 +9,7 @@ const root = fileURLToPath(new URL(".", import.meta.url));
 // depending on .env (which has no COOKIE_SECRET). Integration hits the
 // `mcp_auth_test` database; unit tests mock ./db.js and never connect.
 const env = testEnv();
+const setupFiles = ["./packages/proxy/src/test-helpers/reset-rate-limits.ts"];
 
 export default defineConfig({
   resolve: {
@@ -27,6 +28,7 @@ export default defineConfig({
           include: ["packages/*/src/**/*.test.ts"],
           exclude: ["**/node_modules/**", "**/dist/**", "packages/*/src/**/*.int.test.ts"],
           env,
+          setupFiles,
         },
       },
       {
@@ -36,6 +38,7 @@ export default defineConfig({
           include: ["packages/*/src/**/*.int.test.ts"],
           exclude: ["**/node_modules/**", "**/dist/**"],
           env,
+          setupFiles,
           // One shared database: files must not run concurrently.
           fileParallelism: false,
           globalSetup: ["./packages/proxy/src/test-helpers/global-setup.ts"],

@@ -78,7 +78,7 @@ Settings are environment variables, validated at startup. The proxy refuses to s
 | `COOKIE_SECRET` | Required, at least 32 characters. Signs the session and CSRF cookies. |
 | `ENABLE_OIDC`, `OIDC_ISSUER`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET` | Upstream IdP. The default is on, and discovery must succeed at boot. |
 | `ENABLE_LOCAL_ACCOUNTS` | The default is off. At least one identity provider must be enabled. |
-| `TRUST_PROXY` | The number of proxy hops in front of the app (for example `1` behind one ingress). |
+| `TRUST_PROXY` | The number of proxy hops in front of the app (for example `1` behind one ingress), or a comma-separated list of IPs, CIDRs, `loopback`, `linklocal` and `uniquelocal`. `true` is rejected. |
 | `METRICS_TOKEN` | Optional. When set, `/metrics` requires it as a bearer token; when unset, `/metrics` returns 404. |
 | `ALLOW_INSECURE_CLIENT_METADATA` | Development only. Allows `http:` CIMD documents on loopback. |
 | `ENABLE_DCR` | Must stay `false`. Dynamic Client Registration is deferred in favour of CIMD. |

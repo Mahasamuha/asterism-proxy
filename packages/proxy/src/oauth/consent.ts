@@ -12,6 +12,7 @@ import { isFlowBound } from "../identity/flow-binding.js";
 import { getSessionUserId } from "../identity/session.js";
 import { incrementCounter } from "../metrics.js";
 import { bodyOf, stringField } from "../http-params.js";
+import { allowFormRedirectTo } from "../security-headers.js";
 import type { AuthorizationRequest, Prisma } from "../generated/prisma/client.js";
 
 const log = createLogger("consent");
@@ -71,6 +72,8 @@ function redirectWithError(res: Response, authRequest: AuthorizationRequest, err
   // RFC 9207: identify the issuer in every authorization response.
   url.searchParams.set("iss", config.issuerUrl);
   if (authRequest.state) url.searchParams.set("state", authRequest.state);
+  // The consent form's POST is answered with this redirect to the client.
+  allowFormRedirectTo(res, url.toString());
   res.redirect(url.toString());
 }
 
@@ -214,6 +217,8 @@ async function issueAuthCodeAndRedirect(
   url.searchParams.set("code", code);
   url.searchParams.set("iss", config.issuerUrl);
   if (authRequest.state) url.searchParams.set("state", authRequest.state);
+  // The consent form's POST is answered with this redirect to the client.
+  allowFormRedirectTo(res, url.toString());
   res.redirect(url.toString());
 }
 

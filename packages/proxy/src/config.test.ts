@@ -136,6 +136,25 @@ describe("other settings", () => {
     expect((await loadConfigWith({ TRUST_PROXY: undefined })).trustProxy).toBeUndefined();
   });
 
+  it.each(["0", "1", " 1", "1 ", "loopback", "linklocal", "uniquelocal", " loopback , uniquelocal ", "127.0.0.1", "::1", "10.0.0.0/8", "fd00::/8", "10.0.0.1, 192.168.0.0/16, loopback"])(
+    "TRUST_PROXY accepts %j",
+    async (value) => {
+      const c = await loadConfigWith({ TRUST_PROXY: value });
+      expect(c.trustProxy).toBe(/^\s*\d+\s*$/.test(value) ? Number(value) : value.trim());
+    }
+  );
+
+  it.each(["true", "false", "yes", "No", "on", "TRUE"])("TRUST_PROXY rejects %j with advice to use a hop count", async (value) => {
+    await expect(loadConfigWith({ TRUST_PROXY: value })).rejects.toThrow(/TRUST_PROXY.*hop count/s);
+  });
+
+  it.each(["-1", "1.5", "1e3", "0x10", "99999999999999999999", " ", "loopback,", ",loopback", "10.0.0.0/33", "::1/129", "10.0.0.0/-1", "300.1.1.1", "10.0.0.0/8/8", "nonsense", "loopback;1"])(
+    "TRUST_PROXY rejects %j",
+    async (value) => {
+      await expect(loadConfigWith({ TRUST_PROXY: value })).rejects.toThrow(/TRUST_PROXY/);
+    }
+  );
+
   it("rejects an empty TRUST_PROXY", async () => {
     await expect(loadConfigWith({ TRUST_PROXY: "" })).rejects.toThrow(/TRUST_PROXY/);
   });

@@ -113,8 +113,8 @@ describe("/auth/login", () => {
 
   it("P0 failures older than the 15 minute window no longer count", async () => {
     await seedLocalUser({ username: "alice" });
-    await prisma.loginFailure.createMany({ data: Array.from({ length: 5 }, () => ({ ip: "::ffff:127.0.0.1", failedAt: new Date(Date.now() - 16 * 60_000) })) });
-    await prisma.loginFailure.createMany({ data: Array.from({ length: 5 }, () => ({ ip: "127.0.0.1", failedAt: new Date(Date.now() - 16 * 60_000) })) });
+    await prisma.loginFailure.createMany({ data: Array.from({ length: 5 }, () => ({ kind: "login" as const, ip: "::ffff:127.0.0.1", failedAt: new Date(Date.now() - 16 * 60_000) })) });
+    await prisma.loginFailure.createMany({ data: Array.from({ length: 5 }, () => ({ kind: "login" as const, ip: "127.0.0.1", failedAt: new Date(Date.now() - 16 * 60_000) })) });
     const res = await login(cookieClient(), { username: "alice", password: "wrong password" });
     expect(res.status).toBe(200);
   });

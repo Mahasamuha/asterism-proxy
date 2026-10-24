@@ -102,6 +102,7 @@ describe("username normalisation", () => {
     expect(dup.stderr).toContain("already taken");
     expect((await runCli("local-user", ["deactivate", "ALICE"])).code).toBe(0);
     expect((await prisma.localUser.findFirstOrThrow()).isActive).toBe(false);
+    expect(await prisma.user.findFirstOrThrow()).toMatchObject({ sessionEpoch: 1, deviceEpoch: 1 });
   });
 
   it("M8 an empty-after-normalisation username is refused by the CLI", async () => {

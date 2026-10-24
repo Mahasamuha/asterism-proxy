@@ -66,6 +66,15 @@ function arrange(entry = codeEntry()) {
 }
 
 describe("POST /oauth/token routing (P1)", () => {
+  it("answers 429 temporarily_unavailable with Retry-After after 60 requests a minute from one address", async () => {
+    for (let i = 0; i < 60; i++) expect((await token({ grant_type: "password" })).status).toBe(400);
+    const r = await token({ grant_type: "password" });
+    expect(r.status).toBe(429);
+    expect(r.json["error"]).toBe("temporarily_unavailable");
+    expect(r.headers.get("retry-after")).toMatch(/^\d+$/);
+    expect(r.headers.get("cache-control")).toBe("no-store");
+  });
+
   it.each([
     ["an unknown grant_type", { grant_type: "password" }],
     ["no grant_type", {}],

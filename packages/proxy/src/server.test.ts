@@ -202,6 +202,13 @@ describe("request id and security headers", () => {
     }
   });
 
+  it("P1 a consent POST that does not redirect to the client keeps form-action 'self' (only the redirecting responses widen it)", async () => {
+    const base = await boot();
+    const res = await fetch(`${base}/oauth/consent`, { method: "POST" });
+    expect(res.status).toBe(400);
+    expect(res.headers.get("content-security-policy")).toBe(CSP);
+  });
+
   it("P1 sends HSTS only when ISSUER_URL is https, including on body-parser errors", async () => {
     const base = await boot({ ISSUER_URL: "https://auth.example.test" });
     const ok = await fetch(`${base}/health`);

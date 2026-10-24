@@ -8,6 +8,7 @@ import { resolveClient } from "../clients/cimd.js";
 import { authenticateConfidentialClient } from "./client-assertion.js";
 import { incrementCounter } from "../metrics.js";
 import { bodyOf, stringField } from "../http-params.js";
+import { limitOauthEndpoint } from "../rate-limit.js";
 
 const log = createLogger("token");
 
@@ -33,7 +34,7 @@ function rejectInactiveUser(res: Response): void {
   res.status(400).json({ error: "invalid_grant", error_description: "User account is deactivated" });
 }
 
-tokenRouter.post("/oauth/token", async (req: Request, res: Response) => {
+tokenRouter.post("/oauth/token", limitOauthEndpoint, async (req: Request, res: Response) => {
   const body = bodyOf(req);
   const grantType = stringField(body, "grant_type");
 

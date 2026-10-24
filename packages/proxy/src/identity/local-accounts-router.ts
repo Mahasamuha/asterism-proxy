@@ -7,6 +7,7 @@ import { bodyOf, stringField } from "../http-params.js";
 import { createLogger } from "../logger.js";
 import {
   beginLoginAttempt,
+  beginDeviceLoginAttempt,
   beginPasswordChangeAttempt,
   beginIpAttempt,
   endAttempt,
@@ -22,6 +23,7 @@ import { issueCsrfToken, verifyCsrfToken } from "./csrf.js";
 import { isSelfLogin, selfLoginReturnPath } from "./self-login.js";
 import { passwordProblem } from "./password-policy.js";
 import { isFlowBound } from "./flow-binding.js";
+import { issueDeviceCookie, validDeviceCookieNonce } from "./device-cookie.js";
 
 const log = createLogger("local-accounts-router");
 
@@ -156,7 +158,13 @@ localAccountsRouter.post("/auth/login", async (req: Request, res: Response) => {
   // concurrent or address-rotating guesses can't run past the limits. It sits
   // after the CSRF and flow checks so a request that is refused for those
   // doesn't spend an attempt.
-  const slot = await beginLoginAttempt(ip, username);
+  //
+  // A browser that already logged in as this user holds a device cookie
+  // (device-cookie.ts) and is exempt from the per-username lock, so someone
+  // who only knows the username cannot keep the owner out. It still counts
+  // against the per-IP limit and a small per-cookie limit.
+  const deviceNonce = await validDeviceCookieNonce(req, username);
+  const slot = deviceNonce !== null ? await beginDeviceLoginAttempt(ip, deviceNonce) : await beginLoginAttempt(ip, username);
   if (!slot) {
     rerender("Too many failed attempts. Please wait 15 minutes.", 429);
     return;
@@ -174,6 +182,8 @@ localAccountsRouter.post("/auth/login", async (req: Request, res: Response) => {
 
   res.clearCookie("csrf_login");
   await startSession(res, userId);
+  const { deviceEpoch } = await prisma.user.findUniqueOrThrow({ where: { id: userId }, select: { deviceEpoch: true } });
+  issueDeviceCookie(res, username, deviceEpoch);
   log.info({ userId }, "Local login succeeded");
 
   if (flow) {

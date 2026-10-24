@@ -12,6 +12,7 @@ import { issueCsrfToken, verifyCsrfToken } from "../identity/csrf.js";
 import { createSelfLoginRequest } from "../identity/self-login.js";
 import { startUpstreamAuth } from "../identity/oidc.js";
 import { bodyOf, stringField } from "../http-params.js";
+import { limitOauthEndpoint, rowCreationRetryAfter } from "../rate-limit.js";
 
 const log = createLogger("grants");
 
@@ -32,6 +33,14 @@ async function requireSession(req: Request, res: Response, returnTo: string): Pr
   const userId = await getSessionUserId(req);
   if (userId) return userId;
 
+  // Each unauthenticated visit inserts a self-login row, so it is rate limited.
+  const retryAfter = rowCreationRetryAfter(req);
+  if (retryAfter > 0) {
+    log.warn({ ip: req.ip }, "Self-login request rate limit exceeded");
+    res.set("Retry-After", String(retryAfter));
+    renderErrorPage(res, 429, "Too many sign-in requests from this address. Please wait a minute and try again.");
+    return null;
+  }
   const handle = await createSelfLoginRequest(returnTo, req, res);
   if (config.enableLocalAccounts && !config.enableOidc) {
     res.redirect(`/auth/login?flow=${encodeURIComponent(handle)}`);
@@ -200,7 +209,7 @@ grantsRouter.post("/grants/:id/revoke", async (req: Request, res: Response) => {
 // POST /oauth/revoke (RFC 7009) — programmatic revocation.
 // ---------------------------------------------------------------------------
 
-grantsRouter.post("/oauth/revoke", async (req: Request, res: Response) => {
+grantsRouter.post("/oauth/revoke", limitOauthEndpoint, async (req: Request, res: Response) => {
   const body = bodyOf(req);
   const token = stringField(body, "token");
   const client_id = stringField(body, "client_id");
@@ -208,15 +217,6 @@ grantsRouter.post("/oauth/revoke", async (req: Request, res: Response) => {
   if (!token || !client_id) {
     res.status(400).json({ error: "invalid_request", error_description: "token and client_id are required" });
     return;
-  }
-
-  const client = await resolveClient(client_id);
-  if (client) {
-    const auth = await authenticateConfidentialClient(client, body);
-    if (!auth.ok) {
-      res.status(400).json({ error: auth.error, error_description: auth.errorDescription });
-      return;
-    }
   }
 
   // RFC 7009 §2.2: always respond 200, even for an unknown, already-revoked,
@@ -233,9 +233,28 @@ grantsRouter.post("/oauth/revoke", async (req: Request, res: Response) => {
   // match means a token can't be used to revoke another client's chain by
   // presenting it under a different client_id. The Grant itself stays live, so
   // the user's consent is kept (they revoke that via /grants).
+  //
+  // The token is looked up BEFORE the client is authenticated, and only a token
+  // that exists and belongs to `client_id` triggers authentication. Verifying a
+  // client_assertion fetches a JWKS and records a jti, and this endpoint is
+  // unauthenticated, so authenticating first let anyone drive that work (and
+  // the jti store's memory) with arbitrary tokens. Now the only caller who gets
+  // past this point already holds a valid refresh token. That caller can
+  // distinguish an authentication failure (400) from success, which reveals
+  // nothing they don't have: they presented the token. Everyone else gets the
+  // same 200 and, for a nonexistent token, skips the verification cost; the
+  // hash and one indexed lookup are all they can make the server do.
   const tokenHash = createHash("sha256").update(token).digest("hex");
   const entry = await prisma.refreshToken.findUnique({ where: { tokenHash } });
   if (entry && entry.clientId === client_id) {
+    const client = await resolveClient(client_id);
+    if (client) {
+      const auth = await authenticateConfidentialClient(client, body);
+      if (!auth.ok) {
+        res.status(400).json({ error: auth.error, error_description: auth.errorDescription });
+        return;
+      }
+    }
     const result = await prisma.refreshToken.updateMany({
       where: { grantId: entry.grantId, revokedAt: null },
       data: { revokedAt: new Date() },
