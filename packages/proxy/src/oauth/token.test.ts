@@ -33,6 +33,7 @@ beforeEach(() => {
   db.reset();
   resolve.mockReset().mockResolvedValue(clientRow() as never);
   authenticate.mockReset().mockResolvedValue({ ok: true });
+  m("user", "findFirst").mockResolvedValue({ id: "u1" });
   mint.mockReset().mockResolvedValue({ accessToken: "access.jwt", expiresIn: 900 });
 });
 
@@ -363,7 +364,9 @@ describe("refresh_token grant", () => {
     const created = m("refreshToken", "create").mock.calls[0]![0].data;
     expect(created.tokenHash).toBe(sha(next));
     expect(created.grantId).toBe("g1");
-    expect(created.expiresAt.getTime() - Date.now()).toBeGreaterThan(29 * DAY);
+    // Absolute lifetime: the successor inherits the predecessor's expiry.
+    const predecessor = await m("refreshToken", "findUnique").mock.results[0]!.value;
+    expect(created.expiresAt).toEqual(predecessor.expiresAt);
     expect(mint.mock.calls[0]![0].scopes).toEqual(["read"]);
   });
 

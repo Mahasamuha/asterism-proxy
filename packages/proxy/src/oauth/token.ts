@@ -1,9 +1,9 @@
 import { createHash, randomBytes } from "node:crypto";
-import { Router, Request, Response } from "express";
+import { Router, Request, Response, NextFunction } from "express";
 import { prisma } from "../db.js";
 import { createLogger } from "../logger.js";
 import { mintAccessToken } from "../crypto/access-token.js";
-import { issueRefreshToken, accessTokenScopes, REFRESH_TOKEN_TTL_MS } from "../crypto/refresh-token.js";
+import { issueRefreshToken, accessTokenScopes, refreshableScopes } from "../crypto/refresh-token.js";
 import { resolveClient } from "../clients/cimd.js";
 import { authenticateConfidentialClient } from "./client-assertion.js";
 import { incrementCounter } from "../metrics.js";
@@ -12,6 +12,26 @@ import { bodyOf, stringField } from "../http-params.js";
 const log = createLogger("token");
 
 export const tokenRouter: Router = Router();
+
+// RFC 6749 §5.1: every token-endpoint response, success or error, must not be cached.
+tokenRouter.use("/oauth/token", (_req: Request, res: Response, next: NextFunction) => {
+  res.set({ "Cache-Control": "no-store", Pragma: "no-cache" });
+  next();
+});
+
+/** A deactivated user (User.deactivatedAt, or a LocalUser with isActive=false)
+ * must not receive tokens from any grant. Same predicate as session validation. */
+async function isUserActive(userId: string): Promise<boolean> {
+  const user = await prisma.user.findFirst({
+    where: { id: userId, deactivatedAt: null, OR: [{ localUser: null }, { localUser: { isActive: true } }] },
+    select: { id: true },
+  });
+  return user !== null;
+}
+
+function rejectInactiveUser(res: Response): void {
+  res.status(400).json({ error: "invalid_grant", error_description: "User account is deactivated" });
+}
 
 tokenRouter.post("/oauth/token", async (req: Request, res: Response) => {
   const body = bodyOf(req);
@@ -130,6 +150,11 @@ async function handleAuthorizationCodeGrant(body: Record<string, unknown>, res: 
   const codeGrant = await prisma.grant.findUnique({ where: { id: entry.grantId } });
   if (!codeGrant || codeGrant.revokedAt !== null) {
     res.status(400).json({ error: "invalid_grant", error_description: "Grant has been revoked" });
+    return;
+  }
+
+  if (!(await isUserActive(entry.userId))) {
+    rejectInactiveUser(res);
     return;
   }
 
@@ -268,13 +293,22 @@ async function handleRefreshTokenGrant(body: Record<string, unknown>, res: Respo
     return;
   }
 
+  if (!(await isUserActive(entry.userId))) {
+    rejectInactiveUser(res);
+    return;
+  }
+
+  // shortLived scopes (e.g. admin) are never refreshable; strip them even from
+  // rows created before they were stripped at issuance.
+  const scopes = refreshableScopes(entry.resource, entry.scopes);
+
   // Mint first so a signing failure happens before anything is claimed; the
   // JWT is discarded if the claim below is lost.
   const { accessToken, expiresIn } = await mintAccessToken({
     userId: entry.userId,
     clientId: entry.clientId,
     resource: entry.resource,
-    scopes: accessTokenScopes(entry.scopes),
+    scopes: accessTokenScopes(scopes),
   });
 
   // Atomically claim this token for rotation and create its successor in one
@@ -299,9 +333,11 @@ async function handleRefreshTokenGrant(body: Record<string, unknown>, res: Respo
         userId: entry.userId,
         clientId: entry.clientId,
         resource: entry.resource,
-        scopes: entry.scopes,
+        scopes,
         grantId: entry.grantId,
-        expiresAt: new Date(Date.now() + REFRESH_TOKEN_TTL_MS),
+        // Absolute lifetime: the chain ends where the original authorization's
+        // 30 days end, however often it is rotated.
+        expiresAt: entry.expiresAt,
       },
     });
     return true;
@@ -320,7 +356,7 @@ async function handleRefreshTokenGrant(body: Record<string, unknown>, res: Respo
     token_type: "Bearer",
     expires_in: expiresIn,
     refresh_token: newToken,
-    scope: entry.scopes.join(" "),
+    scope: scopes.join(" "),
   });
 }
 
@@ -412,6 +448,11 @@ async function handleDeviceCodeGrant(body: Record<string, unknown>, res: Respons
   const auth = await authenticateConfidentialClient(client, body);
   if (!auth.ok) {
     res.status(400).json({ error: auth.error, error_description: auth.errorDescription });
+    return;
+  }
+
+  if (!(await isUserActive(userId))) {
+    rejectInactiveUser(res);
     return;
   }
 

@@ -25,19 +25,33 @@ interface CachedJwks {
 
 const jwksCache = new Map<string, CachedJwks>();
 
-function parseMaxAgeSeconds(cacheControl: string | string[] | undefined): number | undefined {
-  const value = Array.isArray(cacheControl) ? cacheControl[0] : cacheControl;
-  if (!value) return undefined;
-  const match = /(?:^|,)\s*max-age=(\d+)/i.exec(value);
-  return match ? Number(match[1]) : undefined;
+/** Most jwks_uri entries kept; the oldest-inserted is evicted beyond this. A
+ * client_id is attacker-chosen, so an unbounded map is a memory-growth vector. */
+const MAX_JWKS_CACHE_ENTRIES = 500;
+/** An unknown `kid` triggers at most one refetch per jwks_uri per this window. */
+const KID_REFETCH_MIN_INTERVAL_MS = 30 * 1000;
+const lastKidRefetch = new Map<string, number>();
+
+function setBounded<V>(map: Map<string, V>, key: string, value: V): void {
+  map.delete(key); // re-inserting moves it to the newest position
+  map.set(key, value);
+  while (map.size > MAX_JWKS_CACHE_ENTRIES) {
+    const oldest = map.keys().next();
+    if (oldest.done) break;
+    map.delete(oldest.value);
+  }
 }
 
-async function getClientJwks(jwksUri: string): Promise<jose.JWK[]> {
-  const cached = jwksCache.get(jwksUri);
-  if (cached && cached.expiresAt > Date.now()) {
-    return cached.keys;
-  }
+/** Returns the TTL in ms: 0 for no-store / no-cache / max-age=0 (do not cache). */
+function jwksTtlMs(cacheControl: string | string[] | undefined): number {
+  const value = Array.isArray(cacheControl) ? cacheControl[0] : cacheControl;
+  if (!value) return DEFAULT_JWKS_TTL_MS;
+  if (/(?:^|,)\s*(?:no-store|no-cache)\b/i.test(value)) return 0;
+  const match = /(?:^|,)\s*max-age=(\d+)/i.exec(value);
+  return match ? Math.min(Number(match[1]) * 1000, DEFAULT_JWKS_TTL_MS) : DEFAULT_JWKS_TTL_MS;
+}
 
+async function fetchClientJwks(jwksUri: string): Promise<jose.JWK[]> {
   let headers: IncomingHttpHeaders = {};
   const raw = await safeFetchJson(jwksUri, {
     onHeaders: (h) => {
@@ -50,11 +64,21 @@ async function getClientJwks(jwksUri: string): Promise<jose.JWK[]> {
     throw new Error(`jwks_uri did not return a valid JWK Set: ${jwksUri}`);
   }
 
-  const maxAgeSeconds = parseMaxAgeSeconds(headers["cache-control"]);
-  const ttlMs = maxAgeSeconds !== undefined ? Math.min(maxAgeSeconds * 1000, DEFAULT_JWKS_TTL_MS) : DEFAULT_JWKS_TTL_MS;
-  jwksCache.set(jwksUri, { keys, expiresAt: Date.now() + ttlMs });
-
+  const ttlMs = jwksTtlMs(headers["cache-control"]);
+  if (ttlMs > 0) {
+    setBounded(jwksCache, jwksUri, { keys, expiresAt: Date.now() + ttlMs });
+  } else {
+    jwksCache.delete(jwksUri);
+  }
   return keys;
+}
+
+async function getClientJwks(jwksUri: string): Promise<{ keys: jose.JWK[]; fresh: boolean }> {
+  const cached = jwksCache.get(jwksUri);
+  if (cached && cached.expiresAt > Date.now()) {
+    return { keys: cached.keys, fresh: false };
+  }
+  return { keys: await fetchClientJwks(jwksUri), fresh: true };
 }
 
 // ---------------------------------------------------------------------------
@@ -100,7 +124,24 @@ export async function verifyClientAssertion(clientId: string, jwksUri: string, a
   // an oct key in it would let anyone who can fetch it forge HS* assertions as
   // that client. The algorithms allow-list below already excludes HS*; this is
   // the second layer, so a symmetric key can never be selected at all.
-  const keys = (await getClientJwks(jwksUri)).filter((k) => k.kty !== "oct");
+  const initial = await getClientJwks(jwksUri);
+  let allKeys = initial.keys;
+  // An unknown kid on a cached set usually means the client rotated its keys:
+  // refetch once, at most one forced refetch per jwks_uri per 30 s.
+  let kid: string | undefined;
+  try {
+    kid = jose.decodeProtectedHeader(assertion).kid;
+  } catch {
+    // malformed assertion; jwtVerify below reports it
+  }
+  if (!initial.fresh && kid !== undefined && !allKeys.some((k) => k.kid === kid)) {
+    const last = lastKidRefetch.get(jwksUri);
+    if (last === undefined || Date.now() - last >= KID_REFETCH_MIN_INTERVAL_MS) {
+      setBounded(lastKidRefetch, jwksUri, Date.now());
+      allKeys = await fetchClientJwks(jwksUri);
+    }
+  }
+  const keys = allKeys.filter((k) => k.kty !== "oct");
   const jwkSet = jose.createLocalJWKSet({ keys });
   const tokenEndpoint = `${config.issuerUrl}/oauth/token`;
 
@@ -139,7 +180,10 @@ export async function verifyClientAssertion(clientId: string, jwksUri: string, a
   if (seenJti.has(key)) {
     throw new ClientAssertionError("client_assertion jti has already been used");
   }
-  seenJti.set(key, payload.exp * 1000);
+  // Keep the entry until jwtVerify would no longer accept this assertion
+  // (exp plus the clock tolerance), or the sweep could drop it while a replay
+  // still verifies.
+  seenJti.set(key, payload.exp * 1000 + CLOCK_SKEW_S * 1000);
 }
 
 export interface ClientAuthResult {

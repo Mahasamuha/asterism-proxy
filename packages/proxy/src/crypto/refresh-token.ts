@@ -1,6 +1,7 @@
 import { randomBytes, createHash } from "node:crypto";
 import { prisma } from "../db.js";
 import type { Prisma } from "../generated/prisma/client.js";
+import { lookupResourceServer } from "../resource-registry.js";
 
 // Not specified explicitly in §1 (unlike the access token's 15/5-minute
 // lifetimes) — 30 days, matching Constellation's own prior default
@@ -12,6 +13,17 @@ export const REFRESH_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 // token's `scope` claim.
 export function accessTokenScopes(scopes: string[]): string[] {
   return scopes.filter((s) => s !== "offline_access");
+}
+
+/** Drops scopes the resource registry marks shortLived. Those exist to bound
+ * the damage of a stolen token to minutes, so they are never carried into a
+ * refresh token; the user must re-consent to get them again. Applied both when
+ * a refresh token is stored and when one is redeemed (rows from before the fix). */
+export function refreshableScopes(resource: string, scopes: string[]): string[] {
+  const server = lookupResourceServer(resource);
+  if (!server) return scopes;
+  const shortLived = new Set(server.scopes.filter((s) => s.shortLived).map((s) => s.name));
+  return scopes.filter((s) => !shortLived.has(s));
 }
 
 export interface IssueRefreshTokenParams {
@@ -38,7 +50,7 @@ export async function issueRefreshToken(
       userId: params.userId,
       clientId: params.clientId,
       resource: params.resource,
-      scopes: params.scopes,
+      scopes: refreshableScopes(params.resource, params.scopes),
       grantId: params.grantId,
       expiresAt: new Date(Date.now() + REFRESH_TOKEN_TTL_MS),
     },

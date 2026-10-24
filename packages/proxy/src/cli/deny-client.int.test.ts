@@ -109,6 +109,39 @@ describe("deny-client add", () => {
   });
 });
 
+describe("deny-client add: values that would never match (finding 6)", () => {
+  it("a bare https origin is stored as a domain entry for that host, and says so", async () => {
+    for (const origin of ["https://evil.example.com", "https://evil.example.com/"]) {
+      const res = await runCli("deny-client", ["add", origin]);
+      expect(res.code, origin).toBe(0);
+      expect(res.stdout, origin).toContain("Denied domain evil.example.com");
+      expect(res.stdout, origin).toMatch(/bare origin.*domain/i);
+    }
+    expect(await prisma.deniedClient.findMany({ select: { kind: true, value: true } })).toEqual([{ kind: "domain", value: "evil.example.com" }]);
+  });
+
+  it("a non-canonical https URL is refused with the canonical form, and nothing is stored", async () => {
+    const res = await runCli("deny-client", ["add", "https://EVIL.example.com:443/a/./client.json"]);
+    expect(res.code).toBe(1);
+    expect(res.stderr).toContain("https://evil.example.com/a/client.json");
+    for (const bad of ["https://evil.example.com/client.json#frag", "https://user@evil.example.com/client.json", "https://evil.example.com/a/../c.json"]) {
+      const r = await runCli("deny-client", ["add", bad]);
+      expect(r.code, bad).toBe(1);
+      expect(r.stderr, bad).toContain("not a canonical client_id");
+    }
+    expect(await prisma.deniedClient.count()).toBe(0);
+  });
+
+  it("an IDN domain is stored as punycode so it matches the hostname URL parsing yields", async () => {
+    const user = await seedUser();
+    const hit = await enrolled(new URL("https://bücher.example/c.json").href, user.id);
+    const res = await runCli("deny-client", ["add", "BÜCHER.example"]);
+    expect(res.code).toBe(0);
+    expect(res.stdout).toContain("Denied domain xn--bcher-kva.example");
+    expect(await revoked(hit.grant.id, hit.token.tokenHash)).toEqual({ grant: true, token: true });
+  });
+});
+
 describe("deny-client remove / list / usage", () => {
   it("P1 remove deletes the entry but does not restore revoked grants", async () => {
     const user = await seedUser();
