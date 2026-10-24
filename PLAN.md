@@ -31,6 +31,11 @@ MCP Client ──OAuth 2.1──▶ Proxy (AS) ──┬─OIDC──▶ Authent
 
 ### What already exists in Constellation
 
+> **Superseded 2026-10-24.** Constellation has since added CIMD, RFC 9728 discovery, public-only DCR
+> and an OIDC consent interstitial (its ADRs 0020/0021). The table below is the pre-extraction
+> baseline. `asterism/constellation-cimd-comparison.md` covers how asterism was aligned with
+> Constellation's newer decisions.
+
 | Component | Location | Disposition |
 |---|---|---|
 | `/.well-known/oauth-authorization-server`, `/.well-known/oauth-protected-resource` | `oauth.ts` | Lift, extend |
@@ -64,7 +69,11 @@ Decisions, not open questions. Do not deviate without asking.
 5. **Consent is per `(subject, client, resource)`.** Approving Constellation does not approve
    anything else.
 6. **Redirect URI matching is exact string comparison.** No prefixes, no wildcards. This is the
-   entire security basis of CIMD.
+   entire security basis of CIMD. **One deliberate exception (added 2026-10-24):** for an `http:`
+   loopback redirect (`localhost`, `127.0.0.1`, `[::1]`) the port is ignored, per RFC 8252 §7.3,
+   because native clients bind an ephemeral port. Scheme, host, path and query must still match,
+   and `localhost` ≠ `127.0.0.1`. The requested URI is stored and compared exactly at the token
+   endpoint. Matches Constellation (ADR 0021).
 7. **PKCE is mandatory**, `S256` only. Constellation enforces this at the database layer via a
    NOT NULL `codeChallenge` column; preserve that, including the rationale comment.
 8. **Local accounts are disabled by default** and are deliberately minimal. See §6.
@@ -115,7 +124,7 @@ mcp-auth/
         views/
         server.ts
         generated/prisma/
-    rs-auth/                   # resource server validation library
+    asterism-verify/           # resource server validation library (@mahasamuha/asterism-verify)
       src/
         index.ts
         verify.ts
@@ -123,8 +132,10 @@ mcp-auth/
         express.ts
 ```
 
-`rs-auth` is consumed by Constellation and future MCP servers. Publish privately or consume via
-git dependency; decide at T15.
+`asterism-verify` is consumed by Constellation and future MCP servers. **Decided 2026-10-24:**
+renamed from `rs-auth` ("rs" read as Rust) and published publicly on npm as
+`@mahasamuha/asterism-verify`. It holds no secrets: it only verifies tokens against the proxy's
+public JWKS.
 
 ---
 
@@ -227,6 +238,25 @@ model OauthClient {
 
   @@index([expiresAt])
   @@map("oauth_clients")
+}
+
+// CIMD clients refused at resolution. Complements trust-policy.yaml's static
+// denylist so an operator can block a client without a restart or redeploy.
+// Added 2026-10-24 (T11); managed with the deny-client CLI.
+enum DenyKind {
+  client_id
+  domain
+}
+
+model DeniedClient {
+  id        String   @id @default(cuid())
+  kind      DenyKind
+  value     String   // exact client_id URL, or a host (matches subdomains too)
+  reason    String?
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@unique([kind, value])
+  @@map("denied_clients")
 }
 
 // ---------- Flow state ----------
@@ -432,8 +462,8 @@ acceptance criteria met, `pnpm build` clean, `pnpm lint` clean.
 ### T1 — Workspace scaffold
 `chore: scaffold pnpm workspace and proxy package`
 
-pnpm workspace root, `tsconfig.base.json` with `strict: true`, ESLint + Prettier matching
-Constellation's config. `packages/proxy` with Express, structured logging, `GET /health`.
+pnpm workspace root, `tsconfig.base.json` with `strict: true`, ESLint matching
+Constellation's config. (Prettier dropped 2026-10-24: Constellation doesn't use it either.) `packages/proxy` with Express, structured logging, `GET /health`.
 Dockerfile and `docker-compose.yml` with Postgres for local dev.
 
 **Acceptance:** `pnpm dev` starts; `/health` responds 200.
@@ -446,6 +476,15 @@ Dockerfile and `docker-compose.yml` with Postgres for local dev.
 `zod` schema for env, failing fast with a readable message: `DATABASE_URL`, `ISSUER_URL`,
 `ENABLE_OIDC`, `OIDC_ISSUER`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`, `ENABLE_LOCAL_ACCOUNTS`,
 `ENABLE_DCR`, `ALLOW_INSECURE_CLIENT_METADATA`, `PORT`, `LOG_LEVEL`.
+
+Added 2026-10-24:
+- `COOKIE_SECRET`: required, at least 32 characters, no ephemeral fallback.
+- `TRUST_PROXY`: passed to Express `trust proxy`. Required behind the ingress so the login
+  throttle sees real client IPs.
+- `METRICS_TOKEN`: optional, at least 32 characters. When unset, `/metrics` returns 404.
+
+Also refuse to start when `ENABLE_DCR=true` while T10 is deferred, and require `ISSUER_URL` to be a
+bare origin.
 
 Refuse to start if both `ENABLE_OIDC` and `ENABLE_LOCAL_ACCOUNTS` are false.
 
@@ -492,6 +531,13 @@ signing key plus any number of *retired but unexpired* keys published in JWKS.
 `GET /.well-known/jwks.json` with `Cache-Control: max-age=3600`. A `rotateSigningKey()` routine
 that promotes a new key and retires the old.
 
+Added 2026-10-24:
+- A partial unique index (`signing_keys_single_active`, raw SQL, documented in the schema)
+  enforces exactly one active key. A concurrent first-key creation catches `P2002` and adopts
+  the winner's key.
+- Operators rotate with `pnpm --filter @mcp-auth/proxy rotate-signing-key`, or
+  `node dist/cli/rotate-signing-key.js` in the container.
+
 **Acceptance:** JWKS returns a valid JWK Set. After rotation, new-`kid` tokens verify and
 old-`kid` tokens still verify.
 
@@ -513,7 +559,11 @@ stubbed if necessary.
 ### T6 — OIDC upstream
 `feat: add oidc upstream authentication`
 
-Per §6. Discovery cached at startup. `startUpstreamAuth(handle)` builds the authorization URL
+Per §6. Discovery cached at startup. **If discovery fails at boot, the proxy logs an error naming
+`OIDC_ISSUER` and exits 1** (decided 2026-10-24); the restart policy retries. At runtime a failed
+re-discovery still serves the cached config. The callback consumes `upstreamState` atomically
+before the code exchange, so it is single-use. A missing `email` claim doesn't overwrite the stored
+email. `startUpstreamAuth(handle)` builds the authorization URL
 with PKCE and nonce, persisting the verifier on `AuthorizationRequest`. `/callback` exchanges,
 validates, resolves or creates the `User`, writes `subject` back, redirects to consent.
 
@@ -531,6 +581,18 @@ exists.
 
 **Acceptance:** With the flag off, no local routes are reachable. With it on, `/setup` creates
 the first account and then self-disables; repeated failed logins are throttled per IP.
+
+Implementation notes (2026-10-24):
+- **`/setup`:** once an account exists it falls through to the normal 404. First-account
+  creation runs under a transaction-scoped advisory lock, so concurrent POSTs create exactly
+  one account.
+- **Sessions:** the cookie value is the signed `${userId}.${issuedAtMs}`. Age is checked server
+  side against the 7-day TTL, and every read rejects a deactivated `User` or an inactive
+  `LocalUser`.
+- **Admin-created accounts:** the `local-user add|deactivate|list` CLI (`node dist/cli/local-user.js`
+  in the container). The password is read from stdin without echo. There is no web admin UI.
+- **Logout:** `POST /auth/logout` stays mounted regardless of the flag, because OIDC users have
+  sessions too (T18).
 
 ---
 
@@ -552,7 +614,16 @@ on a new attack surface. Build it standalone and get it right.
   after validation reopens a DNS rebinding window — this ordering is the whole point.
 - Total timeout 3000ms, covering connect and read.
 - Response cap 16 KB, enforced by aborting the stream, not by reading then checking length.
-- At most 1 redirect; the target is independently revalidated against every check above.
+- At most 1 redirect by default; the target is independently revalidated against every check
+  above. The limit is a `maxRedirects` option, and **CIMD fetches pass 0**: a CIMD document must
+  come from the `client_id` URL itself.
+- Block the full IANA special-use set as well as the ranges above: documentation and benchmark
+  ranges, `192.88.99/24`, `::/96` (which also covers deprecated IPv4-compatible addresses),
+  NAT64 `64:ff9b::/96` and `64:ff9b:1::/48`, Teredo `2001::/23`, 6to4 `2002::/16`, and the rest
+  of Constellation's list. `::ffff:0:0/96` is checked only for IPv6 addresses, because
+  `BlockList` maps every IPv4 address into it.
+- Accept `application/json` or `application/*+json`; reject a declared `Content-Length` over the
+  cap before reading; `agent: false` (no pooled sockets).
 - `Content-Type` must be JSON.
 - Per-host rate limit, 10 requests/minute.
 
@@ -577,7 +648,22 @@ add a test suite unless asked.
    `token_endpoint_auth_method` is `none` or `private_key_jwt`; if the latter, `jwks_uri` is a
    valid HTTPS URL.
 4. Assign `trustLevel` from the trust policy (T11).
-5. Upsert with `expiresAt` = now + min(`Cache-Control: max-age`, 24h), defaulting to 24h.
+5. Upsert with `expiresAt` from `Cache-Control`: `max-age` clamped to 5 min–24 h, defaulting to
+   24 h. `no-store`, `no-cache` or `max-age=0` expire immediately, so the document is re-fetched
+   on every resolution.
+
+Additional rules (added 2026-10-24 to match Constellation's ADR 0021):
+- **`client_id` URL:** canonical (`new URL(id).href === id`), at most 2000 characters, no
+  userinfo, fragment, dot-segments or trailing-dot host, and a non-root path.
+- **Fetch:** no redirects; 5 KB cap.
+- **Document:**
+  - `client_name` required (at most 200 characters, trimmed).
+  - `client_secret` and `client_secret_expires_at` forbidden.
+  - `grant_types` filtered to the supported set, defaulting to
+    `[authorization_code, refresh_token]`.
+  - `redirect_uris` entries that are invalid, have a fragment, use
+    `javascript:`/`data:`/`file:`, or are `http:` off loopback are dropped. The document is
+    rejected only if none remain.
 
 Non-URL client ids fall through to the DCR lookup (T10).
 
@@ -623,6 +709,14 @@ for any resolved CIMD → `unverified` for DCR.
 
 **Acceptance:** Allowlisted, arbitrary-valid-CIMD, and DCR clients resolve to the three
 respective trust levels.
+
+**Database denylist (added 2026-10-24).** `isDenylisted()` is async. It checks the static YAML
+denylist and then the `DeniedClient` table (§4): exact `client_id`, or a host that matches the
+client's host or any parent domain. Operators manage it with
+`pnpm --filter @mcp-auth/proxy deny-client add|remove|list`; in the container, run
+`node dist/cli/deny-client.js`. `add` also revokes matching live grants and their refresh tokens
+in the same transaction. Outstanding access tokens expire within 15 minutes. Refresh re-resolves
+the client, so a denied client cannot refresh.
 
 ---
 
@@ -717,6 +811,14 @@ When the resolved client declares `token_endpoint_auth_method: private_key_jwt`,
 signature, `iss` and `sub` both equal to `client_id`, `aud` equal to the token endpoint URL,
 `exp`, and an unused `jti` within its validity window.
 
+Added 2026-10-24:
+- **Algorithms:** asymmetric only (ES256, ES384, PS256, RS256, EdDSA). `oct` keys are
+  dropped from the client JWKS.
+- **Lifetime:** `exp - now` is capped at 300 s, with 60 s of skew; an `iat` in the future is
+  rejected.
+- **`jti` store:** stays in memory (decided). The cap bounds both its size and the replay window
+  after a restart.
+
 **Acceptance:** Valid assertion authenticates; replayed `jti` rejected; assertion addressed to
 another endpoint rejected.
 
@@ -750,7 +852,9 @@ correct single audience.
 
 `GET /grants` — authenticated, lists the user's grants: client name, client domain, target MCP
 server, scopes, granted timestamp. `POST /grants/:id/revoke` sets `revokedAt` and revokes
-associated refresh tokens. `POST /oauth/revoke` (RFC 7009) for programmatic revocation.
+associated refresh tokens. `POST /oauth/revoke` (RFC 7009) for programmatic revocation. A refresh token revokes its whole
+grant family (RFC 7009 §2.1), and the `Grant` itself stays. The endpoint is advertised as
+`revocation_endpoint`.
 
 Revocation ends refresh, but outstanding access tokens remain valid until expiry. This is the
 accepted cost of the JWT model and the reason for §1's 15-minute lifetime. State it plainly in
@@ -761,13 +865,13 @@ others untouched.
 
 ---
 
-### T19 — `rs-auth` package
+### T19 — `asterism-verify` package (originally `rs-auth`)
 `feat: add rs-auth package for resource server token validation`
 
 Deliberately minimal. No database. No network beyond JWKS.
 
 ```ts
-export interface RsAuthConfig {
+export interface VerifierConfig {   // was RsAuthConfig
   issuer: string;
   audience: string;   // this server's identifier — exactly one
   jwksUri?: string;   // defaults to discovery from issuer
@@ -780,7 +884,7 @@ export interface Principal {
   expiresAt: Date;
 }
 
-export function createVerifier(config: RsAuthConfig): {
+export function createVerifier(config: VerifierConfig): {
   verify(token: string): Promise<Principal>;
 };
 ```
@@ -794,7 +898,12 @@ export function createVerifier(config: RsAuthConfig): {
 - `express.ts` exports middleware that verifies the bearer token and, on 401, emits
   `WWW-Authenticate: Bearer realm="...", resource_metadata="..."`. Constellation already emits
   exactly this header in `mcp.ts` — match its format.
-- Export a helper for serving `/.well-known/oauth-protected-resource`.
+- Export a helper for serving the protected-resource metadata, mounted at the RFC 9728 §3.1 path
+  for the audience: the well-known segment goes between host and path, e.g.
+  `/.well-known/oauth-protected-resource/mcp` for `https://host/mcp`. That makes `resource` equal
+  the audience (§3.3). `protectedResourceMetadataPath` and `protectedResourceMetadataUrl` are
+  exported, and both 401 challenges carry `resource_metadata`. The resource-server app must list
+  `WWW-Authenticate` in `Access-Control-Expose-Headers` for browser clients.
 
 **Acceptance:** A Constellation-audience token fails verification against a different
 configured audience. Stopping the proxy does not break validation while the JWKS cache is warm.
@@ -812,6 +921,15 @@ detections, local login failures. Periodic cleanup of expired `AuthorizationRequ
 `docs/key-rotation.md` while the two-key design is still fresh.
 
 **Acceptance:** `/ready` returns 503 with Postgres stopped. Cleanup removes expired rows.
+
+**Metrics format (decided 2026-10-24):**
+- `/metrics` serves Prometheus text format 0.0.4: counters, plus durations as `_sum`/`_count`
+  summaries.
+- It requires `Authorization: Bearer $METRICS_TOKEN` and returns 404 when the token is unset.
+- Replay detections are `refresh_reuse_detected_total{kind="code_replay"|"refresh_reuse"}`.
+
+**Error mapping:** unhandled 4xx errors (body-parser and similar) map to `400 invalid_request`;
+everything else maps to `500 server_error`.
 
 ---
 
@@ -852,7 +970,7 @@ Copy, do not move. Constellation's rows stay until M3 deletes them.
 ### M3 — Cutover
 `feat: point constellation at the auth proxy and remove the legacy AS`
 
-One change, not a phased rollout. Add `rs-auth` for token validation; update
+One change, not a phased rollout. Add `@mahasamuha/asterism-verify` for token validation; update
 `/.well-known/oauth-protected-resource` and the `WWW-Authenticate` header in `mcp.ts` to name the
 proxy; delete `oauth.ts`, the `AuthCode` / `DeviceCode` / `OauthClient` / `OauthSession` models
 and their migrations, the `LocalUser` / `LoginFailure` models, `/setup` and `/auth/login`, and the

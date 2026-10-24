@@ -21,6 +21,25 @@ importers:
         specifier: ^8.59.3
         version: 8.65.0(eslint@10.8.0(jiti@2.7.0))(typescript@6.0.3)
 
+  packages/asterism-verify:
+    dependencies:
+      express:
+        specifier: ^5.2.1
+        version: 5.2.1
+      jose:
+        specifier: ^6.2.5
+        version: 6.2.5
+    devDependencies:
+      '@types/express':
+        specifier: ^5.0.6
+        version: 5.0.6
+      '@types/node':
+        specifier: ^24.0.0
+        version: 24.13.3
+      typescript:
+        specifier: ^6.0.0
+        version: 6.0.3
+
   packages/proxy:
     dependencies:
       '@prisma/adapter-pg':
@@ -90,25 +109,6 @@ importers:
       tsx:
         specifier: ^4.19.2
         version: 4.23.1
-      typescript:
-        specifier: ^6.0.0
-        version: 6.0.3
-
-  packages/rs-auth:
-    dependencies:
-      express:
-        specifier: ^5.2.1
-        version: 5.2.1
-      jose:
-        specifier: ^6.2.5
-        version: 6.2.5
-    devDependencies:
-      '@types/express':
-        specifier: ^5.0.6
-        version: 5.0.6
-      '@types/node':
-        specifier: ^24.0.0
-        version: 24.13.3
       typescript:
         specifier: ^6.0.0
         version: 6.0.3

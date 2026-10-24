@@ -1,7 +1,7 @@
 import { importJWK, jwtVerify, decodeProtectedHeader, errors as joseErrors, type JWTPayload } from "jose";
 import { JwksCache } from "./jwks-cache.js";
 
-export interface RsAuthConfig {
+export interface VerifierConfig {
   issuer: string;
   audience: string; // this server's identifier — exactly one
   jwksUri?: string; // defaults to discovery from issuer
@@ -17,6 +17,7 @@ export interface Principal {
 export type TokenValidationReason =
   | "malformed"
   | "unknown_kid"
+  | "jwks_unavailable"
   | "invalid_signature"
   | "invalid_issuer"
   | "array_audience"
@@ -38,7 +39,7 @@ export interface Verifier {
   verify(token: string): Promise<Principal>;
 }
 
-export function createVerifier(config: RsAuthConfig): Verifier {
+export function createVerifier(config: VerifierConfig): Verifier {
   const jwksCache = new JwksCache(config.issuer, config.jwksUri);
 
   return {
@@ -53,7 +54,13 @@ export function createVerifier(config: RsAuthConfig): Verifier {
         throw new TokenValidationError("malformed", "Token header is missing kid");
       }
 
-      const jwk = await jwksCache.getKey(kid);
+      let jwk: Awaited<ReturnType<JwksCache["getKey"]>>;
+      try {
+        jwk = await jwksCache.getKey(kid);
+      } catch {
+        // Only reachable on a cold cache — once keys are cached, refresh failures are served stale.
+        throw new TokenValidationError("jwks_unavailable", "Signing keys could not be fetched from the issuer");
+      }
       if (!jwk) {
         throw new TokenValidationError("unknown_kid", `No key found for kid "${kid}"`);
       }

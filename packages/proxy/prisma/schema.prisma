@@ -51,7 +51,15 @@ model LoginFailure {
 }
 
 // ---------- Signing ----------
-// Two keys active at once so rotation is not an outage.
+// Rotation keeps the retired key published in JWKS so rotation is not an outage,
+// but exactly one key may be active (retired_at IS NULL) at a time.
+//
+// Prisma cannot express partial unique indexes, so this one lives in raw
+// migration SQL (20261024141112_single_active_signing_key) and is invisible
+// to the schema:
+//   CREATE UNIQUE INDEX "signing_keys_single_active" ON "signing_keys" ((TRUE)) WHERE "retired_at" IS NULL;
+// createAndActivateKey() in crypto/signing-keys.ts relies on it to resolve
+// concurrent first-sign races (catches P2002 and re-reads the active key).
 
 model SigningKey {
   kid         String    @id
@@ -91,6 +99,24 @@ model OauthClient {
 
   @@index([expiresAt])
   @@map("oauth_clients")
+}
+
+// CIMD clients refused at resolution. Complements trust-policy.yaml's static
+// denylist so an operator can block a client without a restart or redeploy.
+enum DenyKind {
+  client_id
+  domain
+}
+
+model DeniedClient {
+  id        String   @id @default(cuid())
+  kind      DenyKind
+  value     String   // exact client_id URL, or a host (matches subdomains too)
+  reason    String?
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@unique([kind, value])
+  @@map("denied_clients")
 }
 
 // ---------- Flow state ----------

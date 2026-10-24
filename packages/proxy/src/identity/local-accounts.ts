@@ -1,5 +1,6 @@
 import bcrypt from "bcryptjs";
 import { prisma } from "../db.js";
+import type { Prisma } from "../generated/prisma/client.js";
 import { createLogger } from "../logger.js";
 import { incrementCounter } from "../metrics.js";
 
@@ -10,9 +11,10 @@ const MAX_FAILURES = 5;
 const FAILURE_WINDOW_MS = 15 * 60 * 1000;
 export const MIN_PASSWORD_LENGTH = 12;
 
-// A real bcrypt hash of a password nobody could type, used so failed lookups take the
-// same time as a real comparison — avoids leaking account existence via timing.
-const DUMMY_HASH = "$2a$12$invalidhashpadding000000000000000000000000000000000000000";
+// A real, well-formed cost-12 bcrypt hash of a random throwaway string, used so failed lookups take the
+// same time as a real comparison — avoids leaking account existence via timing. It must be a valid
+// 60-character hash: bcrypt.compare returns immediately on a malformed one, defeating the defence.
+const DUMMY_HASH = "$2b$12$ZPPdU3fzm.6eUstXs1Neve8W2zHAqkIit3VGV8MhPi51xB1x7mvyO";
 
 export async function checkBruteForce(ip: string): Promise<boolean> {
   const since = new Date(Date.now() - FAILURE_WINDOW_MS);
@@ -34,20 +36,43 @@ export async function localAccountsExist(): Promise<boolean> {
   return count > 0;
 }
 
-/** Creates a LocalUser + linked User row in a single transaction. Throws if the
- * username is already taken. No role is assigned — admin is a scope (§5), not an
- * account attribute. */
-export async function createLocalUser(username: string, password: string): Promise<string> {
+/** Creates a LocalUser + linked User row in a single transaction (or in the
+ * caller's, when `tx` is given). Throws if the username is already taken. No
+ * role is assigned — admin is a scope (§5), not an account attribute. */
+export async function createLocalUser(
+  username: string,
+  password: string,
+  tx?: Prisma.TransactionClient
+): Promise<string> {
   const passwordHash = await bcrypt.hash(password, BCRYPT_COST);
 
-  const userId = await prisma.$transaction(async (tx) => {
-    const user = await tx.user.create({ data: { email: username }, select: { id: true } });
-    await tx.localUser.create({ data: { username, passwordHash, userId: user.id } });
+  const run = async (db: Prisma.TransactionClient): Promise<string> => {
+    const user = await db.user.create({ data: { email: username }, select: { id: true } });
+    await db.localUser.create({ data: { username, passwordHash, userId: user.id } });
     return user.id;
-  });
+  };
+  const userId = tx ? await run(tx) : await prisma.$transaction(run);
 
   log.info({ username }, "Local user created");
   return userId;
+}
+
+// Arbitrary fixed key for the transaction-scoped Postgres advisory lock that
+// serialises /setup. Any bigint works; it only has to be unique among this
+// app's advisory locks and stable across instances.
+const SETUP_LOCK_KEY = 7_364_920_115n;
+
+/** First-account creation for /setup. Takes an advisory lock, then checks that
+ * no local account exists and creates one, all in one transaction, so two
+ * concurrent first POSTs can't both succeed (a plain check-then-create would
+ * race: neither sees the other's uncommitted row). Returns null if an account
+ * already exists. */
+export async function createFirstLocalUser(username: string, password: string): Promise<string | null> {
+  return prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(${SETUP_LOCK_KEY})`;
+    if ((await tx.localUser.count()) > 0) return null;
+    return createLocalUser(username, password, tx);
+  });
 }
 
 /** Validates credentials and returns the User.id on success. Throws on invalid

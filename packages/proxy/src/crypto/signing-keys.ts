@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { generateKeyPair, exportJWK, importJWK, SignJWT, type JWK, type JWTPayload } from "jose";
 import { prisma } from "../db.js";
+import { Prisma } from "../generated/prisma/client.js";
 import { createLogger } from "../logger.js";
 
 const log = createLogger("signing-keys");
@@ -28,20 +29,40 @@ async function generateSigningKey(): Promise<{ kid: string; publicJwk: JWK; priv
 }
 
 /** Generates a new key and stores it as the active key. Only called when no active key
- * was found, so callers each do their own findFirst first — this just owns the write. */
+ * was found, so callers each do their own findFirst first — this just owns the write.
+ *
+ * The partial unique index "signing_keys_single_active" (see schema.prisma) allows only
+ * one row with retired_at IS NULL, so two concurrent callers cannot both succeed: the
+ * loser gets P2002 and returns the winner's key instead, so no caller ever ends up
+ * holding a key that isn't the active one. */
 async function createAndActivateKey(): Promise<{ kid: string; privateJwk: JWK }> {
-  const { kid, publicJwk, privateJwk } = await generateSigningKey();
-  await prisma.signingKey.create({
-    data: {
-      kid,
-      algorithm: ALG,
-      publicJwk: publicJwk as object,
-      privateJwk: privateJwk as object,
-      activatedAt: new Date(),
-    },
-  });
-  log.info({ kid }, "Generated initial signing key");
-  return { kid, privateJwk };
+  // Bounded retry: the loser's re-read can only come back empty if a rotation
+  // retired the winner in between, which is vanishingly rare; one more attempt covers it.
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const { kid, publicJwk, privateJwk } = await generateSigningKey();
+    try {
+      await prisma.signingKey.create({
+        data: {
+          kid,
+          algorithm: ALG,
+          publicJwk: publicJwk as object,
+          privateJwk: privateJwk as object,
+          activatedAt: new Date(),
+        },
+      });
+    } catch (err) {
+      if (!(err instanceof Prisma.PrismaClientKnownRequestError) || err.code !== "P2002") throw err;
+      const winner = await prisma.signingKey.findFirst({
+        where: { retiredAt: null },
+        select: { kid: true, privateJwk: true },
+      });
+      if (winner) return winner as { kid: string; privateJwk: JWK };
+      continue;
+    }
+    log.info({ kid }, "Generated initial signing key");
+    return { kid, privateJwk };
+  }
+  throw new Error("Could not create or find an active signing key");
 }
 
 /** Ensures an active signing key exists, generating one on first startup if needed.

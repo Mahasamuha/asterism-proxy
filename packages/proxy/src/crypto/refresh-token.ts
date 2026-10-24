@@ -1,5 +1,6 @@
 import { randomBytes, createHash } from "node:crypto";
 import { prisma } from "../db.js";
+import type { Prisma } from "../generated/prisma/client.js";
 
 // Not specified explicitly in §1 (unlike the access token's 15/5-minute
 // lifetimes) — 30 days, matching Constellation's own prior default
@@ -23,12 +24,15 @@ export interface IssueRefreshTokenParams {
 
 /** Mints a new opaque, high-entropy refresh token and stores only its SHA-256
  * hash — the raw token returned here is the only copy that ever exists
- * outside the database. */
-export async function issueRefreshToken(params: IssueRefreshTokenParams): Promise<string> {
+ * outside the database. Pass `db` to write inside a caller's transaction. */
+export async function issueRefreshToken(
+  params: IssueRefreshTokenParams,
+  db: Prisma.TransactionClient = prisma
+): Promise<string> {
   const token = randomBytes(32).toString("hex");
   const tokenHash = createHash("sha256").update(token).digest("hex");
 
-  await prisma.refreshToken.create({
+  await db.refreshToken.create({
     data: {
       tokenHash,
       userId: params.userId,

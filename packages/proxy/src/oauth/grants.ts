@@ -28,7 +28,7 @@ function renderErrorPage(res: Response, status: number, message: string): void {
 }
 
 async function requireSession(req: Request, res: Response, returnTo: string): Promise<string | null> {
-  const userId = getSessionUserId(req);
+  const userId = await getSessionUserId(req);
   if (userId) return userId;
 
   const handle = await createSelfLoginRequest(returnTo);
@@ -152,7 +152,7 @@ grantsRouter.get("/grants", async (req: Request, res: Response) => {
 // ---------------------------------------------------------------------------
 
 grantsRouter.post("/grants/:id/revoke", async (req: Request, res: Response) => {
-  const userId = getSessionUserId(req);
+  const userId = await getSessionUserId(req);
   if (!userId) {
     renderErrorPage(res, 401, "Not signed in.");
     return;
@@ -209,11 +209,26 @@ grantsRouter.post("/oauth/revoke", async (req: Request, res: Response) => {
   // or wrong-client token, or an access token — a stateless JWT has nothing
   // server-side to revoke (§1's accepted tradeoff). Never leak whether a
   // token exists via the response.
+  //
+  // RFC 7009 §2.1: revoking a refresh token should also invalidate related
+  // tokens from the same grant. Rotation means a client's "current" token is
+  // just one link in a chain, so revoke every live token sharing the grantId in
+  // one statement — otherwise a client revoking a stale link would leave the
+  // live one usable. Only when the presented token belongs to the requesting
+  // client: for a public client client_id is just a claim, but requiring the
+  // match means a token can't be used to revoke another client's chain by
+  // presenting it under a different client_id. The Grant itself stays live, so
+  // the user's consent is kept (they revoke that via /grants).
   const tokenHash = createHash("sha256").update(token).digest("hex");
   const entry = await prisma.refreshToken.findUnique({ where: { tokenHash } });
-  if (entry && entry.clientId === client_id && entry.revokedAt === null) {
-    await prisma.refreshToken.update({ where: { tokenHash }, data: { revokedAt: new Date() } });
-    log.info({ clientId: client_id }, "Refresh token revoked via /oauth/revoke");
+  if (entry && entry.clientId === client_id) {
+    const result = await prisma.refreshToken.updateMany({
+      where: { grantId: entry.grantId, revokedAt: null },
+      data: { revokedAt: new Date() },
+    });
+    if (result.count > 0) {
+      log.info({ clientId: client_id, grantId: entry.grantId, revokedCount: result.count }, "Refresh token family revoked via /oauth/revoke");
+    }
   }
 
   res.status(200).end();

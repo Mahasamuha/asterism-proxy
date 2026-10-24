@@ -30,6 +30,12 @@
     <% if (clientDomain) { %>
       <p class="domain">Requesting client at <strong><%= clientDomain %></strong></p>
     <% } %>
+    <% if (redirectHost) { %>
+      <p class="domain">After approval you'll be sent to <strong><%= redirectHost %></strong></p>
+    <% } %>
+    <% if (isLoopbackRedirect) { %>
+      <p class="warning">The app receiving this authorization runs on this device. Only approve if you started it.</p>
+    <% } %>
     <% if (unverified) { %>
       <p class="warning">This client's identity has not been verified. Only approve if you recognize and trust it.</p>
     <% } %>

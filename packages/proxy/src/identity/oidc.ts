@@ -116,6 +116,15 @@ export async function handleUpstreamCallback(
     throw new Error("Authorization request was not started via startUpstreamAuth");
   }
 
+  // Single-use: atomically consume the upstream state before exchanging the code,
+  // so a replayed callback (or two racing ones) can't reach the exchange twice.
+  // Only the request that flips the row from state -> null proceeds.
+  const consumed = await prisma.authorizationRequest.updateMany({
+    where: { handle: authRequest.handle, upstreamState: returnedState },
+    data: { upstreamState: null },
+  });
+  if (consumed.count !== 1) throw new Error("Unknown or expired authorization request");
+
   const tokens = await client.authorizationCodeGrant(oidcConfig, currentUrl, {
     expectedState: authRequest.upstreamState!,
     expectedNonce: authRequest.upstreamNonce,
@@ -127,7 +136,9 @@ export async function handleUpstreamCallback(
 
   const sub = claims.sub;
   const issuer = config.oidc!.issuer;
-  const email = typeof claims.email === "string" ? claims.email : "";
+  // Absent claim: keep any stored email on update (don't blank it); "" on create
+  // because User.email is non-null.
+  const email = typeof claims.email === "string" && claims.email !== "" ? claims.email : undefined;
 
   const claimsToStore = Object.fromEntries(
     Object.entries(claims as Record<string, unknown>).filter(([k]) => !CLAIM_KEYS_TO_DROP.includes(k))
@@ -135,8 +146,8 @@ export async function handleUpstreamCallback(
 
   const user = await prisma.user.upsert({
     where: { oidcSub_oidcIssuer: { oidcSub: sub, oidcIssuer: issuer } },
-    create: { oidcSub: sub, oidcIssuer: issuer, email, lastKnownClaims: claimsToStore as Prisma.InputJsonObject },
-    update: { email, lastKnownClaims: claimsToStore as Prisma.InputJsonObject },
+    create: { oidcSub: sub, oidcIssuer: issuer, email: email ?? "", lastKnownClaims: claimsToStore as Prisma.InputJsonObject },
+    update: { ...(email !== undefined && { email }), lastKnownClaims: claimsToStore as Prisma.InputJsonObject },
     select: { id: true, deactivatedAt: true },
   });
 

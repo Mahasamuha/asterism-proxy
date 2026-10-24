@@ -7,6 +7,9 @@
   "scripts": {
     "build": "tsc && cp -r src/views dist/views",
     "dev": "tsx watch --env-file-if-exists=../../.env src/server.ts",
+    "deny-client": "tsx --env-file-if-exists=../../.env src/cli/deny-client.ts",
+    "rotate-signing-key": "tsx --env-file-if-exists=../../.env src/cli/rotate-signing-key.ts",
+    "local-user": "tsx --env-file-if-exists=../../.env src/cli/local-user.ts",
     "start": "node dist/server.js",
     "typecheck": "tsc --noEmit",
     "db:generate": "prisma generate",

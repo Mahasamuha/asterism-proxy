@@ -3,6 +3,7 @@ import { parse as parseYaml } from "yaml";
 import { z } from "zod";
 import { config } from "../config.js";
 import { createLogger } from "../logger.js";
+import { prisma } from "../db.js";
 import type { ClientSource, TrustLevel } from "../generated/prisma/client.js";
 
 const log = createLogger("trust-policy");
@@ -81,11 +82,40 @@ function matchesList(clientId: string, list: Policy["allowlist"]): boolean {
   return list.domains.some((domain) => hostnameMatchesDomain(hostname, domain));
 }
 
+/** The hostname plus every parent domain: "a.b.example.com" ->
+ * ["a.b.example.com", "b.example.com", "example.com", "com"]. A `domain` row
+ * equal to any of these satisfies hostnameMatchesDomain(hostname, row), so one
+ * indexed IN lookup replaces scanning every row. */
+function hostAndParents(hostname: string): string[] {
+  const labels = hostname.split(".");
+  return labels.map((_, i) => labels.slice(i).join("."));
+}
+
 /** Checked before any resolution attempt (cache, CIMD fetch, or DCR lookup) —
  * a denylisted client_id is rejected outright, overriding even a cached row
- * from before it was added to the denylist. */
-export function isDenylisted(clientId: string): boolean {
-  return matchesList(clientId, policy.denylist);
+ * from before it was added to the denylist.
+ *
+ * Two sources: the static trust-policy.yaml denylist (loaded at startup) and
+ * the `denied_clients` table, which an operator edits at runtime via the
+ * deny-client CLI with no restart. A `client_id` row matches the exact id; a
+ * `domain` row matches the client_id URL's hostname or any subdomain (same
+ * semantics as the YAML lists). A non-URL client_id (DCR) can only match a
+ * `client_id` row. The database check is a single query, run only when the
+ * static list did not already match. */
+export async function isDenylisted(clientId: string): Promise<boolean> {
+  if (matchesList(clientId, policy.denylist)) return true;
+
+  const hostname = hostnameOf(clientId);
+  const row = await prisma.deniedClient.findFirst({
+    where: {
+      OR: [
+        { kind: "client_id", value: clientId },
+        ...(hostname === null ? [] : [{ kind: "domain" as const, value: { in: hostAndParents(hostname) } }]),
+      ],
+    },
+    select: { id: true },
+  });
+  return row !== null;
 }
 
 export function isAllowlisted(clientId: string): boolean {

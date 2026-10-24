@@ -43,18 +43,37 @@ JWKS, for a bounded grace period after retirement.
 ## Triggering a rotation
 
 There's no scheduled/automatic rotation and no HTTP endpoint for it —
-rotation is an operator action. From a shell with access to the running
-proxy's environment (or a one-off script using the same `DATABASE_URL`):
+rotation is an operator action, run through a CLI that uses the same
+`DATABASE_URL` as the proxy.
 
-```ts
-import { rotateSigningKey } from "./src/crypto/signing-keys.js";
+From a checkout:
 
-await rotateSigningKey();
+```
+pnpm --filter @mcp-auth/proxy rotate-signing-key
 ```
 
-This generates a new key, marks it active, and retires the previous one in a
-single transaction. The new key starts signing immediately; the retired key
-keeps validating already-issued tokens for `RETIRED_KEY_RETENTION_MS`.
+In the production container (no tsx, no `src/`), run the compiled build:
+
+```
+docker exec <container> node dist/cli/rotate-signing-key.js
+```
+
+The CLI prints the new and retired key ids (`kid`) and never any key
+material. It generates a new key, marks it active, and retires the previous
+one in a single transaction. The new key starts signing immediately; the
+retired key keeps validating already-issued tokens for
+`RETIRED_KEY_RETENTION_MS`.
+
+The single-active-key rule is enforced by the database, not just by code: the
+partial unique index `signing_keys_single_active`
+(`ON "signing_keys" ((TRUE)) WHERE "retired_at" IS NULL`, created in raw
+migration SQL because Prisma can't express it) rejects a second row with
+`retired_at IS NULL`. Rotation retires the old key before inserting the new
+one inside one transaction, so the index is never violated. Two concurrent
+first-time signers can't both create a key either: the loser's insert fails
+with a unique violation and it re-reads the winner's key. This also makes a
+multi-instance cold start safe against double key creation, although the
+Startup note above still describes the original single-instance assumption.
 
 ## When to rotate
 
