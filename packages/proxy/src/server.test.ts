@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const db = vi.hoisted(() => ({
@@ -15,6 +16,10 @@ vi.mock("./db.js", () => db);
 vi.mock("./identity/oidc.js", () => oidc);
 
 import { startApp, type StartedApp } from "./test-helpers/app.js";
+import { CONSENT_FORM_SCRIPT } from "./security-headers.js";
+
+// The one script the policy allows, by hash.
+const CONSENT_SCRIPT_SOURCE = `'sha256-${createHash("sha256").update(CONSENT_FORM_SCRIPT).digest("base64")}'`;
 
 const OIDC_ENV = { ENABLE_OIDC: "true", OIDC_ISSUER: "https://idp.example.test", OIDC_CLIENT_ID: "cid", OIDC_CLIENT_SECRET: "secret" };
 const savedEnv = { ...process.env };
@@ -185,7 +190,7 @@ describe("request id and security headers", () => {
     expect(bad.headers.get("x-content-type-options")).toBe("nosniff");
   });
 
-  const CSP = "default-src 'none'; style-src 'self' 'unsafe-inline'; img-src https:; form-action 'self'; frame-ancestors 'none'; base-uri 'none'";
+  const CSP = `default-src 'none'; script-src ${CONSENT_SCRIPT_SOURCE}; style-src 'self' 'unsafe-inline'; img-src https:; form-action 'self'; frame-ancestors 'none'; base-uri 'none'`;
 
   it("P1 sets Referrer-Policy and the strict CSP on every response, hides x-powered-by, and sends no HSTS over http", async () => {
     const base = await boot();

@@ -14,6 +14,7 @@ import { DEVICE_FLOW_REDIRECT_URI_SENTINEL } from "./device.js";
 import { SELF_LOGIN_REDIRECT_URI_SENTINEL } from "../identity/self-login.js";
 import { config } from "../config.js";
 import { consentRouter } from "./consent.js";
+import { CONSENT_FORM_SCRIPT, CONTENT_SECURITY_POLICY } from "../security-headers.js";
 
 const db = prisma as unknown as ReturnType<typeof createPrismaMock>;
 const resolve = vi.mocked(resolveClient);
@@ -470,7 +471,7 @@ describe("device flow approve/deny (P0)", () => {
 // POST's 302 plays no part in that decision.
 describe("form-action on the consent page that submits to the client's redirect_uri", () => {
   const csp = (r: { headers: Headers }) => r.headers.get("content-security-policy");
-  const BASE_POLICY = "default-src 'none'; style-src 'self' 'unsafe-inline'; img-src https:; form-action 'self'; frame-ancestors 'none'; base-uri 'none'";
+  const BASE_POLICY = CONTENT_SECURITY_POLICY;
 
   it.each([
     ["https", "https://client.example.test/cb", "https://client.example.test"],
@@ -485,6 +486,16 @@ describe("form-action on the consent page that submits to the client's redirect_
     expect(csp(r)).toContain(`form-action 'self' ${source};`);
     // Everything else in the policy is unchanged.
     expect(csp(r)!.replace(` ${source}`, "")).toBe(BASE_POLICY);
+  });
+
+  it("GET renders the submit-once script, and the policy allows exactly that script by its hash", async () => {
+    m("authorizationRequest", "findUnique").mockResolvedValue(flowRow({ redirectUri: "https://client.example.test/cb" }));
+    const r = await consentGet();
+    const scripts = [...r.text.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((x) => x[1]);
+    expect(scripts).toEqual([CONSENT_FORM_SCRIPT]);
+    const hash = createHash("sha256").update(scripts[0]!).digest("base64");
+    expect(csp(r)).toContain(`script-src 'sha256-${hash}';`);
+    expect(r.text).toContain('<form id="consent-form"');
   });
 
   it("GET for a device flow does not widen form-action (the POST renders a page, no redirect)", async () => {

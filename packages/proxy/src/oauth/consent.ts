@@ -12,7 +12,7 @@ import { isFlowBound } from "../identity/flow-binding.js";
 import { getSessionUserId } from "../identity/session.js";
 import { incrementCounter } from "../metrics.js";
 import { bodyOf, stringField } from "../http-params.js";
-import { allowFormSubmissionTo } from "../security-headers.js";
+import { allowFormSubmissionTo, CONSENT_FORM_SCRIPT } from "../security-headers.js";
 import type { AuthorizationRequest, Prisma } from "../generated/prisma/client.js";
 
 const log = createLogger("consent");
@@ -322,6 +322,7 @@ consentRouter.get("/oauth/consent", async (req: Request, res: Response) => {
     isDevice: isDeviceFlow(authRequest),
     hasGrant,
     userCode: isDeviceFlow(authRequest) && authRequest.state ? `${authRequest.state.slice(0, 4)}-${authRequest.state.slice(4)}` : null,
+    consentFormScript: CONSENT_FORM_SCRIPT,
   });
 });
 
