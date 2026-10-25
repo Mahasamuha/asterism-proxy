@@ -12,6 +12,10 @@ import { config } from "../config.js";
 import { resolveClient } from "../clients/cimd.js";
 import { DEVICE_FLOW_REDIRECT_URI_SENTINEL, deviceRouter, resetDeviceEntryLimits } from "./device.js";
 import { csrfFrom } from "../test-helpers/http.js";
+import { CONSENT_FORM_SCRIPT } from "../security-headers.js";
+
+// The one script the policy allows, by hash.
+const CONSENT_SCRIPT_SOURCE = `'sha256-${createHash("sha256").update(CONSENT_FORM_SCRIPT).digest("base64")}'`;
 
 const db = prisma as unknown as ReturnType<typeof createPrismaMock>;
 const resolve = vi.mocked(resolveClient);
@@ -154,7 +158,7 @@ describe("GET/POST /oauth/device (user-code entry)", () => {
       const page = await getPath(app.baseUrl, "/oauth/device");
       expect(page.status).toBe(200);
       expect(page.headers.get("content-security-policy")).toBe(
-        "default-src 'none'; style-src 'self' 'unsafe-inline'; img-src https:; form-action 'self' https://idp.example.test; frame-ancestors 'none'; base-uri 'none'"
+        `default-src 'none'; script-src ${CONSENT_SCRIPT_SOURCE}; style-src 'self' 'unsafe-inline'; img-src https:; form-action 'self' https://idp.example.test; frame-ancestors 'none'; base-uri 'none'`
       );
       const r = await enterCode(freshIp(), "ABCD-2345");
       expect(r.status).toBe(302);

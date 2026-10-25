@@ -1,5 +1,6 @@
+import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { CONTENT_SECURITY_POLICY, contentSecurityPolicyAllowingFormTarget, formActionSource } from "./security-headers.js";
+import { CONSENT_FORM_SCRIPT, CONTENT_SECURITY_POLICY, contentSecurityPolicyAllowingFormTarget, formActionSource } from "./security-headers.js";
 
 describe("formActionSource", () => {
   it.each([
@@ -38,5 +39,11 @@ describe("contentSecurityPolicyAllowingFormTarget (the policy for a page whose f
 
   it("base policy keeps form-action 'self' only", () => {
     expect(CONTENT_SECURITY_POLICY).toContain("form-action 'self';");
+  });
+
+  it("base policy allows only the consent form script, by hash", () => {
+    const hash = createHash("sha256").update(CONSENT_FORM_SCRIPT).digest("base64");
+    expect(CONTENT_SECURITY_POLICY).toContain(`script-src 'sha256-${hash}';`);
+    expect(CONTENT_SECURITY_POLICY.match(/script-src [^;]*/)![0]).toBe(`script-src 'sha256-${hash}'`);
   });
 });

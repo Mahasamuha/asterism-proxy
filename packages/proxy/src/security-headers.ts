@@ -1,9 +1,43 @@
+import { createHash } from "node:crypto";
 import type { Response } from "express";
 
-// The EJS views use inline <style> blocks (no scripts, no event handlers), so
-// 'unsafe-inline' is allowed for styles only. img-src is https-only for a client
-// logo; forms post to this origin only.
-const POLICY_PREFIX = "default-src 'none'; style-src 'self' 'unsafe-inline'; img-src https:; form-action";
+/** The only script any page runs, inlined into consent.ejs: it lets the consent
+ * form submit once. A second click (a double-click on Approve) would POST a flow
+ * the first POST already consumed, and the browser would show that request's
+ * "invalid or expired" page instead of following the first one's redirect.
+ * The buttons are marked aria-disabled rather than disabled: a disabled submit
+ * button is left out of the form data, which would drop the clicked button's
+ * action. A page restored from the back/forward cache is re-armed. */
+export const CONSENT_FORM_SCRIPT = `(function () {
+  var form = document.getElementById("consent-form");
+  if (!form) return;
+  function setSubmitted(submitted) {
+    if (submitted) form.dataset.submitted = "1";
+    else delete form.dataset.submitted;
+    form.querySelectorAll("button").forEach(function (button) {
+      if (submitted) button.setAttribute("aria-disabled", "true");
+      else button.removeAttribute("aria-disabled");
+    });
+  }
+  form.addEventListener("submit", function (event) {
+    if (form.dataset.submitted) {
+      event.preventDefault();
+      return;
+    }
+    setSubmitted(true);
+  });
+  window.addEventListener("pageshow", function (event) {
+    if (event.persisted) setSubmitted(false);
+  });
+})();`;
+
+const CONSENT_FORM_SCRIPT_SOURCE = `'sha256-${createHash("sha256").update(CONSENT_FORM_SCRIPT).digest("base64")}'`;
+
+// The EJS views use inline <style> blocks, so 'unsafe-inline' is allowed for
+// styles only. Scripts are limited to CONSENT_FORM_SCRIPT by its hash, with no
+// event handler attributes. img-src is https-only for a client logo; forms post
+// to this origin only.
+const POLICY_PREFIX = `default-src 'none'; script-src ${CONSENT_FORM_SCRIPT_SOURCE}; style-src 'self' 'unsafe-inline'; img-src https:; form-action`;
 const POLICY_SUFFIX = "frame-ancestors 'none'; base-uri 'none'";
 
 /** The app-wide policy, set on every response by server.ts. */
