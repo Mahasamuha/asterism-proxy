@@ -29,24 +29,29 @@ strict `Content-Security-Policy`, `Referrer-Policy: no-referrer`, `X-Frame-Optio
 and `X-Content-Type-Options: nosniff`.
 
 The policy says `form-action 'self'`. Chromium and Safari also apply `form-action`
-to the redirect that follows a form submission, so the responses that answer a form
-POST with a redirect to another origin widen it for that one response only:
+to every redirect that follows a form submission, and they check it against the CSP
+of the page that contains the form, not the CSP of the redirect response. So the
+pages whose form submits to an off-origin redirect widen `form-action` on that
+page's own response, by exactly that target:
 
-- `POST /oauth/consent` (approve, deny and the access-denied redirect) adds exactly
-  the origin of the client's `redirect_uri` for http(s) (for example
-  `http://127.0.0.1:53124`), or its scheme for a private-use scheme (for example
-  `myapp:`);
-- `POST /oauth/device` adds the origin of the identity provider's authorization URL
-  when OIDC is on.
+- `GET /oauth/consent` for an authorization-code flow adds exactly the origin of the
+  client's `redirect_uri` for http(s) (for example `http://127.0.0.1:53124`), or its
+  scheme for a private-use scheme (for example `myapp:`). Approve and deny both
+  redirect there. Device-flow consent does not redirect and is not widened;
+- the device code-entry page (`GET /oauth/device`, and its re-renders after a
+  rejected code) adds the origin of the identity provider's authorization endpoint
+  (from OIDC discovery) when OIDC is on.
 
-Every other response keeps `form-action 'self'`; the login, setup, password and
-grant-revocation POSTs redirect within the origin, which `'self'` covers.
+Every other response keeps `form-action 'self'`; the login, setup, password, logout
+and grant-revocation POSTs redirect or render within the origin, which `'self'`
+covers. A CSP header on the POST's 302 itself has no effect on this.
 
-**Verified by tests only.** The tests assert the header per response (http loopback,
-https and custom-scheme redirect URIs, and that other responses are unchanged), but
-no browser was driven. Before relying on this, complete a full authorization flow
-(consent, then the redirect back to the client) in Chrome, ideally also Safari, with
-a loopback client and one using a custom scheme, and confirm the redirect is followed.
+An earlier version set the widened policy on the POST's 302 instead. Its tests
+passed, but Chrome on Android silently refused the consent redirect. The current
+mechanism was confirmed by hand on 2026-10-25 in Chrome on Android: consent, then
+the redirect to an https client on another origin, the code exchange and a refresh.
+**Not yet checked by hand:** a custom-scheme redirect and the device-entry redirect
+to an OIDC provider. Safari is not a target browser and has not been tested.
 
 ## Client metadata fetching
 

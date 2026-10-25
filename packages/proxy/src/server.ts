@@ -45,8 +45,8 @@ app.use((req: Request, res: Response, next: NextFunction) => {
   next();
 });
 
-// The policy (and the per-response widening of form-action for the consent
-// redirect) lives in security-headers.ts.
+// The policy (and the per-page widening of form-action on the consent and
+// device-entry pages) lives in security-headers.ts.
 const sendHsts = new URL(config.issuerUrl).protocol === "https:";
 
 app.use((_req: Request, res: Response, next: NextFunction) => {

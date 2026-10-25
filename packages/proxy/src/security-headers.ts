@@ -33,17 +33,23 @@ export function formActionSource(url: string): string | null {
   return null;
 }
 
-/** The app-wide policy with `form-action` widened by exactly the target of the
- * redirect this response sends. */
-export function contentSecurityPolicyForRedirect(redirectUrl: string): string {
-  const source = formActionSource(redirectUrl);
+/** The app-wide policy with `form-action` widened by exactly `targetUrl`'s
+ * origin (or private-use scheme). For the response that renders a page whose
+ * form submission will be redirected to that target.
+ *
+ * Chromium and Safari check `form-action` for a form submission, including
+ * every redirect in its chain, against the CSP of the document that contains
+ * the form. The CSP on the POST's 302 plays no part, so the widening must be
+ * on the page that renders the form. */
+export function contentSecurityPolicyAllowingFormTarget(targetUrl: string): string {
+  const source = formActionSource(targetUrl);
   return source === null ? CONTENT_SECURITY_POLICY : `${POLICY_PREFIX} 'self' ${source}; ${POLICY_SUFFIX}`;
 }
 
-/** Call before `res.redirect(url)` in a handler that answers a form POST with a
- * redirect to another origin. Chromium and Safari apply `form-action` to the
- * redirect that follows a form submission, so under the app-wide `'self'` the
- * browser would refuse to follow it. Only this response is affected. */
-export function allowFormRedirectTo(res: Response, redirectUrl: string): void {
-  res.set("Content-Security-Policy", contentSecurityPolicyForRedirect(redirectUrl));
+/** Call when rendering a page whose form POST will answer with a redirect to
+ * another origin (`targetUrl`), so the browser lets the submission follow it
+ * (see contentSecurityPolicyAllowingFormTarget). Affects only this response.
+ * Setting it on the POST's own redirect response has no effect. */
+export function allowFormSubmissionTo(res: Response, targetUrl: string): void {
+  res.set("Content-Security-Policy", contentSecurityPolicyAllowingFormTarget(targetUrl));
 }

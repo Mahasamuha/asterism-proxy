@@ -5,7 +5,7 @@ import { CLIENT_ID, RESOURCE, clientRow, createPrismaMock, getPath, postEmpty, p
 vi.mock("../db.js", async () => ({ prisma: (await import("../test-helpers/oauth-harness.js")).createPrismaMock() }));
 vi.mock("../resource-registry.js", async () => (await import("../test-helpers/oauth-harness.js")).fakeResourceRegistry());
 vi.mock("../clients/cimd.js", () => ({ resolveClient: vi.fn() }));
-vi.mock("../identity/oidc.js", () => ({ startUpstreamAuth: vi.fn() }));
+vi.mock("../identity/oidc.js", () => ({ startUpstreamAuth: vi.fn(), getUpstreamAuthorizationEndpoint: vi.fn() }));
 
 import { prisma } from "../db.js";
 import { config } from "../config.js";
@@ -143,21 +143,66 @@ describe("POST /oauth/device/code", () => {
 describe("GET/POST /oauth/device (user-code entry)", () => {
   const pending = (over: Record<string, unknown> = {}) => ({ clientId: CLIENT_ID, resource: RESOURCE, scopes: ["read"], expiresAt: new Date(Date.now() + 600_000), ...over });
 
-  it("with OIDC on, the entry POST redirects to the identity provider and allows exactly that origin in form-action", async () => {
-    const { startUpstreamAuth } = await import("../identity/oidc.js");
+  it("with OIDC on, the entry page allows exactly the IdP origin in form-action; the POST's 302 carries no override", async () => {
+    const { startUpstreamAuth, getUpstreamAuthorizationEndpoint } = await import("../identity/oidc.js");
     vi.mocked(startUpstreamAuth).mockResolvedValue("https://idp.example.test/authorize?client_id=x&state=y");
+    vi.mocked(getUpstreamAuthorizationEndpoint).mockResolvedValue("https://idp.example.test/authorize");
     m("deviceCode", "findFirst").mockResolvedValue(pending());
     const saved = { oidc: config.enableOidc, local: config.enableLocalAccounts };
     config.enableOidc = true;
     try {
+      const page = await getPath(app.baseUrl, "/oauth/device");
+      expect(page.status).toBe(200);
+      expect(page.headers.get("content-security-policy")).toBe(
+        "default-src 'none'; style-src 'self' 'unsafe-inline'; img-src https:; form-action 'self' https://idp.example.test; frame-ancestors 'none'; base-uri 'none'"
+      );
       const r = await enterCode(freshIp(), "ABCD-2345");
       expect(r.status).toBe(302);
       expect(r.headers.get("location")).toMatch(/^https:\/\/idp\.example\.test\/authorize/);
-      expect(r.headers.get("content-security-policy")).toContain("form-action 'self' https://idp.example.test;");
+      expect(r.headers.get("content-security-policy")).toBeNull();
     } finally {
       config.enableOidc = saved.oidc;
       config.enableLocalAccounts = saved.local;
     }
+  });
+
+  it("with OIDC on, the entry form re-rendered after a bad code also allows the IdP origin, so a retry can be submitted", async () => {
+    const { getUpstreamAuthorizationEndpoint } = await import("../identity/oidc.js");
+    vi.mocked(getUpstreamAuthorizationEndpoint).mockResolvedValue("https://idp.example.test/authorize");
+    m("deviceCode", "findFirst").mockResolvedValue(null);
+    const saved = config.enableOidc;
+    config.enableOidc = true;
+    try {
+      const r = await enterCode(freshIp(), "ABCD-2345");
+      expect(r.status).toBe(200);
+      expect(r.text).toContain("Invalid or expired code");
+      expect(r.headers.get("content-security-policy")).toContain("form-action 'self' https://idp.example.test;");
+    } finally {
+      config.enableOidc = saved;
+    }
+  });
+
+  it("with OIDC on but discovery failing, the entry page still renders with the app-wide policy", async () => {
+    const { getUpstreamAuthorizationEndpoint } = await import("../identity/oidc.js");
+    vi.mocked(getUpstreamAuthorizationEndpoint).mockRejectedValue(new Error("idp down"));
+    const saved = config.enableOidc;
+    config.enableOidc = true;
+    try {
+      const page = await getPath(app.baseUrl, "/oauth/device");
+      expect(page.status).toBe(200);
+      expect(page.headers.get("content-security-policy")).toBeNull();
+    } finally {
+      config.enableOidc = saved;
+    }
+  });
+
+  it("with OIDC off, the entry page keeps the app-wide form-action 'self' and does not consult the IdP", async () => {
+    const { getUpstreamAuthorizationEndpoint } = await import("../identity/oidc.js");
+    vi.mocked(getUpstreamAuthorizationEndpoint).mockClear();
+    const page = await getPath(app.baseUrl, "/oauth/device");
+    expect(page.status).toBe(200);
+    expect(page.headers.get("content-security-policy")).toBeNull();
+    expect(getUpstreamAuthorizationEndpoint).not.toHaveBeenCalled();
   });
 
   it("the same-origin redirect to the local login keeps the app-wide policy (no override)", async () => {

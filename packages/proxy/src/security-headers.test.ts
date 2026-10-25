@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { CONTENT_SECURITY_POLICY, contentSecurityPolicyForRedirect, formActionSource } from "./security-headers.js";
+import { CONTENT_SECURITY_POLICY, contentSecurityPolicyAllowingFormTarget, formActionSource } from "./security-headers.js";
 
 describe("formActionSource", () => {
   it.each([
@@ -23,17 +23,17 @@ describe("formActionSource", () => {
   );
 });
 
-describe("contentSecurityPolicyForRedirect", () => {
+describe("contentSecurityPolicyAllowingFormTarget (the policy for a page whose form submission redirects off-origin)", () => {
   it("is the base policy with only the form-action directive widened", () => {
-    const widened = contentSecurityPolicyForRedirect("https://client.example.test/cb");
+    const widened = contentSecurityPolicyAllowingFormTarget("https://client.example.test/cb");
     expect(widened).toBe(CONTENT_SECURITY_POLICY.replace("form-action 'self'", "form-action 'self' https://client.example.test"));
     expect(widened).toContain("default-src 'none'");
     expect(widened).toContain("frame-ancestors 'none'");
   });
 
   it("is exactly the base policy when the target cannot be expressed safely", () => {
-    expect(contentSecurityPolicyForRedirect("http://a;b.example.test/cb")).toBe(CONTENT_SECURITY_POLICY);
-    expect(contentSecurityPolicyForRedirect("javascript:alert(1)")).toBe(CONTENT_SECURITY_POLICY);
+    expect(contentSecurityPolicyAllowingFormTarget("http://a;b.example.test/cb")).toBe(CONTENT_SECURITY_POLICY);
+    expect(contentSecurityPolicyAllowingFormTarget("javascript:alert(1)")).toBe(CONTENT_SECURITY_POLICY);
   });
 
   it("base policy keeps form-action 'self' only", () => {

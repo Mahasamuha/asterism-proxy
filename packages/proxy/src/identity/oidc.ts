@@ -54,6 +54,14 @@ export async function getOidcConfig(): Promise<client.Configuration> {
   return _config!;
 }
 
+/** The upstream provider's authorization endpoint, from the cached discovery
+ * document (the same one startUpstreamAuth builds its URL from). */
+export async function getUpstreamAuthorizationEndpoint(): Promise<string> {
+  const endpoint = (await getOidcConfig()).serverMetadata().authorization_endpoint;
+  if (!endpoint) throw new Error("OIDC discovery has no authorization_endpoint");
+  return endpoint;
+}
+
 function callbackUrl(): string {
   return `${config.issuerUrl}/oauth/callback`;
 }
