@@ -135,6 +135,73 @@ be listed under `environment:` in `docker-compose.yml` (it already is).
   is no global ceiling across IPs: with 31^8 possible codes, guessing a live one is
   negligible, and a global cap would only let an attacker lock everyone out.
 
+## Published image
+
+CI pushes `mahasamuha/asterism-proxy` to Docker Hub (linux/amd64) after the tests
+pass:
+
+| Event | Tags |
+|---|---|
+| Push to `main` | `main`, `sha-<short>` |
+| Tag `v1.2.3` | `1.2.3`, `1.2`, `latest` |
+
+A pre-release tag such as `v1.2.3-rc.1` gets `1.2.3-rc.1` only, never `latest`.
+Pull requests build the image but don't push it. It logs in as `mahasamuha` with the
+organization-level `DOCKERHUB_TOKEN` secret, the same way Constellation publishes
+its relay image.
+
+The entrypoint applies pending Prisma migrations, then starts the proxy. The image
+ships an empty resource-server registry, so mount your own and point
+`RESOURCE_SERVERS_PATH` at it (the same goes for `TRUST_POLICY_PATH`). A minimal
+compose file for a host behind a TLS-terminating reverse proxy:
+
+```yaml
+services:
+  proxy:
+    image: mahasamuha/asterism-proxy:main   # or a release tag
+    ports:
+      - "3000:3000"
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      ISSUER_URL:
+      COOKIE_SECRET:
+      TRUST_PROXY:
+      SETUP_TOKEN:
+      ENABLE_OIDC:
+      OIDC_ISSUER:
+      OIDC_CLIENT_ID:
+      OIDC_CLIENT_SECRET:
+      ENABLE_LOCAL_ACCOUNTS:
+      RESOURCE_SERVERS_PATH: /app/site-config/resource-servers.yaml
+    volumes:
+      - ./config:/app/site-config:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16.14
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+```
+
+`.env.example` describes each variable. The note below about passing only the listed
+variables applies here too.
+
 ## docker compose
 
 The `proxy` service receives only the variables listed under `environment:` in
