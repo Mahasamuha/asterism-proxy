@@ -5,12 +5,12 @@ import { config } from "../config.js";
 import { createLogger } from "../logger.js";
 import { resolveClient } from "../clients/cimd.js";
 import { isRegisteredResource, lookupResourceServer } from "../resource-registry.js";
-import { startUpstreamAuth } from "../identity/oidc.js";
+import { getUpstreamAuthorizationEndpoint, startUpstreamAuth } from "../identity/oidc.js";
 import { bodyOf, stringField } from "../http-params.js";
 import { issueCsrfToken, verifyCsrfToken } from "../identity/csrf.js";
 import { bindFlow } from "../identity/flow-binding.js";
 import { rowCreationRetryAfter } from "../rate-limit.js";
-import { allowFormRedirectTo } from "../security-headers.js";
+import { allowFormSubmissionTo } from "../security-headers.js";
 
 const log = createLogger("device");
 
@@ -203,7 +203,22 @@ deviceRouter.post("/oauth/device/code", async (req: Request, res: Response) => {
 // login (T6/T7) and T13 consent, exactly like /oauth/authorize.
 // ---------------------------------------------------------------------------
 
-function renderEntry(res: Response, error: string | null, userCode: string, status = 200): void {
+// Every render of the entry form, including the error re-renders from the POST,
+// carries a form that can be submitted again.
+async function renderEntry(res: Response, error: string | null, userCode: string, status = 200): Promise<void> {
+  // With OIDC on, the entry POST is answered with a redirect to the identity
+  // provider. The browser checks form-action for that against this page's CSP,
+  // so this page must allow the IdP's authorization endpoint. (With local
+  // accounts only, the redirect is same-origin and 'self' covers it.) The
+  // endpoint comes from the cached OIDC discovery; if the IdP can't be reached
+  // the page still renders (the POST would fail the same way).
+  if (config.enableOidc) {
+    try {
+      allowFormSubmissionTo(res, await getUpstreamAuthorizationEndpoint());
+    } catch (err) {
+      log.warn({ err }, "Could not determine the identity provider origin for form-action");
+    }
+  }
   res.status(status).render("device-entry", { error, csrfToken: issueCsrfToken(res, "csrf_device"), userCode });
 }
 
@@ -213,19 +228,19 @@ function renderEntry(res: Response, error: string | null, userCode: string, stat
 // shows the entry page pre-filled, and the user must submit it themselves.
 async function startDeviceConsent(req: Request, res: Response, rawCode: string): Promise<void> {
   if (!verifyCsrfToken(req, "csrf_device")) {
-    renderEntry(res, "Invalid or missing CSRF token. Please try again.", normalizeUserCode(rawCode) ? formatUserCode(normalizeUserCode(rawCode)) : "", 403);
+    await renderEntry(res, "Invalid or missing CSRF token. Please try again.", normalizeUserCode(rawCode) ? formatUserCode(normalizeUserCode(rawCode)) : "", 403);
     return;
   }
   const release = reserveFailedEntry(req.ip ?? "unknown");
   if (!release) {
-    renderEntry(res, "Too many attempts. Please wait and try again.", "", 429);
+    await renderEntry(res, "Too many attempts. Please wait and try again.", "", 429);
     return;
   }
 
   const userCode = normalizeUserCode(rawCode);
   if (!userCode) {
     release(); // nothing was guessed
-    renderEntry(res, null, "");
+    await renderEntry(res, null, "");
     return;
   }
 
@@ -233,7 +248,7 @@ async function startDeviceConsent(req: Request, res: Response, rawCode: string):
     where: { userCode, status: "pending", expiresAt: { gt: new Date() } },
   });
   if (!entry) {
-    renderEntry(res, "Invalid or expired code. Please try again.", ""); // the reserved slot stays: this was a failed entry
+    await renderEntry(res, "Invalid or expired code. Please try again.", ""); // the reserved slot stays: this was a failed entry
     return;
   }
   release(); // a valid code is not a failure
@@ -260,16 +275,13 @@ async function startDeviceConsent(req: Request, res: Response, rawCode: string):
     return;
   }
   const upstreamUrl = await startUpstreamAuth(handle);
-  // This POST is answered with a redirect to the identity provider, another
-  // origin; the app-wide form-action 'self' would make Chromium/Safari refuse it.
-  allowFormRedirectTo(res, upstreamUrl);
   res.redirect(upstreamUrl);
 }
 
-deviceRouter.get("/oauth/device", (req: Request, res: Response) => {
+deviceRouter.get("/oauth/device", async (req: Request, res: Response) => {
   const raw = typeof req.query["user_code"] === "string" ? req.query["user_code"] : "";
   const normalized = normalizeUserCode(raw).slice(0, 8);
-  renderEntry(res, null, normalized ? formatUserCode(normalized) : "");
+  await renderEntry(res, null, normalized ? formatUserCode(normalized) : "");
 });
 
 deviceRouter.post("/oauth/device", async (req: Request, res: Response) => {

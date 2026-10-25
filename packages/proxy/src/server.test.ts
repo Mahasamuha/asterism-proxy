@@ -202,7 +202,7 @@ describe("request id and security headers", () => {
     }
   });
 
-  it("P1 a consent POST that does not redirect to the client keeps form-action 'self' (only the redirecting responses widen it)", async () => {
+  it("P1 a response that is not a consent/device-entry form page keeps the app-wide form-action 'self' (only those pages widen it)", async () => {
     const base = await boot();
     const res = await fetch(`${base}/oauth/consent`, { method: "POST" });
     expect(res.status).toBe(400);

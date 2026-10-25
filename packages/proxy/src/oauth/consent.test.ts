@@ -464,36 +464,54 @@ describe("device flow approve/deny (P0)", () => {
   });
 });
 
-// Chromium (and Safari) enforce form-action on the redirect that follows a form
-// submission, so the POST that answers with a 302 to the client's redirect_uri
-// must name that target in its own Content-Security-Policy (second-pass finding 2).
-describe("form-action on the consent POST's redirect to the client", () => {
+// Chromium (and Safari) check form-action for a form submission, including every
+// redirect in its chain, against the CSP of the document that contains the form.
+// So the consent page itself must allow the client's redirect_uri; the CSP on the
+// POST's 302 plays no part in that decision.
+describe("form-action on the consent page that submits to the client's redirect_uri", () => {
   const csp = (r: { headers: Headers }) => r.headers.get("content-security-policy");
+  const BASE_POLICY = "default-src 'none'; style-src 'self' 'unsafe-inline'; img-src https:; form-action 'self'; frame-ancestors 'none'; base-uri 'none'";
 
   it.each([
     ["https", "https://client.example.test/cb", "https://client.example.test"],
-    ["http loopback (any port)", "http://127.0.0.1:53124/cb", "http://127.0.0.1:53124"],
+    ["http loopback with a port", "http://127.0.0.1:53124/cb", "http://127.0.0.1:53124"],
     ["http localhost", "http://localhost:8080/cb", "http://localhost:8080"],
     ["a private-use scheme", "myapp://auth/callback", "myapp:"],
     ["a private-use scheme without authority", "com.example.app:/cb", "com.example.app:"],
-  ])("approve to %s allows exactly that origin or scheme", async (_n, redirectUri, source) => {
+  ])("GET for a redirect to %s allows exactly that origin or scheme", async (_n, redirectUri, source) => {
     m("authorizationRequest", "findUnique").mockResolvedValue(flowRow({ redirectUri }));
-    const r = await submit();
-    expect(r.status).toBe(302);
+    const r = await consentGet();
+    expect(r.status).toBe(200);
     expect(csp(r)).toContain(`form-action 'self' ${source};`);
     // Everything else in the policy is unchanged.
-    expect(csp(r)!.replace(` ${source}`, "")).toMatch(/^default-src 'none'; style-src 'self' 'unsafe-inline'; img-src https:; form-action 'self'; frame-ancestors 'none'; base-uri 'none'$/);
+    expect(csp(r)!.replace(` ${source}`, "")).toBe(BASE_POLICY);
   });
 
-  it("deny redirects with the same per-response allowance", async () => {
+  it("GET for a device flow does not widen form-action (the POST renders a page, no redirect)", async () => {
+    m("authorizationRequest", "findUnique").mockResolvedValue(deviceFlow());
+    const r = await consentGet();
+    expect(r.status).toBe(200);
+    expect(csp(r)).toBeNull(); // the app-wide 'self' policy applies unchanged
+  });
+
+  it("GET error pages do not widen form-action", async () => {
+    m("authorizationRequest", "findUnique").mockResolvedValue(null);
+    const r = await consentGet();
+    expect(csp(r)).toBeNull();
+  });
+
+  it("the POST's redirects to the client carry no CSP override (the form page's policy decides, not the 302's)", async () => {
     m("authorizationRequest", "findUnique").mockResolvedValue(flowRow({ redirectUri: "http://127.0.0.1:5000/cb" }));
-    const r = await submit({ action: "deny" });
-    expect(r.status).toBe(302);
-    expect(r.headers.get("location")).toContain("error=access_denied");
-    expect(csp(r)).toContain("form-action 'self' http://127.0.0.1:5000;");
+    const approved = await submit();
+    expect(approved.status).toBe(302);
+    expect(csp(approved)).toBeNull();
+    const denied = await submit({ action: "deny" });
+    expect(denied.status).toBe(302);
+    expect(denied.headers.get("location")).toContain("error=access_denied");
+    expect(csp(denied)).toBeNull();
   });
 
-  it("responses that do not redirect to the client carry no override (the app-wide policy applies)", async () => {
+  it("POST responses that do not redirect carry no override either", async () => {
     const wrongCsrf = await submit({}, { csrf: "0".repeat(64) });
     expect(wrongCsrf.status).toBe(400);
     expect(csp(wrongCsrf)).toBeNull();

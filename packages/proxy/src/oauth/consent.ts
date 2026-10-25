@@ -12,7 +12,7 @@ import { isFlowBound } from "../identity/flow-binding.js";
 import { getSessionUserId } from "../identity/session.js";
 import { incrementCounter } from "../metrics.js";
 import { bodyOf, stringField } from "../http-params.js";
-import { allowFormRedirectTo } from "../security-headers.js";
+import { allowFormSubmissionTo } from "../security-headers.js";
 import type { AuthorizationRequest, Prisma } from "../generated/prisma/client.js";
 
 const log = createLogger("consent");
@@ -72,8 +72,6 @@ function redirectWithError(res: Response, authRequest: AuthorizationRequest, err
   // RFC 9207: identify the issuer in every authorization response.
   url.searchParams.set("iss", config.issuerUrl);
   if (authRequest.state) url.searchParams.set("state", authRequest.state);
-  // The consent form's POST is answered with this redirect to the client.
-  allowFormRedirectTo(res, url.toString());
   res.redirect(url.toString());
 }
 
@@ -217,8 +215,6 @@ async function issueAuthCodeAndRedirect(
   url.searchParams.set("code", code);
   url.searchParams.set("iss", config.issuerUrl);
   if (authRequest.state) url.searchParams.set("state", authRequest.state);
-  // The consent form's POST is answered with this redirect to the client.
-  allowFormRedirectTo(res, url.toString());
   res.redirect(url.toString());
 }
 
@@ -304,6 +300,11 @@ consentRouter.get("/oauth/consent", async (req: Request, res: Response) => {
   });
 
   const csrfToken = issueCsrfToken(res, "csrf_consent");
+  // Approve and deny both answer the POST with a redirect to the client's
+  // redirect_uri. The browser checks form-action against this page's CSP, not
+  // the 302's, so this page must allow that target. A device flow's POST
+  // renders a page and never redirects, so it stays at 'self'.
+  if (!isDeviceFlow(authRequest)) allowFormSubmissionTo(res, authRequest.redirectUri);
   res.render("consent", {
     flow: authRequest.handle,
     csrfToken,
