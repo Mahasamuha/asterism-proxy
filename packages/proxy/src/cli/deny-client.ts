@@ -5,8 +5,8 @@
 //   pnpm --filter @mcp-auth/proxy deny-client remove <client_id-or-domain>
 //   pnpm --filter @mcp-auth/proxy deny-client list
 //
-// In the production container (no tsx, no src/), run the compiled build:
-//   docker exec <container> node dist/cli/deny-client.js add <client_id-or-domain>
+// In the production container (no tsx, no src/), use the asterism-cli wrapper:
+//   docker compose exec asterism-proxy asterism-cli deny-client add <client_id-or-domain>
 //
 // A canonical CIMD client_id URL is a `client_id` entry; a bare https origin or
 // a bare hostname is a `domain` entry (matches subdomains, IDN stored as

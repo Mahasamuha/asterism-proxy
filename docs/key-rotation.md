@@ -52,10 +52,10 @@ From a checkout:
 pnpm --filter @mcp-auth/proxy rotate-signing-key
 ```
 
-In the production container (no tsx, no `src/`), run the compiled build:
+In the production container (no tsx, no `src/`), use the `asterism-cli` wrapper around the compiled build:
 
 ```
-docker exec <container> node dist/cli/rotate-signing-key.js
+docker compose exec asterism-proxy asterism-cli rotate-signing-key
 ```
 
 The CLI prints the new and retired key ids (`kid`) and never any key

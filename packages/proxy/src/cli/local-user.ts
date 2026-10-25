@@ -5,12 +5,12 @@
 //   pnpm --filter @mcp-auth/proxy local-user deactivate <username>
 //   pnpm --filter @mcp-auth/proxy local-user list
 //
-// In the production container (no tsx, no src/), run the compiled build:
-//   docker exec -i <container> node dist/cli/local-user.js add <username>
+// In the production container (no tsx, no src/), use the asterism-cli wrapper:
+//   docker compose exec asterism-proxy asterism-cli local-user add <username>
 //
 // `add` reads the password from stdin, never argv (which leaks via ps and shell
 // history). On a TTY it prompts twice with echo off; otherwise (piped, for
-// scripting) it reads one line. Needs -i with docker exec for either to work.
+// scripting, e.g. docker compose exec -T) it reads one line.
 // `deactivate` sets LocalUser.isActive=false and revokes the user's grants and
 // refresh tokens; existing session cookies stop validating immediately (see
 // identity/session.ts). Never prints passwords or hashes.

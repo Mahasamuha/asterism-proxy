@@ -3,8 +3,8 @@
 //
 //   pnpm --filter @mcp-auth/proxy rotate-signing-key
 //
-// In the production container (no tsx, no src/), run the compiled build:
-//   docker exec <container> node dist/cli/rotate-signing-key.js
+// In the production container (no tsx, no src/), use the asterism-cli wrapper:
+//   docker compose exec asterism-proxy asterism-cli rotate-signing-key
 //
 // Generates a new ES256 key, activates it and retires the previous one in a
 // single transaction. The retired key stays in JWKS for the retention window.

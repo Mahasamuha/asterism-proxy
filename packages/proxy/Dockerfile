@@ -38,6 +38,8 @@ COPY --from=builder /app/packages/proxy/prisma ./prisma
 COPY --from=builder /app/packages/proxy/prisma.config.ts ./
 COPY packages/proxy/config ./config
 COPY packages/proxy/docker-entrypoint.sh ./
+# Operator CLIs: docker compose exec asterism-proxy asterism-cli <command> ...
+COPY --chmod=755 packages/proxy/asterism-cli.sh /usr/local/bin/asterism-cli
 RUN chmod +x docker-entrypoint.sh && chown -R node:node /app
 
 USER node

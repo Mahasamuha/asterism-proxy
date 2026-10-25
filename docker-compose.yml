@@ -1,5 +1,5 @@
 services:
-  proxy:
+  asterism-proxy:
     build:
       context: .
       dockerfile: packages/proxy/Dockerfile
