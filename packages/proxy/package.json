@@ -12,6 +12,7 @@
     "local-user": "tsx --env-file-if-exists=../../.env src/cli/local-user.ts",
     "start": "node dist/server.js",
     "typecheck": "tsc --noEmit",
+    "test": "vitest run --root ../.. packages/proxy/",
     "db:generate": "prisma generate",
     "db:migrate": "prisma migrate dev"
   },
@@ -29,7 +30,7 @@
     "pino": "^10.0.0",
     "prisma": "^7.8.0",
     "yaml": "^2.8.1",
-    "zod": "^4.4.3"
+    "zod": "^4.6.6"
   },
   "devDependencies": {
     "@types/cookie-parser": "^1.4.10",

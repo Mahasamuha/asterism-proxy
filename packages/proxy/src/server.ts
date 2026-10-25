@@ -20,16 +20,43 @@ import { grantsRouter } from "./oauth/grants.js";
 import { getOidcConfig } from "./identity/oidc.js";
 import { oidcRouter } from "./identity/oidc-router.js";
 import { localAccountsRouter } from "./identity/local-accounts-router.js";
+import { warnIfSetupUnprotected } from "./identity/local-accounts.js";
 import { opsRouter } from "./ops.js";
 import { pruneExpiredRows } from "./cleanup.js";
+import { CONTENT_SECURITY_POLICY } from "./security-headers.js";
 
 const log = createLogger("server");
 
 export const app: Express = express();
+app.disable("x-powered-by");
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 app.set("view engine", "ejs");
 app.set("views", path.join(__dirname, "views"));
+
+// Request id and security headers come first so they are also set on responses
+// produced by the body parsers' own errors (malformed JSON, oversized body).
+app.use((req: Request, res: Response, next: NextFunction) => {
+  const raw = req.headers["x-request-id"] as string | undefined;
+  // Strip non-printable ASCII and clamp length to prevent log injection.
+  const id = raw ? raw.replace(/[^\x20-\x7E]/g, "").slice(0, 64) || randomUUID() : randomUUID();
+  (req as Request & { id: string }).id = id;
+  res.set("X-Request-Id", id);
+  next();
+});
+
+// The policy (and the per-response widening of form-action for the consent
+// redirect) lives in security-headers.ts.
+const sendHsts = new URL(config.issuerUrl).protocol === "https:";
+
+app.use((_req: Request, res: Response, next: NextFunction) => {
+  res.set("X-Content-Type-Options", "nosniff");
+  res.set("X-Frame-Options", "DENY");
+  res.set("Referrer-Policy", "no-referrer");
+  res.set("Content-Security-Policy", CONTENT_SECURITY_POLICY);
+  if (sendHsts) res.set("Strict-Transport-Security", "max-age=31536000");
+  next();
+});
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
@@ -43,21 +70,6 @@ if (config.trustProxy !== undefined) {
 // COOKIE_SECRET (required, validated in config.ts) signs the session and CSRF
 // cookies. There is deliberately no ephemeral fallback.
 app.use(cookieParser(config.cookieSecret));
-
-app.use((req: Request, res: Response, next: NextFunction) => {
-  const raw = req.headers["x-request-id"] as string | undefined;
-  // Strip non-printable ASCII and clamp length to prevent log injection.
-  const id = raw ? raw.replace(/[^\x20-\x7E]/g, "").slice(0, 64) || randomUUID() : randomUUID();
-  (req as Request & { id: string }).id = id;
-  res.set("X-Request-Id", id);
-  next();
-});
-
-app.use((_req: Request, res: Response, next: NextFunction) => {
-  res.set("X-Content-Type-Options", "nosniff");
-  res.set("X-Frame-Options", "DENY");
-  next();
-});
 
 app.get("/health", (_req: Request, res: Response) => {
   res.status(200).json({ status: "ok" });
@@ -82,18 +94,25 @@ if (config.enableLocalAccounts) {
   app.use(localAccountsRouter);
 }
 
+// Unmatched routes. Express's built-in final handler would answer these itself
+// and overwrite our Content-Security-Policy with its own, so answer here.
+app.use((_req: Request, res: Response) => {
+  res.status(404).type("text/plain").send("Not Found");
+});
+
 // Centralized error boundary (§10): route handlers throw, Express 5 forwards
 // rejected async handlers here automatically. Never leak internals.
 app.use((err: unknown, req: Request, res: Response, _next: NextFunction) => {
   log.error({ err, path: req.path }, "Unhandled request error");
   if (res.headersSent) return;
   // body-parser (malformed JSON, oversized body, bad charset...) and other
-  // http-errors carry a 4xx status: those are the client's fault. Anything else
+  // http-errors carry a 4xx status: those are the client's fault, and the status
+  // (413 too large, 415 bad charset...) is kept. Anything else
   // is ours; its details are logged above and never returned.
   const e = err as { status?: unknown; statusCode?: unknown } | null;
   const status = typeof e?.status === "number" ? e.status : typeof e?.statusCode === "number" ? e.statusCode : 0;
   if (status >= 400 && status <= 499) {
-    res.status(400).json({ error: "invalid_request", error_description: "The request could not be processed" });
+    res.status(status).json({ error: "invalid_request", error_description: "The request could not be processed" });
     return;
   }
   res.status(500).json({ error: "server_error", error_description: "An internal error occurred" });
@@ -122,6 +141,10 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   // DB-level lock instead.
   const signingKey = await ensureActiveSigningKey();
   log.info({ kid: signingKey.kid }, "Active signing key ready");
+
+  if (config.enableLocalAccounts) {
+    await warnIfSetupUnprotected().catch((err) => log.warn({ err }, "Could not check whether /setup is exposed"));
+  }
 
   server.listen(config.port, () => {
     log.info({ port: config.port }, "Proxy listening");

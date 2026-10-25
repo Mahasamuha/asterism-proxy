@@ -95,11 +95,12 @@ const CLAIM_KEYS_TO_DROP = ["iat", "exp", "nbf", "nonce", "at_hash", "c_hash", "
  * Completes an upstream OIDC callback: finds the AuthorizationRequest by the
  * `state` the provider echoed back, exchanges the code (validating signature,
  * iss, aud, exp, and nonce via openid-client's built-in ID token checks),
- * resolves or creates the proxy User keyed on (oidcSub, oidcIssuer), and writes
+ * checks the flow is bound to the calling browser (`isBound`), resolves or creates the proxy User keyed on (oidcSub, oidcIssuer), and writes
  * that user id back onto the AuthorizationRequest as `subject`.
  */
 export async function handleUpstreamCallback(
-  requestUrl: string
+  requestUrl: string,
+  isBound: (handle: string) => boolean
 ): Promise<{ authRequestHandle: string; userId: string }> {
   const oidcConfig = await getOidcConfig();
   const currentUrl = new URL(requestUrl);
@@ -115,6 +116,12 @@ export async function handleUpstreamCallback(
   if (!authRequest.upstreamNonce || !authRequest.upstreamVerifier) {
     throw new Error("Authorization request was not started via startUpstreamAuth");
   }
+
+  // The callback must arrive in the browser that started the flow (flow-binding
+  // cookie). Checked before the state is consumed or the code exchanged, so a
+  // callback URL replayed or planted in another browser (login CSRF) neither
+  // logs that browser in as the attacker's identity nor burns the real flow.
+  if (!isBound(authRequest.handle)) throw new Error("Callback does not belong to this browser");
 
   // Single-use: atomically consume the upstream state before exchanging the code,
   // so a replayed callback (or two racing ones) can't reach the exchange twice.

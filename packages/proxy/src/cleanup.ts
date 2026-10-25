@@ -1,4 +1,5 @@
 import { prisma } from "./db.js";
+import { pruneLoginFailures } from "./identity/local-accounts.js";
 import { createLogger } from "./logger.js";
 
 const log = createLogger("cleanup");
@@ -20,6 +21,10 @@ export async function pruneExpiredRows(): Promise<void> {
     // ever prune CIMD's cached documents.
     prisma.oauthClient.deleteMany({ where: { expiresAt: { lt: now } } }),
   ]);
+
+  // Throttle rows past their 15-minute window (they stop counting on their own;
+  // this just keeps the table small).
+  await pruneLoginFailures();
 
   const total =
     authorizationRequests.count + authCodes.count + deviceCodes.count + refreshTokens.count + oauthClients.count;

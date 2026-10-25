@@ -12,6 +12,8 @@ function buildMetadata(): Record<string, unknown> {
     authorization_endpoint: `${issuer}/oauth/authorize`,
     token_endpoint: `${issuer}/oauth/token`,
     response_types_supported: ["code"],
+    // RFC 9207: authorization responses carry an `iss` parameter.
+    authorization_response_iss_parameter_supported: true,
 
     // RECOMMENDED / relied on by MCP clients.
     jwks_uri: `${issuer}/.well-known/jwks.json`,

@@ -14,6 +14,7 @@ export type SafeFetchRejectReason =
   | "dns_resolution_failed"
   | "blocked_address"
   | "rate_limited"
+  | "busy"
   | "timeout"
   | "response_too_large"
   | "too_many_redirects"
@@ -70,7 +71,7 @@ const SPECIAL_USE_IPV6: Array<[string, number]> = [
   // ::/96 covers "::", "::1" and the deprecated IPv4-compatible form (e.g. ::7f00:1).
   ["::", 96], ["64:ff9b::", 96], ["64:ff9b:1::", 48],
   ["100::", 64], ["2001::", 23], ["2001:db8::", 32], ["2002::", 16], ["3fff::", 20],
-  ["5f00::", 16], ["fc00::", 7], ["fe80::", 10], ["ff00::", 8],
+  ["5f00::", 16], ["fc00::", 7], ["fe80::", 10], ["fec0::", 10], ["ff00::", 8],
 ];
 
 const blockList = new BlockList();
@@ -104,7 +105,9 @@ const RATE_LIMIT_MAX = 10;
 const RATE_LIMIT_WINDOW_MS = 60 * 1000;
 const rateLimitWindows = new Map<string, { count: number; windowStart: number }>();
 
-function checkRateLimit(hostname: string): void {
+function checkRateLimit(rawHostname: string): void {
+  // Canonical key: "Example.com." and "example.com" are the same host.
+  const hostname = rawHostname.toLowerCase().replace(/\.+$/, "");
   const now = Date.now();
   const entry = rateLimitWindows.get(hostname);
   if (!entry || now - entry.windowStart >= RATE_LIMIT_WINDOW_MS) {
@@ -169,12 +172,37 @@ function stripBrackets(hostname: string): string {
   return hostname;
 }
 
-async function resolveAndValidate(rawHostname: string, isHttp: boolean): Promise<ResolvedAddress> {
+const DNS_TIMED_OUT = Symbol("dns_timed_out");
+
+// dns.promises.lookup cannot be aborted (it occupies a libuv thread until
+// getaddrinfo returns), so race it against the call's deadline instead. The
+// abandoned lookup finishes in the background; the concurrency cap in
+// safeFetchJson bounds how many can pile up.
+async function lookupWithDeadline(hostname: string, signal: AbortSignal): Promise<dns.LookupAddress[] | typeof DNS_TIMED_OUT> {
+  if (signal.aborted) return DNS_TIMED_OUT;
+  const lookup = dns.promises.lookup(hostname, { all: true, verbatim: true });
+  lookup.catch(() => {}); // a late failure after the deadline must not be an unhandled rejection
+  let onAbort: (() => void) | undefined;
+  const deadline = new Promise<typeof DNS_TIMED_OUT>((resolve) => {
+    onAbort = () => resolve(DNS_TIMED_OUT);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+  try {
+    return await Promise.race([lookup, deadline]);
+  } finally {
+    if (onAbort) signal.removeEventListener("abort", onAbort);
+  }
+}
+
+async function resolveAndValidate(rawHostname: string, isHttp: boolean, signal: AbortSignal): Promise<ResolvedAddress> {
   const hostname = stripBrackets(rawHostname);
   let records: dns.LookupAddress[];
   try {
-    records = await dns.promises.lookup(hostname, { all: true, verbatim: true });
+    const result = await lookupWithDeadline(hostname, signal);
+    if (result === DNS_TIMED_OUT) reject("timeout", `DNS resolution timed out for ${hostname}`);
+    records = result;
   } catch (err) {
+    if (err instanceof SafeFetchError) throw err;
     reject("dns_resolution_failed", `DNS resolution failed for ${hostname}: ${(err as Error).message}`);
   }
 
@@ -328,7 +356,24 @@ const DEFAULT_MAX_BYTES = 16 * 1024;
 const DEFAULT_TIMEOUT_MS = 3000;
 const DEFAULT_MAX_REDIRECTS = 1;
 
+// Global cap on in-flight calls. Hostnames are attacker-influenced and DNS
+// lookups hold libuv threadpool threads, so excess calls fail fast instead of queuing.
+export const MAX_CONCURRENT_FETCHES = 8;
+let inFlight = 0;
+
 export async function safeFetchJson(url: string, options: SafeFetchOptions = {}): Promise<unknown> {
+  if (inFlight >= MAX_CONCURRENT_FETCHES) {
+    reject("busy", `Too many concurrent metadata fetches (${MAX_CONCURRENT_FETCHES})`);
+  }
+  inFlight++;
+  try {
+    return await safeFetchJsonInner(url, options);
+  } finally {
+    inFlight--;
+  }
+}
+
+async function safeFetchJsonInner(url: string, options: SafeFetchOptions): Promise<unknown> {
   const maxBytes = options.maxBytes ?? DEFAULT_MAX_BYTES;
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const maxRedirects = options.maxRedirects ?? DEFAULT_MAX_REDIRECTS;
@@ -341,7 +386,7 @@ export async function safeFetchJson(url: string, options: SafeFetchOptions = {})
   for (let redirectCount = 0; ; redirectCount++) {
     const parsed = parseAndValidateScheme(currentUrl);
     checkRateLimit(parsed.hostname);
-    const resolved = await resolveAndValidate(parsed.hostname, parsed.protocol === "http:");
+    const resolved = await resolveAndValidate(parsed.hostname, parsed.protocol === "http:", signal);
 
     let response: RawResponse;
     try {

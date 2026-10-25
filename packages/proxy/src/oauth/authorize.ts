@@ -7,6 +7,8 @@ import { createLogger } from "../logger.js";
 import { isRegisteredRedirectUri, resolveClient } from "../clients/cimd.js";
 import { isRegisteredResource, lookupResourceServer } from "../resource-registry.js";
 import { startUpstreamAuth } from "../identity/oidc.js";
+import { bindFlow } from "../identity/flow-binding.js";
+import { rowCreationRetryAfter } from "../rate-limit.js";
 
 const log = createLogger("authorize");
 
@@ -16,8 +18,8 @@ const AUTHORIZATION_REQUEST_TTL_MS = 10 * 60 * 1000;
 const MAX_STATE_LENGTH = 512;
 const CODE_CHALLENGE_PATTERN = /^[A-Za-z0-9_-]{43,128}$/;
 
-function renderErrorPage(res: Response, message: string): void {
-  res.status(400).send(`<!DOCTYPE html>
+function renderErrorPage(res: Response, message: string, status = 400): void {
+  res.status(status).send(`<!DOCTYPE html>
 <html lang="en">
 <head><meta charset="utf-8"><title>Authorization Error</title></head>
 <body>
@@ -25,6 +27,18 @@ function renderErrorPage(res: Response, message: string): void {
   <p>${escHtml(message)}</p>
 </body>
 </html>`);
+}
+
+/** Forms a requested redirect_uri must not take, judged on the raw string
+ * because URL parsing hides both: userinfo ("http://evil@127.0.0.1/cb" looks
+ * like one host and is another to a human), and dot-segments, which URL
+ * normalisation silently collapses so "/x/../cb" would match a registered
+ * "/cb" (also encoded as %2e, with encoded or backslash separators). */
+function hasAmbiguousRedirectForm(uri: string): boolean {
+  const authority = /^[a-z][a-z0-9+.-]*:\/\/([^/?#\\]*)/i.exec(uri)?.[1];
+  if (authority !== undefined && authority.includes("@")) return true;
+  const path = uri.replace(/[?#].*$/s, "").replace(/%2e/gi, ".").replace(/%(?:2f|5c)/gi, "/");
+  return path.split(/[/\\]/).some((segment) => segment === "." || segment === "..");
 }
 
 function singleQueryValue(value: unknown): string | undefined {
@@ -54,6 +68,26 @@ authorizeRouter.get("/oauth/authorize", async (req: Request, res: Response) => {
   // The requested value, not the registered one, is what's stored and later
   // compared exactly at the token endpoint. ----
   const redirectUri = singleQueryValue(query["redirect_uri"]);
+  // "urn:mcp-auth:" values are the inert placeholders internal flows (self-login,
+  // device) store in AuthorizationRequest.redirectUri. Flow type is decided from
+  // the flowType column, not this value, but a client has no business registering
+  // one either, so refuse it outright (defence in depth).
+  if (redirectUri?.startsWith("urn:mcp-auth:")) {
+    log.warn({ clientId, redirectUri }, "Authorization request with a reserved redirect_uri");
+    renderErrorPage(res, "redirect_uri is missing or not registered for this client.");
+    return;
+  }
+  // RFC 6749 §3.1.2: the redirect URI MUST NOT include a fragment.
+  if (redirectUri?.includes("#")) {
+    log.warn({ clientId, redirectUri }, "Authorization request with a redirect_uri containing a fragment");
+    renderErrorPage(res, "redirect_uri must not contain a fragment.");
+    return;
+  }
+  if (redirectUri !== undefined && hasAmbiguousRedirectForm(redirectUri)) {
+    log.warn({ clientId, redirectUri }, "Authorization request with a redirect_uri containing userinfo or a dot-segment");
+    renderErrorPage(res, "redirect_uri is missing or not registered for this client.");
+    return;
+  }
   const metadata = client.metadata as { redirect_uris?: unknown } | null;
   const registeredRedirectUris = Array.isArray(metadata?.redirect_uris) ? (metadata.redirect_uris as unknown[]) : [];
   if (!redirectUri || !isRegisteredRedirectUri(registeredRedirectUris.filter((u): u is string => typeof u === "string"), redirectUri)) {
@@ -73,6 +107,8 @@ authorizeRouter.get("/oauth/authorize", async (req: Request, res: Response) => {
   function fail(error: string, errorDescription?: string): void {
     const target = new URL(redirectUri!);
     target.searchParams.set("error", error);
+    // RFC 9207: identify the issuer in every authorization response (mix-up defence).
+    target.searchParams.set("iss", config.issuerUrl);
     if (errorDescription) target.searchParams.set("error_description", errorDescription);
     if (state && !stateTooLong) target.searchParams.set("state", state);
     res.redirect(target.toString());
@@ -126,10 +162,21 @@ authorizeRouter.get("/oauth/authorize", async (req: Request, res: Response) => {
     return;
   }
 
+  // Everything above is validation; from here the request inserts a row, which
+  // an unauthenticated caller could otherwise do without limit.
+  const retryAfter = rowCreationRetryAfter(req);
+  if (retryAfter > 0) {
+    log.warn({ clientId, ip: req.ip }, "Authorization request rate limit exceeded");
+    res.set("Retry-After", String(retryAfter));
+    renderErrorPage(res, "Too many authorization requests from this address. Please wait a minute and try again.", 429);
+    return;
+  }
+
   const handle = randomBytes(24).toString("hex");
   await prisma.authorizationRequest.create({
     data: {
       handle,
+      flowType: "oauth",
       clientId,
       resource,
       scopes: requestedScopes,
@@ -140,12 +187,15 @@ authorizeRouter.get("/oauth/authorize", async (req: Request, res: Response) => {
       expiresAt: new Date(Date.now() + AUTHORIZATION_REQUEST_TTL_MS),
     },
   });
+  // Bind the flow to this browser: later steps (login, callback, consent) must
+  // present the same cookie.
+  bindFlow(req, res, handle);
 
   // Dispatch to the identity provider. OIDC is the default (§6); local
-  // accounts are used when OIDC is disabled, or when explicitly requested via
-  // ?idp=local (only meaningful when local accounts are actually enabled).
-  const wantsLocal = singleQueryValue(query["idp"]) === "local";
-  if (config.enableLocalAccounts && (wantsLocal || !config.enableOidc)) {
+  // accounts are used only when OIDC is disabled. A request parameter must not
+  // be able to downgrade an OIDC deployment to password login (the former
+  // ?idp=local override), so it is no longer read.
+  if (config.enableLocalAccounts && !config.enableOidc) {
     res.redirect(`/auth/login?flow=${encodeURIComponent(handle)}`);
     return;
   }

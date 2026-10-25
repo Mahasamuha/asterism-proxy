@@ -6,9 +6,13 @@ import { createLogger } from "../logger.js";
 import { resolveClient } from "../clients/cimd.js";
 import { lookupResourceServer } from "../resource-registry.js";
 import { issueCsrfToken, verifyCsrfToken } from "../identity/csrf.js";
-import { DEVICE_FLOW_REDIRECT_URI_SENTINEL } from "./device.js";
+import { config } from "../config.js";
 import { isSelfLogin } from "../identity/self-login.js";
+import { isFlowBound } from "../identity/flow-binding.js";
+import { getSessionUserId } from "../identity/session.js";
 import { incrementCounter } from "../metrics.js";
+import { bodyOf, stringField } from "../http-params.js";
+import { allowFormRedirectTo } from "../security-headers.js";
 import type { AuthorizationRequest, Prisma } from "../generated/prisma/client.js";
 
 const log = createLogger("consent");
@@ -28,9 +32,12 @@ function renderErrorPage(res: Response, message: string): void {
 </html>`);
 }
 
-/** A flow is only usable here once T6/T7 has written `subject` onto it —
- * that's the proof of authentication for this step, the same way the whole
- * flow avoids a separate session cookie. */
+const WRONG_BROWSER_MESSAGE = "This authorization request must be completed in the browser that started it. Please start again from the application.";
+
+/** A flow is only usable here once T6/T7 has written `subject` onto it, and
+ * only from the browser that started it (flow-binding cookie) and that is
+ * signed in as `subject` (session cookie). `subject` alone is not enough: the
+ * handle travels in URLs, so it is a bearer unless tied to a browser. */
 async function loadFlow(handle: string | undefined): Promise<(AuthorizationRequest & { subject: string }) | null> {
   if (!handle) return null;
   const authRequest = await prisma.authorizationRequest.findUnique({ where: { handle } });
@@ -44,22 +51,48 @@ async function loadFlow(handle: string | undefined): Promise<(AuthorizationReque
   return authRequest as AuthorizationRequest & { subject: string };
 }
 
+/** The browser-side checks for consent GET and POST. Renders the error page
+ * and returns false if either fails. */
+async function requireFlowBrowser(req: Request, res: Response, authRequest: FlowRequest): Promise<boolean> {
+  if (!isFlowBound(req, authRequest.handle)) {
+    renderErrorPage(res, WRONG_BROWSER_MESSAGE);
+    return false;
+  }
+  const sessionUserId = await getSessionUserId(req);
+  if (sessionUserId !== authRequest.subject) {
+    renderErrorPage(res, WRONG_BROWSER_MESSAGE);
+    return false;
+  }
+  return true;
+}
+
 function redirectWithError(res: Response, authRequest: AuthorizationRequest, error: string): void {
   const url = new URL(authRequest.redirectUri);
   url.searchParams.set("error", error);
+  // RFC 9207: identify the issuer in every authorization response.
+  url.searchParams.set("iss", config.issuerUrl);
   if (authRequest.state) url.searchParams.set("state", authRequest.state);
+  // The consent form's POST is answered with this redirect to the client.
+  allowFormRedirectTo(res, url.toString());
   res.redirect(url.toString());
 }
 
 /** Device flow (T17) reuses this whole login+consent chain, but its
  * completion is different: there's no client redirect_uri to send a code
  * to — the browser session ends here, and the polling device picks the
- * result up separately by polling /oauth/token. Recognized by the
- * redirectUri sentinel T17's device.ts stamps on the AuthorizationRequest;
+ * result up separately by polling /oauth/token. Recognized by the flowType
+ * column device.ts stamps on the AuthorizationRequest (never by redirectUri);
  * the device_code itself is found via `state`, which device.ts stashes the
  * normalized user_code in for exactly this purpose. */
-function isDeviceFlow(authRequest: AuthorizationRequest): boolean {
-  return authRequest.redirectUri === DEVICE_FLOW_REDIRECT_URI_SENTINEL;
+function isDeviceFlow(authRequest: Pick<AuthorizationRequest, "flowType">): boolean {
+  return authRequest.flowType === "device";
+}
+
+/** Scopes the registry marks shortLived (e.g. admin) are one-shot: they may be
+ * issued in a code/access token, but are never stored on the Grant, and a
+ * request containing one is always put in front of the user. */
+function isShortLivedScope(resource: string, scope: string): boolean {
+  return lookupResourceServer(resource)?.scopes.find((s) => s.name === scope)?.shortLived === true;
 }
 
 function renderDeviceDonePage(res: Response, message: string): void {
@@ -71,6 +104,15 @@ function renderDeviceDonePage(res: Response, message: string): void {
   <p>You can close this tab.</p>
 </body>
 </html>`);
+}
+
+function httpsUrlOrNull(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  try {
+    return new URL(value).protocol === "https:" ? value : null;
+  } catch {
+    return null;
+  }
 }
 
 /** Matches Constellation's isLoopbackHost; URL.hostname keeps IPv6 brackets. */
@@ -110,7 +152,9 @@ async function completeDeviceFlow(
   const outcome = await prisma.$transaction(async (tx) => {
     if (!(await consumeRequest(tx, authRequest.handle))) return "consumed" as const;
     const result = await tx.deviceCode.updateMany({
-      where: { userCode, status: "pending" },
+      // Scoped to this flow's own client and to unexpired codes: the user code
+      // is only a lookup key, and a stale or foreign code must not be approved.
+      where: { userCode, status: "pending", clientId: authRequest.clientId, expiresAt: { gt: new Date() } },
       data: approved ? { status: "approved", userId: authRequest.subject } : { status: "denied" },
     });
     if (result.count === 0) return "stale" as const;
@@ -171,7 +215,10 @@ async function issueAuthCodeAndRedirect(
 
   const url = new URL(authRequest.redirectUri);
   url.searchParams.set("code", code);
+  url.searchParams.set("iss", config.issuerUrl);
   if (authRequest.state) url.searchParams.set("state", authRequest.state);
+  // The consent form's POST is answered with this redirect to the client.
+  allowFormRedirectTo(res, url.toString());
   res.redirect(url.toString());
 }
 
@@ -199,6 +246,7 @@ consentRouter.get("/oauth/consent", async (req: Request, res: Response) => {
     renderErrorPage(res, "This authorization request is invalid or has expired.");
     return;
   }
+  if (!(await requireFlowBrowser(req, res, authRequest))) return;
 
   const client = await resolveClient(authRequest.clientId);
   if (!client) {
@@ -212,23 +260,16 @@ consentRouter.get("/oauth/consent", async (req: Request, res: Response) => {
     return;
   }
 
-  // Consent for one (client, resource) pair never satisfies a request for a
-  // different resource — this lookup is keyed on resource, so a grant for
-  // Constellation simply doesn't match a request naming another MCP server.
+  // Consent is never skipped, whatever grant exists. Silent SSO plus an
+  // auto-approve would let any local process that opens an authorize URL in the
+  // user's browser (loopback or custom-scheme redirect, its own PKCE) get
+  // tokens with no prompt. A covering grant only changes the wording below.
   const existingGrant = await findLiveGrant(authRequest.subject, authRequest.clientId, authRequest.resource);
-  if (existingGrant && authRequest.scopes.every((s) => existingGrant.scopes.includes(s))) {
-    incrementCounter("consent_total", { outcome: "approved" });
-    if (isDeviceFlow(authRequest)) {
-      await completeDeviceFlow(res, authRequest, true);
-    } else {
-      await issueAuthCodeAndRedirect(res, authRequest, async () => existingGrant.id);
-    }
-    return;
-  }
+  const hasGrant = existingGrant !== null && authRequest.scopes.every((s) => existingGrant.scopes.includes(s));
 
   const metadata = client.metadata as Record<string, unknown>;
   const clientName = typeof metadata["client_name"] === "string" ? metadata["client_name"] : authRequest.clientId;
-  const logoUri = typeof metadata["logo_uri"] === "string" ? metadata["logo_uri"] : null;
+  const logoUri = httpsUrlOrNull(metadata["logo_uri"]);
   const clientDomain = (() => {
     try {
       return new URL(authRequest.clientId).hostname;
@@ -243,13 +284,21 @@ consentRouter.get("/oauth/consent", async (req: Request, res: Response) => {
   let isLoopbackRedirect = false;
   if (!isDeviceFlow(authRequest)) {
     const redirect = new URL(authRequest.redirectUri);
-    // A private-use scheme URI (com.example.app:/cb) has no host; show the
-    // scheme instead so the user still sees where the code is going.
-    redirectHost = redirect.hostname || redirect.protocol;
+    // A private-use scheme URI (myapp://host/cb, com.example.app:/cb) must show
+    // its scheme as well as its host: "anthropic.com" alone would look like a
+    // web address. Web redirects keep the plain hostname.
+    if (redirect.protocol === "https:" || redirect.protocol === "http:") {
+      redirectHost = redirect.hostname;
+    } else {
+      redirectHost = redirect.host ? `${redirect.protocol}//${redirect.host}` : `${redirect.protocol}${redirect.pathname}`;
+    }
     isLoopbackRedirect = isLoopbackHost(redirect.hostname);
   }
 
   const scopes = authRequest.scopes.map((name) => {
+    if (name === "offline_access") {
+      return { name, description: "Stay connected for up to 30 days without asking again (until you revoke it at /grants)" };
+    }
     const scope = resourceServer.scopes.find((s) => s.name === name);
     return { name, description: scope?.description ?? name };
   });
@@ -266,23 +315,30 @@ consentRouter.get("/oauth/consent", async (req: Request, res: Response) => {
     resourceServerName: resourceServer.name,
     scopes,
     unverified: client.trustLevel === "unverified",
+    // The name, logo and domain shown come from the client's own metadata
+    // document; only a client on the trust policy's allowlist is vouched for.
+    claimedBy: client.trustLevel === "unverified" ? clientDomain : null,
+    isDevice: isDeviceFlow(authRequest),
+    hasGrant,
+    userCode: isDeviceFlow(authRequest) && authRequest.state ? `${authRequest.state.slice(0, 4)}-${authRequest.state.slice(4)}` : null,
   });
 });
 
 consentRouter.post("/oauth/consent", async (req: Request, res: Response) => {
-  const body = req.body as Record<string, string>;
-  const authRequest = await loadFlow(body["flow"]);
+  const body = bodyOf(req);
+  const authRequest = await loadFlow(stringField(body, "flow"));
   if (!authRequest) {
     renderErrorPage(res, "This authorization request is invalid or has expired.");
     return;
   }
+  if (!(await requireFlowBrowser(req, res, authRequest))) return;
 
   if (!verifyCsrfToken(req, "csrf_consent")) {
     renderErrorPage(res, "Invalid or missing CSRF token. Please reload and try again.");
     return;
   }
 
-  if (body["action"] !== "approve") {
+  if (stringField(body, "action") !== "approve") {
     incrementCounter("consent_total", { outcome: "denied" });
     if (isDeviceFlow(authRequest)) {
       await completeDeviceFlow(res, authRequest, false);
@@ -314,7 +370,10 @@ consentRouter.post("/oauth/consent", async (req: Request, res: Response) => {
       where: { userId_clientId_resource: { userId: authRequest.subject, clientId: authRequest.clientId, resource: authRequest.resource } },
     });
     const live = existing && existing.revokedAt === null ? existing : null;
-    const mergedScopes = Array.from(new Set([...(live?.scopes ?? []), ...authRequest.scopes]));
+    // shortLived scopes are dropped from both sides, so a grant never carries
+    // one (including any persisted before this rule existed).
+    const persistable = (scope: string) => !isShortLivedScope(authRequest.resource, scope);
+    const mergedScopes = Array.from(new Set([...(live?.scopes ?? []), ...authRequest.scopes].filter(persistable)));
     const grant = await tx.grant.upsert({
       where: { userId_clientId_resource: { userId: authRequest.subject, clientId: authRequest.clientId, resource: authRequest.resource } },
       create: { userId: authRequest.subject, clientId: authRequest.clientId, resource: authRequest.resource, scopes: mergedScopes },

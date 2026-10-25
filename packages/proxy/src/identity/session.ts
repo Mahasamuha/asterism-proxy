@@ -6,15 +6,20 @@ const SESSION_COOKIE = "session";
 const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 // No Session table exists in §4's schema — deliberately, per §6's "deliberately
-// minimal" local-account scope. The signed cookie carries `${userId}.${issuedAtMs}`;
-// its authenticity comes from cookie-parser's HMAC signature, and its age is
-// checked against SESSION_TTL_MS on every read (not just by the browser's maxAge).
-// There is still a server-side check: getSessionUserId loads the user on each
-// request, so deactivating a User or LocalUser (e.g. via the local-user CLI)
-// invalidates its existing cookies immediately. Logging out just means the
-// browser stops sending a valid cookie; there is no per-session revocation.
-export function setSession(res: Response, userId: string): void {
-  res.cookie(SESSION_COOKIE, `${userId}.${Date.now()}`, {
+// minimal" local-account scope. The signed cookie carries
+// `${userId}.${sessionEpoch}.${issuedAtMs}`; its authenticity comes from
+// cookie-parser's HMAC signature, and its age is checked against SESSION_TTL_MS
+// on every read (not just by the browser's maxAge).
+//
+// Revocation: User.sessionEpoch is a counter embedded in the cookie. It is
+// bumped on logout, on password change and when an account is deactivated, and
+// getSessionUserId rejects any cookie whose epoch no longer matches, so a copied
+// cookie dies with the session it was copied from instead of living out its 7
+// days. The epoch is per user, so logging out ends the user's sessions in every
+// browser. getSessionUserId also loads the user on each request, so
+// deactivating a User or LocalUser invalidates its cookies immediately.
+export function setSession(res: Response, userId: string, sessionEpoch: number): void {
+  res.cookie(SESSION_COOKIE, `${userId}.${sessionEpoch}.${Date.now()}`, {
     httpOnly: true,
     secure: config.issuerUrl.startsWith("https:"),
     sameSite: "lax",
@@ -23,20 +28,39 @@ export function setSession(res: Response, userId: string): void {
   });
 }
 
+/** Signs `userId` in at its current session epoch (a fresh login). Returns that epoch. */
+export async function startSession(res: Response, userId: string): Promise<number> {
+  const user = await prisma.user.findUniqueOrThrow({ where: { id: userId }, select: { sessionEpoch: true } });
+  setSession(res, userId, user.sessionEpoch);
+  return user.sessionEpoch;
+}
+
+/** Ends every session of `userId` by bumping its epoch. Returns the new epoch. */
+export async function revokeSessions(userId: string): Promise<number> {
+  const user = await prisma.user.update({ where: { id: userId }, data: { sessionEpoch: { increment: 1 } }, select: { sessionEpoch: true } });
+  return user.sessionEpoch;
+}
+
 export function clearSession(res: Response): void {
   res.clearCookie(SESSION_COOKIE);
 }
 
 /** Returns the user id for a valid, unexpired session whose account is still
- * active, else null. Old bare-userId cookies fail the parse and are rejected. */
+ * active and whose epoch still matches, else null. Cookies in an older format
+ * (bare id, or id.issuedAt without an epoch) fail the parse and are rejected. */
 export async function getSessionUserId(req: Request): Promise<string | null> {
   const value = (req.signedCookies as Record<string, string | false | undefined>)[SESSION_COOKIE];
   if (typeof value !== "string") return null;
 
   const dot = value.lastIndexOf(".");
   if (dot <= 0) return null;
-  const userId = value.slice(0, dot);
   const issuedAtStr = value.slice(dot + 1);
+  const rest = value.slice(0, dot);
+  const epochDot = rest.lastIndexOf(".");
+  if (epochDot <= 0) return null;
+  const userId = rest.slice(0, epochDot);
+  const epochStr = rest.slice(epochDot + 1);
+  if (!/^\d{1,9}$/.test(epochStr)) return null;
   if (!/^\d{1,15}$/.test(issuedAtStr)) return null;
   const age = Date.now() - Number(issuedAtStr);
   // A negative age means an issuedAt in the future; the signature makes that
@@ -46,7 +70,7 @@ export async function getSessionUserId(req: Request): Promise<string | null> {
   // One query: the User must not be deactivated, and if it has a LocalUser row
   // that must be active (OIDC users have none).
   const user = await prisma.user.findFirst({
-    where: { id: userId, deactivatedAt: null, OR: [{ localUser: null }, { localUser: { isActive: true } }] },
+    where: { id: userId, sessionEpoch: Number(epochStr), deactivatedAt: null, OR: [{ localUser: null }, { localUser: { isActive: true } }] },
     select: { id: true },
   });
   return user ? user.id : null;

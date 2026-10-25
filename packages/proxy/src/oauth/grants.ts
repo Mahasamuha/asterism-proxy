@@ -7,10 +7,12 @@ import { createLogger } from "../logger.js";
 import { resolveClient } from "../clients/cimd.js";
 import { authenticateConfidentialClient } from "./client-assertion.js";
 import { lookupResourceServer } from "../resource-registry.js";
-import { getSessionUserId, clearSession } from "../identity/session.js";
+import { getSessionUserId, clearSession, revokeSessions } from "../identity/session.js";
 import { issueCsrfToken, verifyCsrfToken } from "../identity/csrf.js";
 import { createSelfLoginRequest } from "../identity/self-login.js";
 import { startUpstreamAuth } from "../identity/oidc.js";
+import { bodyOf, stringField } from "../http-params.js";
+import { limitOauthEndpoint, rowCreationRetryAfter } from "../rate-limit.js";
 
 const log = createLogger("grants");
 
@@ -31,7 +33,15 @@ async function requireSession(req: Request, res: Response, returnTo: string): Pr
   const userId = await getSessionUserId(req);
   if (userId) return userId;
 
-  const handle = await createSelfLoginRequest(returnTo);
+  // Each unauthenticated visit inserts a self-login row, so it is rate limited.
+  const retryAfter = rowCreationRetryAfter(req);
+  if (retryAfter > 0) {
+    log.warn({ ip: req.ip }, "Self-login request rate limit exceeded");
+    res.set("Retry-After", String(retryAfter));
+    renderErrorPage(res, 429, "Too many sign-in requests from this address. Please wait a minute and try again.");
+    return null;
+  }
+  const handle = await createSelfLoginRequest(returnTo, req, res);
   if (config.enableLocalAccounts && !config.enableOidc) {
     res.redirect(`/auth/login?flow=${encodeURIComponent(handle)}`);
     return null;
@@ -48,8 +58,19 @@ async function requireSession(req: Request, res: Response, returnTo: string): Pr
 // is on.
 // ---------------------------------------------------------------------------
 
-grantsRouter.post("/auth/logout", (_req: Request, res: Response) => {
+// Logout is state-changing, so it needs the signed CSRF token issued with the
+// page that shows the button (/grants or /auth/account); otherwise any site
+// could sign a user out with a cross-site form post. A valid session's epoch is
+// bumped, which ends that user's sessions everywhere (a copied cookie included).
+grantsRouter.post("/auth/logout", async (req: Request, res: Response) => {
+  if (!verifyCsrfToken(req, "csrf_logout")) {
+    renderErrorPage(res, 403, "Invalid or missing CSRF token. Please reload the page and try again.");
+    return;
+  }
+  const userId = await getSessionUserId(req);
+  if (userId) await revokeSessions(userId);
   clearSession(res);
+  res.clearCookie("csrf_logout");
   res.send(`<!DOCTYPE html>
 <html lang="en">
 <head><meta charset="utf-8"><title>Signed out</title></head>
@@ -98,6 +119,7 @@ grantsRouter.get("/grants", async (req: Request, res: Response) => {
   );
 
   const csrfToken = issueCsrfToken(res, "csrf_grants");
+  const logoutToken = issueCsrfToken(res, "csrf_logout");
 
   const rowsHtml = rows.length
     ? rows
@@ -142,7 +164,7 @@ grantsRouter.get("/grants", async (req: Request, res: Response) => {
     <thead><tr><th>Client</th><th>Server</th><th>Scopes</th><th>Granted</th><th></th></tr></thead>
     <tbody>${rowsHtml}</tbody>
   </table>
-  <form method="POST" action="/auth/logout" style="margin-top:1.5rem"><button type="submit">Sign out</button></form>
+  <form method="POST" action="/auth/logout" style="margin-top:1.5rem"><input type="hidden" name="csrf_token" value="${escHtml(logoutToken)}"><button type="submit">Sign out</button></form>
 </body>
 </html>`);
 });
@@ -187,22 +209,14 @@ grantsRouter.post("/grants/:id/revoke", async (req: Request, res: Response) => {
 // POST /oauth/revoke (RFC 7009) — programmatic revocation.
 // ---------------------------------------------------------------------------
 
-grantsRouter.post("/oauth/revoke", async (req: Request, res: Response) => {
-  const body = req.body as Record<string, string>;
-  const { token, client_id } = body;
+grantsRouter.post("/oauth/revoke", limitOauthEndpoint, async (req: Request, res: Response) => {
+  const body = bodyOf(req);
+  const token = stringField(body, "token");
+  const client_id = stringField(body, "client_id");
 
   if (!token || !client_id) {
     res.status(400).json({ error: "invalid_request", error_description: "token and client_id are required" });
     return;
-  }
-
-  const client = await resolveClient(client_id);
-  if (client) {
-    const auth = await authenticateConfidentialClient(client, body);
-    if (!auth.ok) {
-      res.status(400).json({ error: auth.error, error_description: auth.errorDescription });
-      return;
-    }
   }
 
   // RFC 7009 §2.2: always respond 200, even for an unknown, already-revoked,
@@ -219,9 +233,28 @@ grantsRouter.post("/oauth/revoke", async (req: Request, res: Response) => {
   // match means a token can't be used to revoke another client's chain by
   // presenting it under a different client_id. The Grant itself stays live, so
   // the user's consent is kept (they revoke that via /grants).
+  //
+  // The token is looked up BEFORE the client is authenticated, and only a token
+  // that exists and belongs to `client_id` triggers authentication. Verifying a
+  // client_assertion fetches a JWKS and records a jti, and this endpoint is
+  // unauthenticated, so authenticating first let anyone drive that work (and
+  // the jti store's memory) with arbitrary tokens. Now the only caller who gets
+  // past this point already holds a valid refresh token. That caller can
+  // distinguish an authentication failure (400) from success, which reveals
+  // nothing they don't have: they presented the token. Everyone else gets the
+  // same 200 and, for a nonexistent token, skips the verification cost; the
+  // hash and one indexed lookup are all they can make the server do.
   const tokenHash = createHash("sha256").update(token).digest("hex");
   const entry = await prisma.refreshToken.findUnique({ where: { tokenHash } });
   if (entry && entry.clientId === client_id) {
+    const client = await resolveClient(client_id);
+    if (client) {
+      const auth = await authenticateConfidentialClient(client, body);
+      if (!auth.ok) {
+        res.status(400).json({ error: auth.error, error_description: auth.errorDescription });
+        return;
+      }
+    }
     const result = await prisma.refreshToken.updateMany({
       where: { grantId: entry.grantId, revokedAt: null },
       data: { revokedAt: new Date() },

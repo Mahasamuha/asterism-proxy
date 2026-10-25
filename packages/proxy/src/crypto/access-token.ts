@@ -35,9 +35,14 @@ export async function mintAccessToken(params: MintAccessTokenParams): Promise<Mi
     throw new Error("mintAccessToken: aud must be a non-empty string");
   }
 
+  // Defence in depth: authorize/device already reject unregistered resources,
+  // but never sign a token for an audience this proxy doesn't know.
   const resourceServer = lookupResourceServer(params.resource);
+  if (!resourceServer) {
+    throw new Error("mintAccessToken: resource is not a registered resource");
+  }
   const isShortLived = params.scopes.some(
-    (scope) => resourceServer?.scopes.find((s) => s.name === scope)?.shortLived === true
+    (scope) => resourceServer.scopes.find((s) => s.name === scope)?.shortLived === true
   );
   const expiresIn = isShortLived ? SHORT_LIVED_TTL_SECONDS : DEFAULT_TTL_SECONDS;
 

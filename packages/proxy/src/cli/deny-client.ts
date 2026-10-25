@@ -8,11 +8,14 @@
 // In the production container (no tsx, no src/), run the compiled build:
 //   docker exec <container> node dist/cli/deny-client.js add <client_id-or-domain>
 //
-// A value that parses as an https URL is a `client_id` entry; anything else
-// must be a bare hostname and becomes a `domain` entry (matches subdomains).
+// A canonical CIMD client_id URL is a `client_id` entry; a bare https origin or
+// a bare hostname is a `domain` entry (matches subdomains, IDN stored as
+// punycode); any other https URL is refused, since it could never match.
 // `add` also revokes live grants and refresh tokens in the same transaction.
 // Never prints tokens; only client ids, hosts and counts.
+import { domainToASCII } from "node:url";
 import { prisma } from "../db.js";
+import { isCanonicalClientIdUrl } from "../clients/cimd.js";
 import type { DenyKind } from "../generated/prisma/client.js";
 
 const USAGE = `Usage:
@@ -23,7 +26,7 @@ const USAGE = `Usage:
 // Bare hostname: dot-separated LDH labels, no scheme, port, path or userinfo.
 const HOSTNAME_RE = /^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$/;
 
-function parseTarget(raw: string): { kind: DenyKind; value: string } {
+function parseTarget(raw: string): { kind: DenyKind; value: string; note?: string } {
   let url: URL | null = null;
   try {
     url = new URL(raw);
@@ -31,10 +34,26 @@ function parseTarget(raw: string): { kind: DenyKind; value: string } {
     // not a URL; treated as a domain below
   }
   if (url?.protocol === "https:") {
-    // Stored exactly as given: client_id matching is exact string equality.
-    return { kind: "client_id", value: raw };
+    // client_id matching is exact string equality against the canonical CIMD
+    // client_id, so only that exact spelling is stored.
+    if (isCanonicalClientIdUrl(raw)) return { kind: "client_id", value: raw };
+    // A bare origin can't be a client_id (CIMD requires a path), so the intent
+    // can only be "this whole host".
+    const bareOrigin =
+      (url.pathname === "/" || url.pathname === "") && url.search === "" && !raw.includes("#") && !raw.includes("?") && url.username === "" && url.password === "";
+    if (bareOrigin) {
+      const host = domainToASCII(url.hostname.replace(/\.$/, "").toLowerCase());
+      if (HOSTNAME_RE.test(host)) return { kind: "domain", value: host, note: `"${raw}" is a bare origin, not a client_id; denying the domain ${host} (and its subdomains).` };
+    }
+    const canonical = url.href;
+    throw new Error(
+      isCanonicalClientIdUrl(canonical)
+        ? `"${raw}" is not a canonical client_id URL and would never match; the canonical form is ${canonical}`
+        : `"${raw}" is not a canonical client_id URL and would never match; a client_id is an https URL with a path, no userinfo or fragment, and no trailing-dot host (to deny a whole host, pass the bare hostname)`
+    );
   }
-  const host = raw.toLowerCase();
+  // domainToASCII parses like a URL host and would silently drop a path or port.
+  const host = /[\s/\\:?#@%]/.test(raw) ? "" : domainToASCII(raw.toLowerCase());
   if (!HOSTNAME_RE.test(host)) {
     throw new Error(`"${raw}" is neither an https client_id URL nor a bare hostname`);
   }
@@ -56,7 +75,7 @@ function matches(kind: DenyKind, value: string, clientId: string): boolean {
 }
 
 async function add(value: string, reason: string | undefined): Promise<void> {
-  const { kind, value: v } = parseTarget(value);
+  const { kind, value: v, note } = parseTarget(value);
   const now = new Date();
 
   const { grants, tokens } = await prisma.$transaction(async (tx) => {
@@ -81,6 +100,7 @@ async function add(value: string, reason: string | undefined): Promise<void> {
     return { grants: g.count, tokens: t.count };
   });
 
+  if (note) console.log(note);
   console.log(`Denied ${kind} ${v}`);
   console.log(`Revoked ${grants} grant(s) and ${tokens} refresh token(s).`);
   console.log("Outstanding access tokens remain valid until they expire (at most 15 minutes).");

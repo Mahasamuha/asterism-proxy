@@ -1,11 +1,21 @@
+import { isIP } from "node:net";
 import path from "node:path";
 import { z } from "zod";
 
+/** Case-insensitive "true"/"false". Anything else is a config error rather than
+ * a silent false (e.g. ENABLE_OIDC=TRUE must not quietly disable OIDC). */
 const boolFromEnv = (defaultValue: boolean) =>
   z
     .string()
     .optional()
-    .transform((v) => (v === undefined ? defaultValue : v === "true"));
+    .transform((v, ctx) => {
+      if (v === undefined) return defaultValue;
+      const normalized = v.trim().toLowerCase();
+      if (normalized === "true") return true;
+      if (normalized === "false") return false;
+      ctx.issues.push({ code: "custom", message: `must be "true" or "false" (case-insensitive), got ${JSON.stringify(v)}`, input: v });
+      return z.NEVER;
+    });
 
 /** The issuer is concatenated with well-known and endpoint paths (RFC 8414
  * §3.1, RFC 9728 §3.1) and must match the `issuer` claim exactly, so it has to
@@ -26,6 +36,49 @@ const issuerUrl = z.url("ISSUER_URL must be a valid URL").superRefine((value, ct
   }
 });
 
+const TRUST_PROXY_KEYWORDS = new Set(["loopback", "linklocal", "uniquelocal"]);
+
+/** One entry of an Express "trust proxy" list: a keyword, an IP, or a CIDR. */
+function isTrustProxyEntry(entry: string): boolean {
+  if (TRUST_PROXY_KEYWORDS.has(entry)) return true;
+  const slash = entry.indexOf("/");
+  if (slash === -1) return isIP(entry) !== 0;
+  const version = isIP(entry.slice(0, slash));
+  const prefix = entry.slice(slash + 1);
+  if (version === 0 || !/^\d{1,3}$/.test(prefix)) return false;
+  return Number(prefix) <= (version === 4 ? 32 : 128);
+}
+
+/** TRUST_PROXY decides whose X-Forwarded-For is believed, so a value that
+ * Express would misread is a startup error, not a silent surprise: "true" would
+ * make Express trust every hop (a client could forge req.ip and sidestep every
+ * per-IP limit), and a stray space turned " 1" into the address 0.0.0.1. Only a
+ * hop count, or a comma-separated list of IPs, CIDRs and the Express keywords
+ * loopback / linklocal / uniquelocal, is accepted. Returns a number for a hop
+ * count, else the trimmed list for Express to parse. */
+const trustProxy = z
+  .string()
+  .optional()
+  .transform((raw, ctx): number | string | undefined => {
+    if (raw === undefined) return undefined;
+    const value = raw.trim();
+    if (/^\d+$/.test(value)) {
+      const hops = Number(value);
+      if (Number.isSafeInteger(hops)) return hops;
+    } else if (value !== "" && value.split(",").every((part) => isTrustProxyEntry(part.trim()))) {
+      return value;
+    }
+    const boolish = /^(true|false|yes|no|on|off)$/i.test(value);
+    ctx.issues.push({
+      code: "custom",
+      message: boolish
+        ? `must not be ${JSON.stringify(raw)}: use a hop count (for example 1 behind one ingress), or a list of IPs, CIDRs, loopback, linklocal, uniquelocal`
+        : `must be a non-negative hop count (for example 1), or a comma-separated list of IPs, CIDRs, loopback, linklocal, uniquelocal; got ${JSON.stringify(raw)}`,
+      input: raw,
+    });
+    return z.NEVER;
+  });
+
 const envSchema = z
   .object({
     DATABASE_URL: z.string().min(1, "DATABASE_URL is required"),
@@ -36,11 +89,15 @@ const envSchema = z
     // Signs the session and CSRF cookies. Required (no ephemeral fallback) so
     // sessions survive restarts and a missing secret can't silently weaken them.
     COOKIE_SECRET: z.string().min(32, "COOKIE_SECRET is required and must be at least 32 characters"),
-    // Express "trust proxy" setting: a hop count (number), or a string such as
-    // "loopback" or a CIDR list. Needed behind an ingress so req.ip is the client.
-    TRUST_PROXY: z.string().min(1).optional(),
+    // Express "trust proxy" setting, validated above: a hop count, or a list of
+    // IPs / CIDRs / keywords. Needed behind an ingress so req.ip is the client.
+    TRUST_PROXY: trustProxy,
     // Bearer token for /metrics; unset disables the endpoint.
     METRICS_TOKEN: z.string().min(32, "METRICS_TOKEN must be at least 32 characters").optional(),
+
+    // Optional first-account guard. When set, /setup requires it; when unset,
+    // whoever reaches a fresh instance first can claim it (a startup warning says so).
+    SETUP_TOKEN: z.string().min(32, "SETUP_TOKEN must be at least 32 characters").optional(),
 
     ENABLE_OIDC: boolFromEnv(true),
     OIDC_ISSUER: z.url().optional(),
@@ -100,9 +157,9 @@ export const config = {
   logLevel: env.LOG_LEVEL,
 
   cookieSecret: env.COOKIE_SECRET,
-  // Numeric strings become hop counts; anything else is passed to Express as-is.
-  trustProxy: env.TRUST_PROXY === undefined ? undefined : /^\d+$/.test(env.TRUST_PROXY) ? Number(env.TRUST_PROXY) : env.TRUST_PROXY,
+  trustProxy: env.TRUST_PROXY,
   metricsToken: env.METRICS_TOKEN,
+  setupToken: env.SETUP_TOKEN,
 
   enableOidc: env.ENABLE_OIDC,
   // Non-null exactly when enableOidc is true — superRefine above rejects

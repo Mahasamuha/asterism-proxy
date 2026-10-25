@@ -1,5 +1,5 @@
 import type { Request, Response, NextFunction, RequestHandler } from "express";
-import { createVerifier, type VerifierConfig, type Principal } from "./verify.js";
+import { createVerifier, TokenValidationError, type VerifierConfig, type Principal } from "./verify.js";
 
 export interface AuthenticatedRequest extends Request {
   principal?: Principal;
@@ -25,7 +25,8 @@ export function protectedResourceMetadataUrl(audience: string): string {
 /** Bearer-token verification middleware. On success, attaches `principal` to
  * the request and calls next(); on failure, responds 401 with a
  * WWW-Authenticate challenge whose `resource_metadata` points at the RFC 9728
- * §3.1 metadata URL. Browser-based clients can only read that header if the
+ * §3.1 metadata URL. If the signing keys can't be fetched (`jwks_unavailable`)
+ * it responds 503 with `Retry-After: 30` and no challenge instead. Browser-based clients can only read that header if the
  * app's CORS config lists WWW-Authenticate in Access-Control-Expose-Headers;
  * that is the resource-server app's responsibility, not this middleware's. */
 export function createBearerAuthMiddleware(config: VerifierConfig): RequestHandler {
@@ -34,7 +35,8 @@ export function createBearerAuthMiddleware(config: VerifierConfig): RequestHandl
 
   return (req: Request, res: Response, next: NextFunction): void => {
     const authHeader = req.headers["authorization"];
-    if (!authHeader?.startsWith("Bearer ")) {
+    // The auth scheme is case-insensitive (RFC 7235 §2.1).
+    if (!authHeader || !/^bearer /i.test(authHeader)) {
       res.set("WWW-Authenticate", challenge);
       res.status(401).json({ error: "unauthorized", error_description: "Bearer token required" });
       return;
@@ -47,7 +49,17 @@ export function createBearerAuthMiddleware(config: VerifierConfig): RequestHandl
         (req as AuthenticatedRequest).principal = principal;
         next();
       })
-      .catch(() => {
+      .catch((err: unknown) => {
+        if (err instanceof TokenValidationError && err.reason === "jwks_unavailable") {
+          // The token wasn't proven bad; the signing keys couldn't be fetched. No challenge:
+          // re-authenticating wouldn't help.
+          res.set("Retry-After", "30");
+          res.status(503).json({
+            error: "temporarily_unavailable",
+            error_description: "Token verification is temporarily unavailable",
+          });
+          return;
+        }
         res.set("WWW-Authenticate", `${challenge}, error="invalid_token"`);
         res.status(401).json({ error: "invalid_token", error_description: "Bearer token is invalid or expired" });
       });

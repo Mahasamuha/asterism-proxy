@@ -4,8 +4,13 @@ import { JwksCache } from "./jwks-cache.js";
 export interface VerifierConfig {
   issuer: string;
   audience: string; // this server's identifier — exactly one
-  jwksUri?: string; // defaults to discovery from issuer
+  jwksUri?: string; // defaults to discovery from issuer; must be https (http only for loopback hosts)
+  /** Longest, in ms, cached signing keys are still used after the last successful JWKS fetch
+   * when refreshes fail. Default 24 hours. Past it, verify throws `jwks_unavailable`. */
+  maxStaleMs?: number;
 }
+
+const MAX_IAT_SKEW_S = 60;
 
 export interface Principal {
   subject: string;
@@ -40,7 +45,7 @@ export interface Verifier {
 }
 
 export function createVerifier(config: VerifierConfig): Verifier {
-  const jwksCache = new JwksCache(config.issuer, config.jwksUri);
+  const jwksCache = new JwksCache(config.issuer, config.jwksUri, { maxStaleMs: config.maxStaleMs });
 
   return {
     async verify(token: string): Promise<Principal> {
@@ -65,7 +70,14 @@ export function createVerifier(config: VerifierConfig): Verifier {
         throw new TokenValidationError("unknown_kid", `No key found for kid "${kid}"`);
       }
 
-      const key = await importJWK(jwk, jwk.alg);
+      let key: Awaited<ReturnType<typeof importJWK>>;
+      try {
+        key = await importJWK(jwk, jwk.alg);
+      } catch {
+        // The issuer published a key we can't use (no alg, bad parameters).
+        // Nothing can be verified against it, so it is a signature failure.
+        throw new TokenValidationError("invalid_signature", `Signing key "${kid}" could not be imported`);
+      }
 
       let payload: JWTPayload;
       try {
@@ -82,7 +94,7 @@ export function createVerifier(config: VerifierConfig): Verifier {
         if (err instanceof joseErrors.JWTClaimValidationFailed) {
           if (err.claim === "iss") throw new TokenValidationError("invalid_issuer", "Token issuer does not match");
           if (err.claim === "nbf") throw new TokenValidationError("not_yet_valid", "Token is not yet valid");
-          throw new TokenValidationError("missing_claims", err.message);
+          throw new TokenValidationError("missing_claims", "Token is missing a required claim");
         }
         throw new TokenValidationError("invalid_signature", "Token signature verification failed");
       }
@@ -93,14 +105,20 @@ export function createVerifier(config: VerifierConfig): Verifier {
         throw new TokenValidationError("array_audience", "Token audience must be a single string, not an array");
       }
       if (payload.aud !== config.audience) {
-        throw new TokenValidationError(
-          "invalid_audience",
-          `Token audience "${String(payload.aud)}" does not match configured audience "${config.audience}"`
-        );
+        throw new TokenValidationError("invalid_audience", "Token audience does not match this server");
       }
 
-      if (typeof payload.sub !== "string" || typeof payload["client_id"] !== "string" || typeof payload.exp !== "number") {
+      if (typeof payload.sub !== "string" || payload.sub === "" || typeof payload["client_id"] !== "string" || typeof payload.exp !== "number") {
         throw new TokenValidationError("missing_claims", "Token is missing required claims (sub, client_id, exp)");
+      }
+
+      // iat is informational, but a far-future value signals a broken or
+      // malicious issuer clock; allow 60 s of skew.
+      if (payload.iat !== undefined && typeof payload.iat !== "number") {
+        throw new TokenValidationError("missing_claims", "Token iat claim is not a number");
+      }
+      if (payload.iat !== undefined && payload.iat > Date.now() / 1000 + MAX_IAT_SKEW_S) {
+        throw new TokenValidationError("not_yet_valid", "Token was issued in the future");
       }
 
       const scopeClaim = typeof payload["scope"] === "string" ? payload["scope"] : "";

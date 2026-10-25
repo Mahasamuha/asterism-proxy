@@ -1,9 +1,11 @@
+import { createHash } from "node:crypto";
 import type { IncomingHttpHeaders } from "node:http";
 import * as jose from "jose";
 import { safeFetchJson } from "../clients/safe-fetch.js";
 import { config } from "../config.js";
 import { createLogger } from "../logger.js";
 import type { OauthClient } from "../generated/prisma/client.js";
+import { stringField } from "../http-params.js";
 
 const log = createLogger("client-assertion");
 
@@ -24,19 +26,33 @@ interface CachedJwks {
 
 const jwksCache = new Map<string, CachedJwks>();
 
-function parseMaxAgeSeconds(cacheControl: string | string[] | undefined): number | undefined {
-  const value = Array.isArray(cacheControl) ? cacheControl[0] : cacheControl;
-  if (!value) return undefined;
-  const match = /(?:^|,)\s*max-age=(\d+)/i.exec(value);
-  return match ? Number(match[1]) : undefined;
+/** Most jwks_uri entries kept; the oldest-inserted is evicted beyond this. A
+ * client_id is attacker-chosen, so an unbounded map is a memory-growth vector. */
+const MAX_JWKS_CACHE_ENTRIES = 500;
+/** An unknown `kid` triggers at most one refetch per jwks_uri per this window. */
+const KID_REFETCH_MIN_INTERVAL_MS = 30 * 1000;
+const lastKidRefetch = new Map<string, number>();
+
+function setBounded<V>(map: Map<string, V>, key: string, value: V): void {
+  map.delete(key); // re-inserting moves it to the newest position
+  map.set(key, value);
+  while (map.size > MAX_JWKS_CACHE_ENTRIES) {
+    const oldest = map.keys().next();
+    if (oldest.done) break;
+    map.delete(oldest.value);
+  }
 }
 
-async function getClientJwks(jwksUri: string): Promise<jose.JWK[]> {
-  const cached = jwksCache.get(jwksUri);
-  if (cached && cached.expiresAt > Date.now()) {
-    return cached.keys;
-  }
+/** Returns the TTL in ms: 0 for no-store / no-cache / max-age=0 (do not cache). */
+function jwksTtlMs(cacheControl: string | string[] | undefined): number {
+  const value = Array.isArray(cacheControl) ? cacheControl[0] : cacheControl;
+  if (!value) return DEFAULT_JWKS_TTL_MS;
+  if (/(?:^|,)\s*(?:no-store|no-cache)\b/i.test(value)) return 0;
+  const match = /(?:^|,)\s*max-age=(\d+)/i.exec(value);
+  return match ? Math.min(Number(match[1]) * 1000, DEFAULT_JWKS_TTL_MS) : DEFAULT_JWKS_TTL_MS;
+}
 
+async function fetchClientJwks(jwksUri: string): Promise<jose.JWK[]> {
   let headers: IncomingHttpHeaders = {};
   const raw = await safeFetchJson(jwksUri, {
     onHeaders: (h) => {
@@ -49,11 +65,21 @@ async function getClientJwks(jwksUri: string): Promise<jose.JWK[]> {
     throw new Error(`jwks_uri did not return a valid JWK Set: ${jwksUri}`);
   }
 
-  const maxAgeSeconds = parseMaxAgeSeconds(headers["cache-control"]);
-  const ttlMs = maxAgeSeconds !== undefined ? Math.min(maxAgeSeconds * 1000, DEFAULT_JWKS_TTL_MS) : DEFAULT_JWKS_TTL_MS;
-  jwksCache.set(jwksUri, { keys, expiresAt: Date.now() + ttlMs });
-
+  const ttlMs = jwksTtlMs(headers["cache-control"]);
+  if (ttlMs > 0) {
+    setBounded(jwksCache, jwksUri, { keys, expiresAt: Date.now() + ttlMs });
+  } else {
+    jwksCache.delete(jwksUri);
+  }
   return keys;
+}
+
+async function getClientJwks(jwksUri: string): Promise<{ keys: jose.JWK[]; fresh: boolean }> {
+  const cached = jwksCache.get(jwksUri);
+  if (cached && cached.expiresAt > Date.now()) {
+    return { keys: cached.keys, fresh: false };
+  }
+  return { keys: await fetchClientJwks(jwksUri), fresh: true };
 }
 
 // ---------------------------------------------------------------------------
@@ -76,17 +102,40 @@ const CLOCK_SKEW_S = 60;
  * published in the client's public jwks_uri. */
 const ALLOWED_ALGORITHMS = ["ES256", "ES384", "PS256", "RS256", "EdDSA"];
 
-const seenJti = new Map<string, number>(); // key: `${clientId}:${jti}` -> expiry (ms epoch)
+/** Longest jti accepted. A jti is attacker-chosen (any client published by
+ * anyone can send assertions), so its size must be bounded before it is kept. */
+const MAX_JTI_LENGTH = 256;
+/** Most entries the jti store holds. Entries live at most ~6 minutes, so this
+ * is a cap on distinct assertions per ~6 minutes. */
+export const MAX_SEEN_JTI = 50_000;
 
-setInterval(
-  () => {
-    const now = Date.now();
-    for (const [key, expiresAt] of seenJti) {
-      if (expiresAt <= now) seenJti.delete(key);
-    }
-  },
-  5 * 60 * 1000
-).unref();
+// key: SHA-256 hex of `${clientId}\0${jti}` -> expiry (ms epoch). Hashing keeps
+// every key 64 bytes however large the jti, and the NUL separator keeps
+// ("a:b", "c") and ("a", "b:c") from colliding (a client_id is a URL, so it
+// contains ":").
+const seenJti = new Map<string, number>();
+
+function jtiKey(clientId: string, jti: string): string {
+  return createHash("sha256").update(clientId).update("\0").update(jti).digest("hex");
+}
+
+function sweepSeenJti(now: number): void {
+  for (const [key, expiresAt] of seenJti) {
+    if (expiresAt <= now) seenJti.delete(key);
+  }
+}
+
+setInterval(() => sweepSeenJti(Date.now()), 5 * 60 * 1000).unref();
+
+/** The store's keys. For tests. */
+export function seenJtiKeysForTests(): string[] {
+  return [...seenJti.keys()];
+}
+
+/** Adds `count` filler entries expiring at `expiresAt`. For tests. */
+export function fillReplayCacheForTests(count: number, expiresAt: number): void {
+  for (let i = 0; i < count; i++) seenJti.set(jtiKey("filler", String(i)), expiresAt);
+}
 
 export class ClientAssertionError extends Error {}
 
@@ -99,7 +148,24 @@ export async function verifyClientAssertion(clientId: string, jwksUri: string, a
   // an oct key in it would let anyone who can fetch it forge HS* assertions as
   // that client. The algorithms allow-list below already excludes HS*; this is
   // the second layer, so a symmetric key can never be selected at all.
-  const keys = (await getClientJwks(jwksUri)).filter((k) => k.kty !== "oct");
+  const initial = await getClientJwks(jwksUri);
+  let allKeys = initial.keys;
+  // An unknown kid on a cached set usually means the client rotated its keys:
+  // refetch once, at most one forced refetch per jwks_uri per 30 s.
+  let kid: string | undefined;
+  try {
+    kid = jose.decodeProtectedHeader(assertion).kid;
+  } catch {
+    // malformed assertion; jwtVerify below reports it
+  }
+  if (!initial.fresh && kid !== undefined && !allKeys.some((k) => k.kid === kid)) {
+    const last = lastKidRefetch.get(jwksUri);
+    if (last === undefined || Date.now() - last >= KID_REFETCH_MIN_INTERVAL_MS) {
+      setBounded(lastKidRefetch, jwksUri, Date.now());
+      allKeys = await fetchClientJwks(jwksUri);
+    }
+  }
+  const keys = allKeys.filter((k) => k.kty !== "oct");
   const jwkSet = jose.createLocalJWKSet({ keys });
   const tokenEndpoint = `${config.issuerUrl}/oauth/token`;
 
@@ -119,6 +185,9 @@ export async function verifyClientAssertion(clientId: string, jwksUri: string, a
   if (typeof payload.jti !== "string" || payload.jti.length === 0) {
     throw new ClientAssertionError("client_assertion is missing jti");
   }
+  if (payload.jti.length > MAX_JTI_LENGTH) {
+    throw new ClientAssertionError(`client_assertion jti is too long (max ${MAX_JTI_LENGTH} characters)`);
+  }
   if (typeof payload.exp !== "number") {
     throw new ClientAssertionError("client_assertion is missing exp");
   }
@@ -134,11 +203,25 @@ export async function verifyClientAssertion(clientId: string, jwksUri: string, a
     throw new ClientAssertionError("client_assertion iat is in the future");
   }
 
-  const key = `${clientId}:${payload.jti}`;
+  const key = jtiKey(clientId, payload.jti);
   if (seenJti.has(key)) {
     throw new ClientAssertionError("client_assertion jti has already been used");
   }
-  seenJti.set(key, payload.exp * 1000);
+  // Fail closed when full. Evicting a live entry to make room would reopen
+  // replay for that assertion, so the only entries ever dropped are expired
+  // ones; if none are, new assertions are refused until some expire (at most
+  // ~6 minutes). This trades availability for replay safety on purpose.
+  if (seenJti.size >= MAX_SEEN_JTI) {
+    sweepSeenJti(Date.now());
+    if (seenJti.size >= MAX_SEEN_JTI) {
+      log.warn({ clientId, entries: seenJti.size }, "jti replay cache is full; refusing new client assertions");
+      throw new ClientAssertionError("replay cache full");
+    }
+  }
+  // Keep the entry until jwtVerify would no longer accept this assertion
+  // (exp plus the clock tolerance), or the sweep could drop it while a replay
+  // still verifies.
+  seenJti.set(key, payload.exp * 1000 + CLOCK_SKEW_S * 1000);
 }
 
 export interface ClientAuthResult {
@@ -152,7 +235,7 @@ export interface ClientAuthResult {
  * verifying client_assertion — checked here, before the caller consumes
  * whatever code/token it's about to redeem, so a bad assertion doesn't burn
  * something a legitimate follow-up attempt could still use. */
-export async function authenticateConfidentialClient(client: OauthClient, body: Record<string, string>): Promise<ClientAuthResult> {
+export async function authenticateConfidentialClient(client: OauthClient, body: Record<string, unknown>): Promise<ClientAuthResult> {
   const metadata = client.metadata as Record<string, unknown>;
   const authMethod = typeof metadata["token_endpoint_auth_method"] === "string" ? metadata["token_endpoint_auth_method"] : "none";
 
@@ -167,8 +250,8 @@ export async function authenticateConfidentialClient(client: OauthClient, body: 
     return { ok: false, error: "invalid_client", errorDescription: "Client is missing jwks_uri" };
   }
 
-  const assertionType = body["client_assertion_type"];
-  const assertion = body["client_assertion"];
+  const assertionType = stringField(body, "client_assertion_type");
+  const assertion = stringField(body, "client_assertion");
   if (assertionType !== "urn:ietf:params:oauth:client-assertion-type:jwt-bearer" || !assertion) {
     return { ok: false, error: "invalid_client", errorDescription: "client_assertion is required for this client" };
   }

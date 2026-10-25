@@ -5,9 +5,28 @@ services:
       dockerfile: packages/proxy/Dockerfile
     ports:
       - "3000:3000"
-    env_file: .env
+    # Deliberately no `env_file: .env`: that would hand the proxy everything in
+    # .env, including POSTGRES_PASSWORD as its own variable. Each key below is
+    # passed through from .env (or the shell) only if set there, so unset
+    # optional settings stay unset. A new setting must be added to this list.
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      PORT:
+      LOG_LEVEL:
+      ISSUER_URL:
+      COOKIE_SECRET:
+      TRUST_PROXY:
+      METRICS_TOKEN:
+      SETUP_TOKEN:
+      ENABLE_OIDC:
+      OIDC_ISSUER:
+      OIDC_CLIENT_ID:
+      OIDC_CLIENT_SECRET:
+      ENABLE_LOCAL_ACCOUNTS:
+      ENABLE_DCR:
+      ALLOW_INSECURE_CLIENT_METADATA:
+      TRUST_POLICY_PATH:
+      RESOURCE_SERVERS_PATH:
     depends_on:
       postgres:
         condition: service_healthy
