@@ -157,7 +157,7 @@ compose file for a host behind a TLS-terminating reverse proxy:
 
 ```yaml
 services:
-  proxy:
+  asterism-proxy:
     image: mahasamuha/asterism-proxy:main   # or a release tag
     ports:
       - "3000:3000"
@@ -202,9 +202,12 @@ volumes:
 `.env.example` describes each variable. The note below about passing only the listed
 variables applies here too.
 
+Operator commands run inside the container through `asterism-cli`, for example
+`docker compose exec asterism-proxy asterism-cli deny-client list`.
+
 ## docker compose
 
-The `proxy` service receives only the variables listed under `environment:` in
+The `asterism-proxy` service receives only the variables listed under `environment:` in
 `docker-compose.yml`, not the whole `.env`, so `POSTGRES_PASSWORD` is available to
 the database service and to the `DATABASE_URL` assembled there, and not as a
 variable in the proxy process. Add any new application setting to that list.

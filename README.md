@@ -109,7 +109,7 @@ pnpm --filter @mcp-auth/proxy local-user add <username>       # also: deactivate
 pnpm --filter @mcp-auth/proxy deny-client add <client_id|domain> [--reason …]   # also: remove, list
 ```
 
-Inside the container, run the compiled versions instead, for example `node dist/cli/rotate-signing-key.js`.
+Inside the container, use `asterism-cli` with the same subcommands, for example `docker compose exec asterism-proxy asterism-cli deny-client list`. `local-user add` prompts for the password; to pipe it in instead, use `docker compose exec -T`.
 
 Further reading:
 - [docs/key-rotation.md](docs/key-rotation.md): the signing-key rotation runbook.
