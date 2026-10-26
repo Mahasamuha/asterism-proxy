@@ -1,0 +1,50 @@
+<%- include('_head', { title: 'Approve a resource server', nav: 'servers' }) %>
+    <% if (!preview) { %>
+    <p class="muted">Enter the server's identifier (its <code>resource</code> URL). Its metadata is fetched and shown here; nothing is saved until you approve it.</p>
+    <% } %>
+    <form method="POST" action="/admin/resource-servers/preview" class="card">
+      <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
+      <label for="identifier">Identifier</label>
+      <input id="identifier" name="identifier" type="text" value="<%= identifier %>" placeholder="https://mcp.example.com/mcp" required>
+      <label class="inline"><input type="checkbox" name="internal"<%= internal ? ' checked' : '' %>> Internal: allow private-network addresses for this server</label>
+      <div class="actions"><button type="submit">fetch metadata</button></div>
+    </form>
+    <% if (preview) { %>
+    <div class="card">
+      <h2>Metadata</h2>
+      <p>Name published by the server: <strong><%= preview.resourceName || '(none)' %></strong></p>
+      <% if (!preview.hasScopeDescriptions) { %>
+        <%- include('../partials/banner', { status: 'warning', title: 'No scope descriptions published', text: 'Users see scope names as they are. You can write descriptions after approving.' }) %>
+      <% } %>
+      <div class="table-wrap">
+      <table>
+        <thead><tr><th>Scope</th><th>Description</th><th>Flags</th></tr></thead>
+        <tbody>
+        <% preview.scopes.forEach(function (sc) { %>
+          <tr>
+            <td><code><%= sc.name %></code></td>
+            <td><%= sc.description %></td>
+            <td>
+              <% if (sc.stepUp) { %><span class="tag">step-up</span><% } %>
+              <% if (sc.freshSignIn) { %><span class="tag">fresh sign-in</span><% } %>
+              <% if (sc.shortLived) { %><span class="tag">short-lived</span><% } %>
+            </td>
+          </tr>
+        <% }); %>
+        </tbody>
+      </table>
+      </div>
+    </div>
+    <form method="POST" action="/admin/resource-servers/approve" class="card">
+      <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
+      <input type="hidden" name="identifier" value="<%= identifier %>">
+      <% if (internal) { %><input type="hidden" name="internal" value="on"><% } %>
+      <label for="display_name">Display name (shown on consent pages)</label>
+      <input id="display_name" name="display_name" type="text" value="<%= preview.resourceName || '' %>">
+      <label for="release_claims">Release claims (comma-separated; leave empty to release none)</label>
+      <input id="release_claims" name="release_claims" type="text" placeholder="groups, preferred_username">
+      <p class="muted">Approving <code><%= identifier %></code><%= internal ? ' as an internal server' : '' %>.</p>
+      <div class="actions"><button type="submit">approve →</button></div>
+    </form>
+    <% } %>
+<%- include('_foot') %>

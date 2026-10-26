@@ -1,0 +1,20 @@
+<%- include('partials/top', { title: 'Create your admin account' }) %>
+    <div class="panel">
+      <% if (errors.length) { %><%- include('partials/banner', { status: 'error', title: 'Account not created', items: errors }) %><% } %>
+      <form method="POST" action="/setup">
+        <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
+        <% if (needsSetupToken) { %>
+        <label for="setup_token">Setup token</label>
+        <input id="setup_token" name="setup_token" type="password" autocomplete="off" required>
+        <% } %>
+        <label for="username">Username</label>
+        <input id="username" name="username" type="text" autocomplete="username" required>
+        <label for="password">Password</label>
+        <input id="password" name="password" type="password" autocomplete="new-password" required minlength="<%= minPasswordLength %>">
+        <p class="help">At least <%= minPasswordLength %> characters.</p>
+        <label for="confirm_password">Confirm password</label>
+        <input id="confirm_password" name="confirm_password" type="password" autocomplete="new-password" required>
+        <p class="actions"><button type="submit">create account →</button></p>
+      </form>
+    </div>
+<%- include('partials/bottom') %>

@@ -1,0 +1,40 @@
+<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg" viewBox="-6 -6 112 112" width="520" height="520">
+  <title>Mahasamuha mark</title>
+  <defs>
+    <filter id="node-glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="0.9"></feGaussianBlur>
+    </filter>
+  </defs>
+  <g filter="url(#node-glow)">
+    <circle cx="18" cy="22" r="5.60" fill="oklch(0.97 0.008 80)"></circle>
+    <circle cx="88" cy="38" r="5.60" fill="oklch(0.97 0.008 80)"></circle>
+    <circle cx="58" cy="88" r="6.00" fill="oklch(0.97 0.008 80)"></circle>
+    <circle cx="10" cy="52" r="5.40" fill="oklch(0.97 0.008 80)"></circle>
+    <circle cx="72" cy="16" r="5.60" fill="oklch(0.97 0.008 80)"></circle>
+    <circle cx="20" cy="82" r="5.80" fill="oklch(0.97 0.008 80)"></circle>
+  </g>
+  <path d="M43.05,5.97 Q50.00,2.00 56.95,5.97 L85.05,22.03 Q92.00,26.00 92.00,34.00 L92.00,66.00 Q92.00,74.00 85.05,77.97 L56.95,94.03 Q50.00,98.00 43.05,94.03 L14.95,77.97 Q8.00,74.00 8.00,66.00 L8.00,34.00 Q8.00,26.00 14.95,22.03 Z" fill="oklch(0.93 0.005 80)"></path>
+  <g fill="none" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.7">
+    <path d="M50.00,50.00 Q39.76,43.52 36.00,32.00" stroke="oklch(0.5 0.16 265)" opacity="0.7"></path>
+    <path d="M50.00,50.00 Q59.32,51.88 68.00,48.00" stroke="oklch(0.5 0.16 265)" opacity="0.7"></path>
+    <path d="M50.00,50.00 Q41.76,57.20 40.00,68.00" stroke="oklch(0.5 0.16 265)" opacity="0.7"></path>
+    <path d="M18.00,22.00 Q24.80,30.96 36.00,32.00" stroke="oklch(0.5 0.16 265)" opacity="0.7"></path>
+    <path d="M88.00,38.00 Q80.20,47.40 68.00,48.00" stroke="oklch(0.62 0.11 155)" opacity="0.7"></path>
+    <path d="M58.00,88.00 Q45.00,81.60 40.00,68.00" stroke="oklch(0.62 0.11 155)" opacity="0.7"></path>
+    <path d="M10.00,52.00 Q20.52,68.40 40.00,68.00" stroke="oklch(0.62 0.11 155)" opacity="0.7"></path>
+    <path d="M10.00,52.00 Q17.00,34.20 36.00,32.00" stroke="oklch(0.5 0.16 265)" opacity="0.7"></path>
+    <path d="M72.00,16.00 Q62.32,31.04 68.00,48.00" stroke="oklch(0.5 0.16 265)" opacity="0.7"></path>
+    <path d="M20.00,82.00 Q26.92,70.60 40.00,68.00" stroke="oklch(0.62 0.11 155)" opacity="0.7"></path>
+    <path d="M72.00,16.00 Q34.12,39.64 20.00,82.00" stroke="oklch(0.72 0.16 60)" opacity="0.7"></path>
+  </g>
+  <circle cx="50" cy="50" r="7" fill="oklch(0.28 0.02 260)"></circle>
+  <circle cx="36" cy="32" r="5" fill="oklch(0.5 0.16 265)"></circle>
+  <circle cx="68" cy="48" r="5" fill="oklch(0.5 0.16 265)"></circle>
+  <circle cx="40" cy="68" r="5" fill="oklch(0.5 0.16 265)"></circle>
+  <circle cx="18" cy="22" r="3.8" fill="oklch(0.5 0.16 265)"></circle>
+  <circle cx="88" cy="38" r="3.8" fill="oklch(0.72 0.16 60)"></circle>
+  <circle cx="58" cy="88" r="4.2" fill="oklch(0.62 0.11 155)"></circle>
+  <circle cx="10" cy="52" r="3.6" fill="oklch(0.62 0.11 155)"></circle>
+  <circle cx="72" cy="16" r="3.8" fill="oklch(0.5 0.16 265)"></circle>
+  <circle cx="20" cy="82" r="4" fill="oklch(0.72 0.16 60)"></circle>
+</svg>

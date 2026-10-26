@@ -108,7 +108,11 @@ reachable by others.
 Metadata fetches are bounded: a 3 s deadline that includes DNS resolution, at most
 8 fetches in flight, and 10 per minute per host. If a refetch is refused by the
 rate limit or the concurrency cap, an existing client record fetched within the
-last 24 hours is served instead.
+last 24 hours is served instead. These budgets belong to client metadata only: a
+resource server's metadata fetches (see below) have their own rate limit (same
+numbers) and their own pool of 8 in flight, so client fetches, which anyone can
+trigger through `/oauth/authorize`, cannot starve the refresh or approval of a
+server's metadata.
 
 ## First-run setup
 
@@ -181,6 +185,178 @@ be listed under `environment:` in `docker-compose.yml` (it already is).
   is no global ceiling across IPs: with 31^8 possible codes, guessing a live one is
   negligible, and a global cap would only let an attacker lock everyone out.
 
+## Resource servers
+
+**Upgrading from a version that read `resource-servers.yaml`:** the registry is
+empty after the upgrade (the file is no longer read and has been removed from the
+image) and stays empty until each server is approved with
+`asterism-cli resource-server approve <identifier>`. Until then every authorization
+and refresh for it is refused, so approve each server before routing traffic to the
+new version. Apply the migrations (`prisma migrate deploy`) first.
+
+MCP servers describe themselves; asterism stores only your policy for them.
+
+- **The server publishes its metadata** at its RFC 9728 protected-resource metadata
+  URL. Besides the standard members it carries an `asterism_scopes` list with each
+  scope's `name`, `description` (shown on the consent page) and the optional flags
+  `short_lived`, `step_up` and `fresh_sign_in` (see "Scope levels" below). `authorization_servers` must include this proxy's
+  `ISSUER_URL`, and `resource` must equal the identifier exactly.
+- **Text is checked.** `resource_name` and scope descriptions are shown to users and
+  admins, so a document is refused if either contains control characters, format
+  characters (bidi overrides, zero-width characters and the like) or line and
+  paragraph separators. A server also cannot declare the scope names
+  `offline_access` or `openid`; they are reserved for the proxy.
+- **You approve it.** `asterism-cli resource-server approve <identifier>` fetches
+  and validates the metadata and refuses a server that fails. Only approved
+  identifiers are ever fetched; a `resource` that is not approved (or is disabled)
+  is refused with `invalid_target` without any fetch. A server on a private network
+  needs `--internal`, which allows private addresses for that server only.
+- **You set policy.** Per server: a display name (what the consent page calls it,
+  never the name in the metadata), `releaseClaims`, enabled or disabled. Per scope:
+  `shortLived`, `freshSignIn`, `requireGroups` and a description override. Policy only
+  tightens: a scope is short-lived or needs a fresh sign-in if the server or you say
+  so, groups come from you alone,
+  and a server cannot ask for claims or grant itself an audience. Policy for a scope
+  the server does not declare has no effect (`show` flags it).
+- **Scope levels.** A scope the server declares is at one of three levels, and each
+  implies the one before:
+
+  | Level | In `scopes_supported` | Kept for refresh | Fresh sign-in |
+  | --- | --- | --- | --- |
+  | normal | yes | yes | no |
+  | `step_up` (implies `short_lived`) | no | no | no |
+  | `fresh_sign_in` (implies `step_up`) | no | no | yes |
+
+  `short_lived` alone gives a scope a 5-minute access token that is not kept on the
+  grant, and leaves it in `scopes_supported`. A `step_up` scope is never refreshed, so
+  getting it again means a new authorization and a consent screen (which is shown on
+  every authorization anyway). asterism cannot tell whether a request followed a 403
+  challenge, so "only on a step-up" is the client's behaviour; it is kept honest by
+  keeping the scope out of `scopes_supported`, which is what clients such as Claude.ai
+  request from. A server that lists a `step_up` or `fresh_sign_in` scope in
+  `scopes_supported` is refused. A `fresh_sign_in` scope also makes asterism
+  re-authenticate the user before consent: with OIDC it sends `prompt=login` and
+  `max_age=600` upstream and rejects an ID token whose `auth_time` is older than that or
+  missing (so the provider must support both, as for the admin UI below); a local
+  account always types its password. The device flow does the same. If a scope becomes
+  `fresh_sign_in` after an authorization was started, consent refuses it on asterism's
+  own page and the user starts again from the application.
+- **Metadata changes that widen access wait for you.** A refreshed document that
+  gives clients more than the version you approved is not put in force. That means a
+  scope name that was not there, a `step_up`, `short_lived` or `fresh_sign_in` flag the
+  server dropped, or a different scope description. asterism stores it as pending and
+  keeps issuing against the approved version, with the parts that only narrow already
+  applied: a scope the server withdrew is gone at once and a flag it added applies at
+  once. `resource-server show` and the admin server page list what is pending, since
+  when, and a fingerprint; `resource-server accept <identifier> <fingerprint>` (or the
+  admin page's Accept button) makes the pending document the one in force. The
+  fingerprint ties the acceptance to what you reviewed: if the server changed its
+  document again in between, the accept is refused and you review again. A later
+  refresh that no longer widens clears the pending document. Approving a server
+  always takes the document you were shown. Changes to `resource_name` or the order of
+  scopes never wait; asterism shows your display name, not the server's.
+- **Metadata stays fresh in the background.** Every 60 seconds the proxy refetches
+  servers whose cached copy has expired or was never stored (lifetime from
+  `Cache-Control`, clamped), up to 4 at a time, and never on the token path. If a refetch fails, the last good copy
+  keeps being used and `resource-server show` reports the error and its age. A
+  scope the server stops declaring stops being issued, and existing refresh tokens
+  lose it at their next refresh; the grant is not revoked. The same rule applies at
+  every token exchange: only scopes the server still declares go into an access
+  token, even for an authorization code issued before the scope was dropped.
+- **Metadata changes are audited.** A background refresh that changes the snapshot
+  (`resource_name`, or any scope's name, description or flags) writes an
+  `admin_audit_log` row with actor `system:refresh` and the full scope list before
+  and after. A refresh or approval by an admin records the full list too (name,
+  description, `stepUp`, `shortLived`, `freshSignIn`), not just the names, and whether
+  a widening change is pending. A refresh that changes nothing writes no row;
+  accepting pending changes writes `resource-server.accept-metadata` with the
+  version before and after.
+- **Disabling is reversible; removing revokes every grant.** Disabling a server
+  stops new authorizations and refreshes for it (`invalid_target` / `invalid_grant`);
+  grants and refresh tokens are kept, and re-enabling brings them back. Removing it
+  deletes the server and its policy and, in the same transaction, revokes every
+  grant and refresh token for that identifier (the CLI and the audit row report the
+  counts). Approving the same identifier again starts from no grants, so old grants
+  are never revived under a new (or missing) policy. A token request for a resource
+  that is no longer registered gets `invalid_grant` ("Resource is no longer
+  registered") and consumes nothing.
+- **Consent records what the user saw.** The claims listed on the consent page are
+  stored on the pending request when the page is shown; approving records those
+  claims that the server still releases, so a claim added to a server after the page
+  was shown is not consented to.
+
+```
+asterism-cli resource-server list
+asterism-cli resource-server show <identifier>
+asterism-cli resource-server approve <identifier> [--name X] [--internal] [--release-claims a,b]
+asterism-cli resource-server set <identifier> [--name X] [--release-claims a,b] [--enable|--disable] [--internal|--no-internal]
+asterism-cli resource-server policy <identifier> <scope> [--short-lived|--no-short-lived] [--fresh-sign-in|--no-fresh-sign-in] [--require-groups a,b|--no-require-groups] [--description X|--no-description]
+asterism-cli resource-server refresh <identifier>
+asterism-cli resource-server accept <identifier> <fingerprint>
+asterism-cli resource-server remove <identifier>
+asterism-cli local-user set-admin <username> on|off
+```
+
+Every change is recorded in the `admin_audit_log` table (actor `cli`, or
+`system:refresh` for a background metadata change; before and after). Every change also sends a Postgres `NOTIFY` (on the `asterism_registry` channel,
+inside the change's transaction) that the running proxy listens for, so a CLI
+change takes effect immediately, without a restart. If the proxy's connection is
+lost it reconnects with back-off and reloads the registry once it is back. The
+listener holds its own connection and uses `LISTEN`, which does not survive a
+connection pooler in transaction mode such as PgBouncer: point the proxy's
+`DATABASE_URL` at Postgres directly or at a session-mode pool. `RESOURCE_SERVERS_PATH` is retired: the proxy refuses to start while it is
+set. Create the accounts that may later use the admin UI with
+`local-user set-admin`; the flag is only ever set from the CLI.
+
+## Admin UI
+
+`/admin` manages resource servers (approve, per-scope policy, refresh, remove), the
+client denylist and shows the audit log. Everything it does is also possible with
+`asterism-cli`; both write the same `admin_audit_log` rows (actor `user:<id>` or `cli`).
+
+- Who is an admin. An OIDC user whose normalized `groups` claim (after
+  `OIDC_CLAIM_MAP`) contains one of `ADMIN_GROUPS`. The claim is re-checked with the
+  upstream provider at most every 5 minutes (the same re-check as a refresh), so a
+  demoted or disabled user loses admin within minutes; if the provider is
+  unreachable, a user confirmed within the last 24 hours keeps access. `ADMIN_GROUPS` is
+  a comma-separated list. Unset means no OIDC admin. A local account is an admin
+  when `ENABLE_LOCAL_ACCOUNTS` is on, the account is active and its flag is set
+  with `asterism-cli local-user set-admin`. The UI never grants or revokes admin.
+  Anyone else who is signed in gets a 403 page; `/grants` shows an Admin link to admins.
+- Changes need a recent re-authentication. Reading needs any valid admin session,
+  but every change (each POST) needs a re-authentication within the last 10
+  minutes, recorded in a separate signed `reauth` cookie (set only after a local
+  password login or an upstream sign-in that enforced `max_age`, never by a silent
+  SSO sign-in, and only sent under `/admin`); otherwise nothing is saved and the
+  page offers a fresh sign-in that returns to the form.
+  For OIDC the fresh sign-in sends `prompt=login` and `max_age=600` upstream and
+  the callback rejects an ID token whose `auth_time` is older than that or missing,
+  so the provider must support both and include `auth_time` (check yours). If it
+  does not, admins can read but not change anything. A local account types its
+  password again.
+- Changes are rate limited per admin account (60 a minute). Requests that fail the
+  session or admin check are limited separately per address (600 a minute), so junk
+  traffic can't use up an admin's budget; set `TRUST_PROXY` correctly behind an
+  ingress for the per-address limit.
+- Every form carries a CSRF token bound to the signed-in user and to the admin UI, so
+  a token from another page or user is refused. After upgrading, an admin page that
+  was already open needs one reload.
+- The short-lived and "Require a fresh sign-in" boxes on a scope pin the operator's own
+  setting. A scope the server declares that way shows the box checked; keeping it
+  checked means the server can't later loosen it by changing its metadata. A scope
+  the server declares step-up is short-lived whatever the box says.
+- A server with changes waiting for approval is marked on the server list, and its page
+  starts with a card that lists each change in plain words, since when, and an
+  "Accept these changes" button. Accepting is a change like any other: it needs the
+  CSRF token and a recent sign-in, and it is audited. Until then asterism keeps issuing
+  against the version you approved.
+- Servers whose metadata has expired and could not be refreshed are marked STALE,
+  with the last fetch error.
+- Adding a client to the denylist shows a confirmation page with how many grants and
+  refresh tokens it will revoke. Single-label hostnames (such as `com`) are refused,
+  since they would match every host under them; this applies to `asterism-cli
+  deny-client` too.
+
 ## Identity claims in access tokens
 
 By default an access token carries only `iss`, `sub`, `aud`, `client_id`, `scope`,
@@ -194,11 +370,11 @@ no group.
   `groups=roles,email=mail`. The released claim `X` is read from the upstream claim
   `OIDC_CLAIM_MAP[X]`, or from `X` when unmapped. Empty names and a released name
   listed twice stop the proxy at startup.
-- `releaseClaims` (resource server, in `resource-servers.yaml`): claim names copied
+- `releaseClaims` (resource server policy, set with `asterism-cli resource-server`): claim names copied
   to the top level of that server's access tokens when the user has them (absent
   and null claims are skipped). Protocol claims (`iss sub aud exp nbf iat jti
   client_id scope cnf act azp nonce auth_time`) and duplicates are rejected when
-  the registry loads. The consent page tells the user which details are released,
+  the operator sets them. The consent page tells the user which details are released,
   and that both the client and the resource server receive them: access tokens are
   signed, not encrypted, so the client can read every released claim. A value
   whose JSON is longer than 4096 characters is dropped (logged by claim name and
@@ -237,8 +413,8 @@ organization-level `DOCKERHUB_TOKEN` secret, the same way Constellation publishe
 its relay image.
 
 The entrypoint applies pending Prisma migrations, then starts the proxy. The image
-ships an empty resource-server registry, so mount your own and point
-`RESOURCE_SERVERS_PATH` at it (the same goes for `TRUST_POLICY_PATH`). A minimal
+starts with no resource servers: approve each one with
+`asterism-cli resource-server approve` (see "Resource servers" above). A minimal
 compose file for a host behind a TLS-terminating reverse proxy:
 
 ```yaml
@@ -259,10 +435,8 @@ services:
       OIDC_CLIENT_SECRET:
       OIDC_SUBJECT_CLAIM:
       OIDC_CLAIM_MAP:
+      ADMIN_GROUPS:
       ENABLE_LOCAL_ACCOUNTS:
-      RESOURCE_SERVERS_PATH: /app/site-config/resource-servers.yaml
-    volumes:
-      - ./config:/app/site-config:ro
     depends_on:
       postgres:
         condition: service_healthy

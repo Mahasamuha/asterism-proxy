@@ -170,3 +170,20 @@ describe("deny-client remove / list / usage", () => {
     }
   });
 });
+
+describe("deny-client: audit log", () => {
+  it("P1 add and remove write audit rows with actor cli", async () => {
+    await runCli("deny-client", ["add", "evil.example.com", "--reason", "abuse"]);
+    await runCli("deny-client", ["remove", "evil.example.com"]);
+    const rows = await prisma.adminAuditLog.findMany({ orderBy: { at: "asc" }, select: { actor: true, action: true, target: true, before: true, after: true } });
+    expect(rows).toEqual([
+      { actor: "cli", action: "denylist.add", target: "domain:evil.example.com", before: null, after: { reason: "abuse", grantsRevoked: 0, tokensRevoked: 0 } },
+      { actor: "cli", action: "denylist.remove", target: "domain:evil.example.com", before: { reason: "abuse" }, after: null },
+    ]);
+  });
+
+  it("P1 removing an entry that does not exist writes no audit row", async () => {
+    await runCli("deny-client", ["remove", "nothing.example.com"]);
+    expect(await prisma.adminAuditLog.count()).toBe(0);
+  });
+});

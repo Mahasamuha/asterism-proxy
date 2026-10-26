@@ -4,6 +4,7 @@
 //   pnpm --filter @mcp-auth/proxy local-user add <username>
 //   pnpm --filter @mcp-auth/proxy local-user deactivate <username>
 //   pnpm --filter @mcp-auth/proxy local-user list
+//   pnpm --filter @mcp-auth/proxy local-user set-admin <username> on|off
 //
 // In the production container (no tsx, no src/), use the asterism-cli wrapper:
 //   docker compose exec asterism-proxy asterism-cli local-user add <username>
@@ -13,7 +14,9 @@
 // scripting, e.g. docker compose exec -T) it reads one line.
 // `deactivate` sets LocalUser.isActive=false and revokes the user's grants and
 // refresh tokens; existing session cookies stop validating immediately (see
-// identity/session.ts). Never prints passwords or hashes.
+// identity/session.ts). `set-admin` marks a local account as an administrator of
+// asterism (for the future admin UI); it can only be set here, never over the web.
+// Never prints passwords or hashes.
 import readline from "node:readline";
 import { Writable } from "node:stream";
 import { prisma } from "../db.js";
@@ -23,7 +26,8 @@ import { passwordProblem } from "../identity/password-policy.js";
 const USAGE = `Usage:
   local-user add <username>      (password read from stdin)
   local-user deactivate <username>
-  local-user list`;
+  local-user list
+  local-user set-admin <username> on|off`;
 
 /** Reads one line from stdin. With a TTY, shows `prompt` and suppresses echo. */
 function readLine(prompt: string): Promise<string> {
@@ -104,6 +108,21 @@ async function deactivate(rawUsername: string): Promise<void> {
   console.log("Outstanding access tokens remain valid until they expire (at most 15 minutes).");
 }
 
+async function setAdmin(rawUsername: string, flag: string): Promise<void> {
+  if (flag !== "on" && flag !== "off") throw new Error('set-admin takes "on" or "off"');
+  const username = normalizeUsername(rawUsername);
+  const isAdmin = flag === "on";
+  await prisma.$transaction(async (tx) => {
+    const row = await tx.localUser.findUnique({ where: { username }, select: { isAdmin: true } });
+    if (!row) throw new Error(`No local user "${username}"`);
+    await tx.localUser.update({ where: { username }, data: { isAdmin } });
+    await tx.adminAuditLog.create({
+      data: { actor: "cli", action: "local-user.set-admin", target: username, before: { isAdmin: row.isAdmin }, after: { isAdmin } },
+    });
+  });
+  console.log(`${username} is ${isAdmin ? "now" : "no longer"} an administrator.`);
+}
+
 async function list(): Promise<void> {
   const rows = await prisma.localUser.findMany({ orderBy: { createdAt: "asc" } });
   if (rows.length === 0) {
@@ -112,16 +131,17 @@ async function list(): Promise<void> {
   }
   for (const r of rows) {
     console.log(
-      `${r.createdAt.toISOString()}  ${r.isActive ? "active  " : "inactive"}  ${r.username}` +
+      `${r.createdAt.toISOString()}  ${r.isActive ? "active  " : "inactive"}  ${r.username}${r.isAdmin ? "  [admin]" : ""}` +
         `  (last login ${r.lastLoginAt ? r.lastLoginAt.toISOString() : "never"})`
     );
   }
 }
 
 async function main(): Promise<number> {
-  const [command, username] = process.argv.slice(2);
+  const [command, username, flag] = process.argv.slice(2);
   if (command === "add" && username) await add(username);
   else if (command === "deactivate" && username) await deactivate(username);
+  else if (command === "set-admin" && username && flag) await setAdmin(username, flag);
   else if (command === "list") await list();
   else {
     console.error(USAGE);

@@ -190,7 +190,7 @@ describe("request id and security headers", () => {
     expect(bad.headers.get("x-content-type-options")).toBe("nosniff");
   });
 
-  const CSP = `default-src 'none'; script-src ${CONSENT_SCRIPT_SOURCE}; style-src 'self' 'unsafe-inline'; img-src https:; form-action 'self'; frame-ancestors 'none'; base-uri 'none'`;
+  const CSP = `default-src 'none'; script-src ${CONSENT_SCRIPT_SOURCE}; style-src 'self'; img-src 'self' https:; font-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'`;
 
   it("P1 sets Referrer-Policy and the strict CSP on every response, hides x-powered-by, and sends no HSTS over http", async () => {
     const base = await boot();
@@ -212,6 +212,24 @@ describe("request id and security headers", () => {
     const res = await fetch(`${base}/oauth/consent`, { method: "POST" });
     expect(res.status).toBe(400);
     expect(res.headers.get("content-security-policy")).toBe(CSP);
+  });
+
+  it("serves the stylesheet, fonts and brand marks under /assets with the strict CSP, and nothing else there", async () => {
+    const base = await boot();
+    const css = await fetch(`${base}/assets/mahasamuha.css`);
+    expect(css.status).toBe(200);
+    expect(css.headers.get("content-type")).toMatch(/^text\/css/);
+    expect(css.headers.get("content-security-policy")).toBe(CSP);
+    const font = await fetch(`${base}/assets/fonts/Geist-Variable.woff2`);
+    expect(font.status).toBe(200);
+    expect(font.headers.get("content-type")).toBe("font/woff2");
+    const mark = await fetch(`${base}/assets/brand/mahasamuha-mark.svg`);
+    expect(mark.status).toBe(200);
+    expect(mark.headers.get("content-type")).toMatch(/^image\/svg\+xml/);
+    for (const path of ["/assets/", "/assets/fonts", "/assets/missing.css", "/assets/../server.js"]) {
+      const res = await fetch(`${base}${path}`);
+      expect(res.status, path).toBe(404);
+    }
   });
 
   it("P1 sends HSTS only when ISSUER_URL is https, including on body-parser errors", async () => {

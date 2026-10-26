@@ -158,7 +158,7 @@ describe("GET/POST /oauth/device (user-code entry)", () => {
       const page = await getPath(app.baseUrl, "/oauth/device");
       expect(page.status).toBe(200);
       expect(page.headers.get("content-security-policy")).toBe(
-        `default-src 'none'; script-src ${CONSENT_SCRIPT_SOURCE}; style-src 'self' 'unsafe-inline'; img-src https:; form-action 'self' https://idp.example.test; frame-ancestors 'none'; base-uri 'none'`
+        `default-src 'none'; script-src ${CONSENT_SCRIPT_SOURCE}; style-src 'self'; img-src 'self' https:; font-src 'self'; form-action 'self' https://idp.example.test; frame-ancestors 'none'; base-uri 'none'`
       );
       const r = await enterCode(freshIp(), "ABCD-2345");
       expect(r.status).toBe(302);
@@ -242,6 +242,26 @@ describe("GET/POST /oauth/device (user-code entry)", () => {
     expect(data).toMatchObject({ clientId: CLIENT_ID, resource: RESOURCE, scopes: ["read"], flowType: "device", redirectUri: DEVICE_FLOW_REDIRECT_URI_SENTINEL, state: "ABCD2345" });
     expect(data.expiresAt).toEqual(entry.expiresAt);
     expect(r.headers.get("location")).toBe(`/auth/login?flow=${data.handle}`);
+  });
+
+  it.each([
+    [["read"], false],
+    [["read", "root"], true],
+  ])("scopes %j: the flow's requireFreshLogin is %s and the upstream sign-in is told", async (scopes, fresh) => {
+    const { startUpstreamAuth } = await import("../identity/oidc.js");
+    vi.mocked(startUpstreamAuth).mockResolvedValue("https://idp.example.test/authorize?state=y");
+    m("deviceCode", "findFirst").mockResolvedValue(pending({ scopes }));
+    const saved = config.enableOidc;
+    config.enableOidc = true;
+    try {
+      const r = await enterCode(freshIp(), "ABCD-2345");
+      expect(r.status).toBe(302);
+      const data = m("authorizationRequest", "create").mock.calls[0]![0].data;
+      expect(data.requireFreshLogin).toBe(fresh);
+      expect(startUpstreamAuth).toHaveBeenLastCalledWith(data.handle, { fresh });
+    } finally {
+      config.enableOidc = saved;
+    }
   });
 
   it("GET never starts a flow or looks up the code: it shows the entry page pre-filled (H1)", async () => {

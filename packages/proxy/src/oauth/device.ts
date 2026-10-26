@@ -6,6 +6,7 @@ import { createLogger } from "../logger.js";
 import { resolveClient } from "../clients/cimd.js";
 import { isRegisteredResource, lookupResourceServer } from "../resource-registry.js";
 import { getUpstreamAuthorizationEndpoint, startUpstreamAuth } from "../identity/oidc.js";
+import { requestsFreshSignIn } from "./fresh-sign-in.js";
 import { bodyOf, stringField } from "../http-params.js";
 import { issueCsrfToken, verifyCsrfToken } from "../identity/csrf.js";
 import { bindFlow } from "../identity/flow-binding.js";
@@ -253,6 +254,8 @@ async function startDeviceConsent(req: Request, res: Response, rawCode: string):
   }
   release(); // a valid code is not a failure
 
+  // As in /oauth/authorize: a fresh-sign-in scope forces a re-authentication.
+  const fresh = requestsFreshSignIn(lookupResourceServer(entry.resource), entry.scopes);
   const handle = randomBytes(24).toString("hex");
   await prisma.authorizationRequest.create({
     data: {
@@ -264,6 +267,7 @@ async function startDeviceConsent(req: Request, res: Response, rawCode: string):
       redirectUri: DEVICE_FLOW_REDIRECT_URI_SENTINEL,
       state: userCode,
       codeChallenge: DEVICE_FLOW_CODE_CHALLENGE_PLACEHOLDER,
+      requireFreshLogin: fresh,
       expiresAt: entry.expiresAt,
     },
   });
@@ -274,7 +278,7 @@ async function startDeviceConsent(req: Request, res: Response, rawCode: string):
     res.redirect(`/auth/login?flow=${encodeURIComponent(handle)}`);
     return;
   }
-  const upstreamUrl = await startUpstreamAuth(handle);
+  const upstreamUrl = await startUpstreamAuth(handle, { fresh });
   res.redirect(upstreamUrl);
 }
 

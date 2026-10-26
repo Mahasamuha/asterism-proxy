@@ -1,0 +1,91 @@
+<%- include('_head', { title: s.displayName, nav: 'servers', back: { href: '/admin/resource-servers', text: 'all servers' } }) %>
+    <% if (s.pending) { %>
+    <div class="card">
+      <h2>Changes waiting for approval</h2>
+      <%- include('../partials/banner', { status: 'warning', title: 'Clients get more access once you accept', text: 'The server\'s metadata changed on ' + s.pending.since.toISOString() + ' in ways that give clients more access. Until you accept them, asterism keeps issuing against the version you approved. Parts of the change that only narrow access (a scope removed, a flag added) are already applied.' }) %>
+      <ul>
+      <% s.pending.changes.forEach(function (c) { %>
+        <% if (c.kind === 'new-scope') { %>
+        <li>New scope <code><%= c.scope %></code>: <%= c.description %>
+          <% if (c.freshSignIn) { %><span class="tag">fresh sign-in</span><% } else if (c.stepUp) { %><span class="tag">step-up</span><% } else if (c.shortLived) { %><span class="tag">short-lived</span><% } %></li>
+        <% } else if (c.kind === 'flag-removed') { %>
+        <li>Scope <code><%= c.scope %></code> is no longer <%= c.flag === 'step_up' ? 'step-up' : c.flag === 'short_lived' ? 'short-lived' : 'fresh sign-in' %> (it was before).</li>
+        <% } else { %>
+        <li>Scope <code><%= c.scope %></code> has a new description. Consent shows the declared text unless you override it below.<br>
+          <span class="eyebrow">was</span> <%= c.from %><br><span class="eyebrow">now</span> <%= c.to %></li>
+        <% } %>
+      <% }); %>
+      </ul>
+      <form method="POST" action="/admin/resource-servers/<%= s.id %>/accept-metadata">
+        <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
+        <input type="hidden" name="fingerprint" value="<%= s.pending.fingerprint %>">
+        <div class="actions"><button type="submit">accept these changes</button></div>
+      </form>
+    </div>
+    <% } %>
+    <div class="card">
+      <p><code><%= s.identifier %></code></p>
+      <p class="muted">Approved <%= s.approvedAt.toISOString() %> by <%= s.approvedBy %>.
+        Metadata: <% if (!s.hasSnapshot) { %>no snapshot<% } else { %>fetched <%= s.age %><% } %><% if (s.metadataExpiresAt) { %>, refreshes after <%= s.metadataExpiresAt.toISOString() %><% } %>.</p>
+      <% if (s.stale) { %><%- include('../partials/banner', { status: 'warning', title: 'Metadata is stale', text: 'It expired ' + s.staleFor + ' ago and has not been refreshed. The last snapshot (fetched ' + s.age + ') is still in use.' + (s.lastFetchError ? ' Last fetch error: ' + s.lastFetchError : '') }) %><% } %>
+      <% if (s.lastFetchError && !s.stale) { %><%- include('../partials/banner', { status: 'warning', title: 'The last metadata fetch failed', text: 'The previous snapshot is still in use: ' + s.lastFetchError }) %><% } %>
+      <form method="POST" action="/admin/resource-servers/<%= s.id %>/refresh">
+        <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
+        <button type="submit" class="ghost">refresh metadata now ↻</button>
+      </form>
+    </div>
+
+    <form method="POST" action="/admin/resource-servers/<%= s.id %>/update" class="card">
+      <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
+      <label for="display_name">Display name</label>
+      <input id="display_name" name="display_name" type="text" value="<%= s.displayName %>" required>
+      <label for="release_claims">Release claims (comma-separated)</label>
+      <input id="release_claims" name="release_claims" type="text" value="<%= s.releaseClaims.join(', ') %>">
+      <div>
+        <label class="inline"><input type="checkbox" name="enabled"<%= s.enabled ? ' checked' : '' %>> Enabled</label>
+        <label class="inline"><input type="checkbox" name="internal"<%= s.internal ? ' checked' : '' %>> Internal (private-network addresses allowed)</label>
+      </div>
+      <div class="actions"><button type="submit">save</button></div>
+    </form>
+
+    <h2>Scopes</h2>
+    <% if (!s.hasSnapshot) { %><%- include('../partials/banner', { status: 'warning', title: 'No metadata snapshot yet', text: 'No scopes are known until the first fetch succeeds. Try refreshing the metadata.' }) %><% } %>
+    <% s.scopes.forEach(function (sc) { %>
+    <form method="POST" action="/admin/resource-servers/<%= s.id %>/policy" class="card">
+      <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
+      <input type="hidden" name="scope" value="<%= sc.name %>">
+      <p><code><strong><%= sc.name %></strong></code>
+        <% if (sc.stepUp) { %><span class="tag">step-up (declared by the server)</span><% } %>
+        <% if (sc.declaredFreshSignIn) { %><span class="tag">fresh sign-in (declared by the server)</span><% } %>
+        <% if (sc.declaredShortLived) { %><span class="tag">short-lived (declared by the server)</span><% } %>
+      </p>
+      <p class="muted">Declared: <%= sc.declaredDescription %></p>
+      <label class="inline"><input type="checkbox" name="short_lived"<%= (sc.policyShortLived || sc.declaredShortLived) ? ' checked' : '' %>> Short-lived tokens (5 minutes, no refresh)</label>
+      <% if (sc.declaredShortLived) { %><p class="muted">The server declares this scope short-lived<%= sc.stepUp ? ' (a step-up scope always is)' : '' %>. Keeping this checked also pins it here, so it stays short-lived if the server stops declaring it.</p><% } %>
+      <label class="inline"><input type="checkbox" name="fresh_sign_in"<%= (sc.policyFreshSignIn || sc.declaredFreshSignIn) ? ' checked' : '' %>> Require a fresh sign-in (the user must authenticate again; implies short-lived)</label>
+      <% if (sc.declaredFreshSignIn) { %><p class="muted">The server declares this scope as needing a fresh sign-in. Keeping this checked also pins it here, so it still does if the server stops declaring it.</p><% } %>
+      <label for="groups-<%= sc.name %>">Require groups (comma-separated; empty means any user)</label>
+      <input id="groups-<%= sc.name %>" name="require_groups" type="text" value="<%= sc.requireGroups.join(', ') %>">
+      <label for="desc-<%= sc.name %>">Description override (shown on consent; empty uses the declared text)</label>
+      <input id="desc-<%= sc.name %>" name="description" type="text" value="<%= sc.descriptionOverride || '' %>" maxlength="500">
+      <div class="actions"><button type="submit">save scope</button></div>
+    </form>
+    <% }); %>
+    <% if (s.undeclaredPolicies.length > 0) { %>
+    <h2>Policy for scopes the server no longer declares</h2>
+    <%- include('../partials/banner', { status: 'info', text: 'These have no effect. They apply again if the server declares the scope.' }) %>
+    <div class="table-wrap">
+    <table>
+      <thead><tr><th>Scope</th><th>Short-lived</th><th>Fresh sign-in</th><th>Require groups</th><th>Description override</th></tr></thead>
+      <tbody>
+      <% s.undeclaredPolicies.forEach(function (p) { %>
+        <tr><td><code><%= p.scopeName %></code></td><td><%= p.shortLived ? 'yes' : 'no' %></td><td><%= p.freshSignIn ? 'yes' : 'no' %></td><td><%= p.requireGroups.join(', ') %></td><td><%= p.descriptionOverride || '' %></td></tr>
+      <% }); %>
+      </tbody>
+    </table>
+    </div>
+    <% } %>
+
+    <h2>Remove</h2>
+    <p><a class="ghost" href="/admin/resource-servers/<%= s.id %>/remove">remove this server →</a></p>
+<%- include('_foot') %>

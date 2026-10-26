@@ -6,7 +6,7 @@ const db = vi.hoisted(() => ({ prisma: { user: { findFirst: vi.fn(), findUniqueO
 vi.mock("../config.js", () => ({ config: cfg }));
 vi.mock("../db.js", () => db);
 
-import { clearSession, getSessionUserId, revokeSessions, setSession, startSession } from "./session.js";
+import { clearSession, getSession, getSessionUserId, markReauthenticated, reauthenticatedAt, revokeSessions, setSession, startSession } from "./session.js";
 
 const NOW = Date.UTC(2030, 5, 1, 12);
 const DAY = 24 * 60 * 60 * 1000;
@@ -21,6 +21,14 @@ beforeEach(() => {
   cfg.issuerUrl = "http://localhost:3000";
 });
 afterEach(() => vi.useRealTimers());
+
+describe("getSession", () => {
+  it("P0 returns when the cookie was issued, for the admin UI's recent sign-in check", async () => {
+    expect(await getSession(req(`u1.3.${NOW - 1000}`))).toEqual({ userId: "u1", issuedAtMs: NOW - 1000 });
+    expect(await getSession(req(`u1.3.${NOW + 1000}`))).toBeNull();
+    expect(await getSession(req(false))).toBeNull();
+  });
+});
 
 describe("getSessionUserId", () => {
   it("P0 accepts a fresh `${userId}.${epoch}.${issuedAt}` cookie and looks the user up by id and epoch", async () => {
@@ -121,5 +129,60 @@ describe("setSession / clearSession", () => {
     const clearCookie = vi.fn();
     clearSession({ clearCookie } as unknown as Response);
     expect(clearCookie).toHaveBeenCalledWith("session");
+  });
+
+  it("P0 clearSession also clears the re-authentication marker, on its own path", () => {
+    const clearCookie = vi.fn();
+    clearSession({ clearCookie } as unknown as Response);
+    expect(clearCookie).toHaveBeenCalledWith("reauth", { path: "/admin" });
+  });
+});
+
+describe("markReauthenticated / reauthenticatedAt", () => {
+  const reauthReq = (reauth: unknown) => ({ signedCookies: { reauth } }) as unknown as Request;
+  const WINDOW = 10 * 60 * 1000;
+
+  it("P0 sets a signed httpOnly SameSite=Lax cookie under /admin that lives for the freshness window", () => {
+    const cookie = vi.fn();
+    markReauthenticated({ cookie } as unknown as Response, "u1");
+    expect(cookie).toHaveBeenCalledWith("reauth", `u1.${NOW}`, { httpOnly: true, secure: false, sameSite: "lax", maxAge: WINDOW, path: "/admin", signed: true });
+  });
+
+  it("P1 Secure follows the issuer scheme", () => {
+    cfg.issuerUrl = "https://auth.example.test";
+    const cookie = vi.fn();
+    markReauthenticated({ cookie } as unknown as Response, "u1");
+    expect(cookie.mock.calls[0]?.[2]).toMatchObject({ secure: true });
+  });
+
+  it("P0 returns the timestamp for a well-formed marker of the same user", () => {
+    expect(reauthenticatedAt(reauthReq(`u1.${NOW - 5000}`), "u1")).toBe(NOW - 5000);
+    expect(reauthenticatedAt(reauthReq(`u1.${NOW}`), "u1")).toBe(NOW);
+  });
+
+  it("P0 is null for another user's marker", () => {
+    expect(reauthenticatedAt(reauthReq(`u1.${NOW - 5000}`), "u2")).toBeNull();
+    expect(reauthenticatedAt(reauthReq(`u1.${NOW - 5000}`), "u")).toBeNull();
+  });
+
+  it("P0 is null when absent, tampered (cookie-parser yields false) or not a string", () => {
+    expect(reauthenticatedAt(reauthReq(undefined), "u1")).toBeNull();
+    expect(reauthenticatedAt(reauthReq(false), "u1")).toBeNull();
+    expect(reauthenticatedAt({ signedCookies: {} } as unknown as Request, "u1")).toBeNull();
+    expect(reauthenticatedAt({} as unknown as Request, "u1")).toBeNull();
+  });
+
+  it("P0 is null for a timestamp in the future", () => {
+    expect(reauthenticatedAt(reauthReq(`u1.${NOW + 1}`), "u1")).toBeNull();
+  });
+
+  it("P0 is null for a malformed value", () => {
+    for (const v of ["u1", "u1.", ".123", `.${NOW}`, "u1.abc", "u1.-5", "u1.1e9", `u1.${NOW}x`, "u1.1234567890123456"]) {
+      expect(reauthenticatedAt(reauthReq(v), "u1"), v).toBeNull();
+    }
+  });
+
+  it("P1 a user id containing dots still matches (split on the last dot)", () => {
+    expect(reauthenticatedAt(reauthReq(`a.b.${NOW - 1}`), "a.b")).toBe(NOW - 1);
   });
 });

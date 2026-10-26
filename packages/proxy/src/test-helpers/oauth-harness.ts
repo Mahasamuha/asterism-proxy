@@ -14,17 +14,18 @@ export const REDIRECT_URI = "https://client.example.test/cb";
 export const GRANT_TYPE_DEVICE = "urn:ietf:params:oauth:grant-type:device_code";
 export const GRANT_TYPE_JWT_BEARER = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer";
 
-/** A resource-server registry with one server (scopes read, write, admin; admin is short-lived). */
+/** A resource-server registry with one server (scopes read, write, admin, root, ops; admin is short-lived, root also needs a fresh sign-in). */
 export function fakeResourceRegistry() {
   const server = {
     identifier: RESOURCE,
     name: "Test MCP",
     releaseClaims: [] as string[],
     scopes: [
-      { name: "read", description: "Read things", shortLived: false },
-      { name: "write", description: "Write things", shortLived: false },
-      { name: "admin", description: "Administer", shortLived: true },
-      { name: "ops", description: "Operate", shortLived: false, requireGroups: ["ops", "sre"] },
+      { name: "read", description: "Read things", shortLived: false, freshSignIn: false },
+      { name: "write", description: "Write things", shortLived: false, freshSignIn: false },
+      { name: "admin", description: "Administer", shortLived: true, freshSignIn: false },
+      { name: "root", description: "Change credentials", shortLived: true, freshSignIn: true },
+      { name: "ops", description: "Operate", shortLived: false, freshSignIn: false, requireGroups: ["ops", "sre"] },
     ],
   };
   return {
@@ -33,7 +34,7 @@ export function fakeResourceRegistry() {
   };
 }
 
-export type PrismaMock = Record<string, Record<string, Mock>> & { $transaction: Mock };
+export type PrismaMock = Record<string, Record<string, Mock>> & { $transaction: Mock; $executeRaw: Mock; $queryRaw: Mock };
 
 /** A Prisma stand-in: any `prisma.<model>.<method>` is a `vi.fn()` created on
  * first use, and `$transaction` runs its callback against the same object (or
@@ -42,6 +43,8 @@ export function createPrismaMock(): PrismaMock & { reset: () => void } {
   const fns: Mock[] = [];
   const models = new Map<string, Record<string, Mock>>();
   const transaction = vi.fn();
+  const executeRaw = vi.fn();
+  const queryRaw = vi.fn();
   const model = (name: string) => {
     let m = models.get(name);
     if (!m) {
@@ -64,6 +67,8 @@ export function createPrismaMock(): PrismaMock & { reset: () => void } {
   const root: unknown = new Proxy({} as Record<string, unknown>, {
     get(_t, prop: string) {
       if (prop === "$transaction") return transaction;
+      if (prop === "$executeRaw") return executeRaw;
+      if (prop === "$queryRaw") return queryRaw;
       if (prop === "reset") return reset;
       return model(prop);
     },
@@ -71,6 +76,8 @@ export function createPrismaMock(): PrismaMock & { reset: () => void } {
   function reset(): void {
     for (const fn of fns) fn.mockReset();
     transaction.mockReset();
+    executeRaw.mockReset().mockResolvedValue(1);
+    queryRaw.mockReset().mockResolvedValue([]);
     transaction.mockImplementation(async (arg: unknown) => (typeof arg === "function" ? (arg as (tx: unknown) => unknown)(root) : Promise.all(arg as unknown[])));
   }
   reset();

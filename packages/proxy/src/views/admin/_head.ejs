@@ -1,0 +1,17 @@
+<% var current = typeof nav !== "undefined" ? nav : null; -%>
+<%- include('../partials/top', {
+  title: title,
+  product: 'asterism · admin',
+  home: '/admin',
+  width: 'wide',
+  links: [
+    { href: '/admin', label: 'overview', current: current === 'overview' },
+    { href: '/admin/resource-servers', label: 'resource servers', current: current === 'servers' },
+    { href: '/admin/clients', label: 'client denylist', current: current === 'clients' },
+    { href: '/admin/audit', label: 'audit log', current: current === 'audit' },
+    { href: '/grants', label: 'your grants', current: false }
+  ],
+  back: typeof back !== 'undefined' ? back : null,
+  error: typeof error !== 'undefined' ? error : null,
+  notice: typeof notice !== 'undefined' ? notice : null
+}) %>

@@ -19,12 +19,16 @@ export function accessTokenScopes(scopes: string[]): string[] {
 /** Drops scopes the resource registry marks shortLived. Those exist to bound
  * the damage of a stolen token to minutes, so they are never carried into a
  * refresh token; the user must re-consent to get them again. Applied both when
- * a refresh token is stored and when one is redeemed (rows from before the fix). */
+ * a refresh token is stored and when one is redeemed (rows from before the fix).
+ * Also drops scopes the server no longer declares (offline_access excepted). */
 export function refreshableScopes(resource: string, scopes: string[]): string[] {
   const server = lookupResourceServer(resource);
   if (!server) return scopes;
   const shortLived = new Set(server.scopes.filter((s) => s.shortLived).map((s) => s.name));
-  return scopes.filter((s) => !shortLived.has(s));
+  const declared = new Set(server.scopes.map((s) => s.name));
+  // A scope the server has stopped declaring is dropped (the grant is not
+  // revoked); offline_access is ours, not the server's, and stays.
+  return scopes.filter((s) => !shortLived.has(s) && (s === "offline_access" || declared.has(s)));
 }
 
 /** Drops scopes gated by `requireGroups` that the user no longer qualifies for,

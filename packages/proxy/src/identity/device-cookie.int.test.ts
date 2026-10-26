@@ -180,7 +180,7 @@ describe("device cookies (finding 4)", () => {
     const { user, password } = await seedLocalUser({ username: "alice" });
     const alices = cookieClient();
     await login(alices, "alice", password);
-    const logoutCsrf = /name="csrf_token" value="([^"]+)"><button type="submit">Sign out/.exec(await (await alices.fetch(`${app.baseUrl}/auth/account`)).text())![1]!;
+    const logoutCsrf = /name="csrf_token" value="([^"]+)"><button type="submit">sign out/.exec(await (await alices.fetch(`${app.baseUrl}/auth/account`)).text())![1]!;
     const out = await alices.fetch(`${app.baseUrl}/auth/logout`, { method: "POST", ...form({ csrf_token: logoutCsrf }) });
     expect(out.status).toBe(200);
     expect((await prisma.user.findUniqueOrThrow({ where: { id: user.id } })).sessionEpoch).toBe(1);

@@ -19,7 +19,7 @@ vi.mock("../resource-registry.js", () => ({
 }));
 vi.mock("../config.js", () => ({ config: { issuerUrl: "https://as.example.test", get claimMap() { return h.claimMap; } } }));
 
-import { mintAccessToken } from "./access-token.js";
+import { mintAccessToken, UnregisteredResourceError } from "./access-token.js";
 
 const RESOURCE = "https://mcp.example.test";
 const params = (over: Record<string, unknown> = {}) => ({ userId: "u1", clientId: "c1", resource: RESOURCE, scopes: ["read"], releaseClaims: [], ...over }) as Parameters<typeof mintAccessToken>[0];
@@ -59,6 +59,23 @@ describe("mintAccessToken", () => {
 
   it("ignores a shortLived flag on a scope that was not granted", async () => {
     expect((await mintAccessToken(params({ scopes: ["write"] }))).expiresIn).toBe(900);
+  });
+
+  it("throws UnregisteredResourceError for an unregistered resource, signing nothing", async () => {
+    await expect(mintAccessToken(params({ resource: "https://gone.test" }))).rejects.toBeInstanceOf(UnregisteredResourceError);
+    expect(h.signJwt).not.toHaveBeenCalled();
+  });
+
+  it("mints only scopes the server still declares", async () => {
+    await mintAccessToken(params({ scopes: ["read", "dropped", "write"] }));
+    expect(h.signJwt.mock.calls[0]![0]["scope"]).toBe("read write");
+  });
+
+  it("drops offline_access and undeclared scopes, and bases the lifetime on what is left", async () => {
+    h.servers.set(RESOURCE, { scopes: [{ name: "read" }] }); // admin (shortLived) no longer declared
+    const out = await mintAccessToken(params({ scopes: ["read", "admin", "offline_access"] }));
+    expect(h.signJwt.mock.calls[0]![0]["scope"]).toBe("read");
+    expect(out.expiresIn).toBe(900);
   });
 
   it("throws for an array audience", async () => {

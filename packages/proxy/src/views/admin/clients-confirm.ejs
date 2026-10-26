@@ -1,0 +1,18 @@
+<%- include('_head', { title: 'Confirm denial', nav: 'clients' }) %>
+    <% if (p.note) { %><%- include('../partials/banner', { status: 'warning', text: p.note }) %><% } %>
+    <div class="card">
+      <p>Deny <%= p.kind === 'domain' ? 'the domain' : 'the client id' %> <code><%= p.value %></code><% if (p.kind === 'domain') { %> and its subdomains<% } %>?</p>
+      <% if (p.existing) { %><p class="muted">This entry already exists; confirming updates its reason.</p><% } %>
+      <p>This will revoke <strong><%= p.grantsToRevoke %></strong> grant(s) and <strong><%= p.tokensToRevoke %></strong> refresh token(s). Revoked grants are not restored if you remove the entry later. Access tokens already issued stay valid until they expire (at most 15 minutes).</p>
+      <% if (reason) { %><p class="muted">Reason: <%= reason %></p><% } %>
+      <form method="POST" action="/admin/clients/add">
+        <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
+        <input type="hidden" name="value" value="<%= value %>">
+        <input type="hidden" name="reason" value="<%= reason %>">
+        <div class="actions">
+          <button type="submit" class="danger">yes, deny it</button>
+          <a class="ghost" href="/admin/clients">cancel</a>
+        </div>
+      </form>
+    </div>
+<%- include('_foot') %>

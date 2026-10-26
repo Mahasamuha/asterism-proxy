@@ -48,6 +48,9 @@ model LocalUser {
   createdAt    DateTime  @default(now()) @map("created_at")
   lastLoginAt  DateTime? @map("last_login_at")
   isActive     Boolean   @default(true) @map("is_active")
+  // May administer asterism (the admin UI, when it exists). Set only with
+  // `asterism-cli local-user set-admin`, never through the web.
+  isAdmin      Boolean   @default(false) @map("is_admin")
   userId       String    @unique @map("user_id")
 
   user User @relation(fields: [userId], references: [id])
@@ -156,6 +159,75 @@ model DeniedClient {
   @@map("denied_clients")
 }
 
+// ---------- Resource servers ----------
+// MCP servers describe themselves in their RFC 9728 metadata; this table holds
+// the operator's policy plus the last good metadata snapshot. The two are joined
+// in memory by resource-registry.ts.
+
+model ResourceServer {
+  id                 String    @id @default(cuid())
+  // The exact `resource` value and token `aud`.
+  identifier         String    @unique
+  // Shown on consent pages instead of the metadata's resource_name.
+  displayName        String    @map("display_name")
+  enabled            Boolean   @default(true)
+  // Private-network addresses may be fetched for this server.
+  internal           Boolean   @default(false)
+  releaseClaims      String[]  @default([]) @map("release_claims")
+  // Last good ResourceMetadata (resource-servers/metadata.ts).
+  metadata           Json?
+  metadataFetchedAt  DateTime? @map("metadata_fetched_at")
+  metadataExpiresAt  DateTime? @map("metadata_expires_at")
+  lastFetchError     String?   @map("last_fetch_error")
+  lastFetchAttemptAt DateTime? @map("last_fetch_attempt_at")
+  // A fetched document that would widen access (new scope, a flag dropped, a
+  // changed description) waits here for the operator; `metadata` stays the
+  // approved version in force.
+  pendingMetadata    Json?     @map("pending_metadata")
+  pendingSince       DateTime? @map("pending_since")
+  approvedAt         DateTime  @default(now()) @map("approved_at")
+  // Actor label, e.g. `cli` or `user:<id>`.
+  approvedBy         String    @map("approved_by")
+  createdAt          DateTime  @default(now()) @map("created_at")
+  updatedAt          DateTime  @updatedAt @map("updated_at")
+
+  scopePolicies ScopePolicy[]
+
+  @@map("resource_servers")
+}
+
+// Operator policy for one scope. It can only tighten what the server declares.
+model ScopePolicy {
+  id                  String   @id @default(cuid())
+  resourceServerId    String   @map("resource_server_id")
+  scopeName           String   @map("scope_name")
+  shortLived          Boolean  @default(false) @map("short_lived")
+  freshSignIn         Boolean  @default(false) @map("fresh_sign_in")
+  requireGroups       String[] @default([]) @map("require_groups")
+  descriptionOverride String?  @map("description_override")
+  createdAt           DateTime @default(now()) @map("created_at")
+  updatedAt           DateTime @updatedAt @map("updated_at")
+
+  resourceServer ResourceServer @relation(fields: [resourceServerId], references: [id], onDelete: Cascade)
+
+  @@unique([resourceServerId, scopeName])
+  @@map("scope_policies")
+}
+
+model AdminAuditLog {
+  id     String   @id @default(cuid())
+  at     DateTime @default(now())
+  // `user:<id>` or `cli`.
+  actor  String
+  action String
+  target String
+  before Json?
+  after  Json?
+
+  @@index([at])
+  @@map("admin_audit_log")
+}
+
 // ---------- Flow state ----------
 
 // Which kind of flow an AuthorizationRequest row belongs to. Every branch that
@@ -182,6 +254,12 @@ model AuthorizationRequest {
   upstreamNonce       String?  @map("upstream_nonce")
   upstreamVerifier    String?  @map("upstream_verifier")
   subject             String?  // populated once the user authenticates
+  // Self-login only: the upstream sign-in must be re-authenticated (the admin UI's recent sign-in).
+  requireFreshLogin   Boolean  @default(false) @map("require_fresh_login")
+  // The identity claims the consent page listed on its last GET. The approval
+  // records these (still released by the registry), not whatever the registry
+  // lists by the time the form is posted.
+  shownClaims         String[] @default([]) @map("shown_claims")
   createdAt           DateTime @default(now()) @map("created_at")
   expiresAt           DateTime @map("expires_at")
 

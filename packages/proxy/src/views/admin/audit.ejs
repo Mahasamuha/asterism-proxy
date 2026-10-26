@@ -1,0 +1,34 @@
+<%- include('_head', { title: 'Audit log', nav: 'audit' }) %>
+    <% if (entries.length === 0) { %>
+    <%- include('../partials/empty', { title: 'The audit log starts with your first change', text: 'Changes made here or with asterism-cli appear in this log.' }) %>
+    <% } else { %>
+    <div class="table-wrap">
+    <table>
+      <thead><tr><th>When (UTC)</th><th>Actor</th><th>Action</th><th>Target</th><th>Change</th></tr></thead>
+      <tbody>
+      <% entries.forEach(function (e) { %>
+        <tr>
+          <td><%= e.at %></td>
+          <td><%= e.actor %></td>
+          <td><%= e.action %></td>
+          <td><code><%= e.target %></code></td>
+          <td>
+            <% if (e.before !== null || e.after !== null) { %>
+            <details><summary>show</summary>
+              <% if (e.before !== null) { %><p class="eyebrow">before</p><pre><%= e.before %></pre><% } %>
+              <% if (e.after !== null) { %><p class="eyebrow">after</p><pre><%= e.after %></pre><% } %>
+            </details>
+            <% } %>
+          </td>
+        </tr>
+      <% }); %>
+      </tbody>
+    </table>
+    </div>
+    <% } %>
+    <div class="pager">
+      <% if (page > 1) { %><a href="/admin/audit?page=<%= page - 1 %>">← newer</a><% } %>
+      <span class="eyebrow">page <%= page %></span>
+      <% if (hasNext) { %><a href="/admin/audit?page=<%= page + 1 %>">older →</a><% } %>
+    </div>
+<%- include('_foot') %>

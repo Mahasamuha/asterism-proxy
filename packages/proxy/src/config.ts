@@ -115,6 +115,12 @@ const claimMap = z
     return map;
   });
 
+/** ADMIN_GROUPS: comma-separated group names; blanks are dropped. */
+const adminGroups = z
+  .string()
+  .optional()
+  .transform((raw): string[] => (raw ?? "").split(",").map((g) => g.trim()).filter((g) => g !== ""));
+
 const envSchema = z
   .object({
     DATABASE_URL: z.string().min(1, "DATABASE_URL is required"),
@@ -152,10 +158,16 @@ const envSchema = z
       })
       .default("sub"),
 
+    // Members of these groups (the normalized `groups` claim) may use the admin UI.
+    // Unset: no OIDC admin. Local accounts are admins by their own flag instead.
+    ADMIN_GROUPS: adminGroups,
+
     ENABLE_LOCAL_ACCOUNTS: boolFromEnv(false),
     ENABLE_DCR: boolFromEnv(false),
     ALLOW_INSECURE_CLIENT_METADATA: boolFromEnv(false),
 
+    // Retired: resource servers live in the database now. Still parsed so that a
+    // leftover setting is refused loudly instead of silently ignored.
     RESOURCE_SERVERS_PATH: z.string().optional(),
     TRUST_POLICY_PATH: z.string().optional(),
   })
@@ -174,6 +186,14 @@ const envSchema = z
         code: "custom",
         message: "ENABLE_DCR is not supported yet (PLAN T10 is deferred)",
         path: ["ENABLE_DCR"],
+      });
+    }
+    if (env.RESOURCE_SERVERS_PATH) {
+      ctx.addIssue({
+        code: "custom",
+        message:
+          "RESOURCE_SERVERS_PATH is no longer supported: resource servers are approved in the database now. Unset it and run `asterism-cli resource-server approve <identifier>` for each server",
+        path: ["RESOURCE_SERVERS_PATH"],
       });
     }
     if (env.ENABLE_OIDC) {
@@ -219,10 +239,11 @@ export const config = {
   // Released claim name -> upstream claim name (empty when unset).
   claimMap: env.OIDC_CLAIM_MAP,
 
+  adminGroups: env.ADMIN_GROUPS,
+
   enableLocalAccounts: env.ENABLE_LOCAL_ACCOUNTS,
   enableDcr: env.ENABLE_DCR,
   allowInsecureClientMetadata: env.ALLOW_INSECURE_CLIENT_METADATA,
 
-  resourceServersPath: env.RESOURCE_SERVERS_PATH ?? path.join(process.cwd(), "config/resource-servers.yaml"),
   trustPolicyPath: env.TRUST_POLICY_PATH ?? path.join(process.cwd(), "config/trust-policy.yaml"),
 };

@@ -78,6 +78,56 @@ app.get(protectedResourceMetadataPath(config.audience), protectedResourceMetadat
 
 The optional second argument adds `scopes_supported` to the metadata; without it the member is omitted. Claude.ai requests exactly the scopes listed there, so leave step-up-only scopes such as `admin` out.
 
+To describe the server and its scopes to the proxy, pass `resourceName` and `scopes` instead:
+
+```ts
+app.get(
+  protectedResourceMetadataPath(config.audience),
+  protectedResourceMetadataHandler(config, {
+    resourceName: "Constellation",
+    scopes: [
+      { name: "relay", description: "Use your Constellation shares" },
+      { name: "admin", description: "Administer the relay", stepUp: true },
+      { name: "wipe", description: "Delete every share", freshSignIn: true },
+    ],
+  }),
+);
+```
+
+This emits `resource_name` and an `asterism_scopes` member, an extension to RFC 9728 (which has no per-scope descriptions and no way to mark a scope step-up only or as needing a fresh sign-in):
+
+```json
+{
+  "resource": "https://relay.example/mcp",
+  "resource_name": "Constellation",
+  "authorization_servers": ["https://asterism.example"],
+  "bearer_methods_supported": ["header"],
+  "scopes_supported": ["relay"],
+  "asterism_scopes": [
+    { "name": "relay", "description": "Use your Constellation shares" },
+    { "name": "admin", "description": "Administer the relay", "step_up": true },
+    { "name": "wipe", "description": "Delete every share", "fresh_sign_in": true }
+  ]
+}
+```
+
+- Each scope is at one of three levels, and the levels nest:
+
+  | Level | In `scopes_supported` | Kept for refresh | Fresh sign-in |
+  | --- | --- | --- | --- |
+  | normal | yes | yes | no |
+  | `stepUp` (implies `shortLived`) | no | no | no |
+  | `freshSignIn` (implies `stepUp`) | no | no | yes |
+
+  `shortLived` on its own gives a scope a 5-minute access token that is not kept on the grant, while it stays in `scopes_supported`.
+- What asterism enforces: a `stepUp` scope is never stored on the grant and never refreshed, so getting it again means a new authorization and a consent screen. A `freshSignIn` scope additionally makes asterism re-authenticate the user (not a silent SSO sign-in) before consent. asterism cannot tell whether a request followed a 403 challenge, so "only on a step-up" is the client's behaviour; it is kept honest by keeping the scope out of `scopes_supported`, which is what Claude.ai requests from. Request a step-up scope through an `insufficient_scope` challenge.
+- `scopes_supported` is derived: exactly the scopes that are neither `stepUp` nor `freshSignIn`, in order.
+- `stepUp`, `shortLived` and `freshSignIn` are omitted from the output when false. The implications are applied by asterism, so `freshSignIn: true` alone is enough.
+- `scopes` and `scopesSupported` are alternatives; passing both throws.
+- Options are validated when the handler is created: scope names follow the same rules as `requireScopes`, must be unique, at most 50 scopes; each description is a non-empty string of at most 300 characters; `resourceName` is non-empty and at most 200 characters.
+
+Servers that don't use Express can serve the same document with `buildProtectedResourceMetadata(config, options)`, which returns the JSON object and throws on the same validation errors.
+
 ## Step-up (`insufficient_scope`)
 
 ```ts
@@ -94,7 +144,7 @@ A missing scope answers **403** with `WWW-Authenticate: Bearer realm="<aud>", re
 
 ## Revocation
 
-Access tokens are self-contained JWTs that the proxy issues with a 15-minute lifetime (5 minutes with the `admin` scope). Revoking a grant at the proxy stops refresh, but an outstanding access token stays valid until it expires. That is the deliberate trade-off for not needing an introspection call on every request.
+Access tokens are self-contained JWTs that the proxy issues with a 15-minute lifetime (5 minutes with a short-lived scope such as `admin`). Revoking a grant at the proxy stops refresh, but an outstanding access token stays valid until it expires. That is the deliberate trade-off for not needing an introspection call on every request.
 
 ## License
 

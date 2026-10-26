@@ -63,7 +63,7 @@ pnpm dev            # http://localhost:3000, discovery at /.well-known/oauth-aut
 
 With local accounts enabled, open `/setup` once to create the first account.
 
-Register your MCP servers in `packages/proxy/config/resource-servers.yaml`, giving each one an identifier, a name and its scopes. An unregistered `resource` is always refused with `invalid_target`.
+Approve your MCP servers with `asterism-cli resource-server approve <identifier>` (in development: `pnpm --filter @mcp-auth/proxy resource-server approve <identifier>`). Each server describes its own scopes in its RFC 9728 metadata; see "Resource servers" in `docs/deployment.md`. An unapproved `resource` is always refused with `invalid_target`.
 
 The full stack, proxy plus Postgres, runs with `docker compose up -d`. In production, run the proxy behind your ingress and set `TRUST_PROXY`.
 

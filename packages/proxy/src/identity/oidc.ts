@@ -3,6 +3,7 @@ import { prisma } from "../db.js";
 import { config } from "../config.js";
 import { createLogger } from "../logger.js";
 import { Prisma } from "../generated/prisma/client.js";
+import { FRESH_LOGIN_MAX_AGE_S } from "./self-login.js";
 
 const log = createLogger("oidc");
 
@@ -79,7 +80,7 @@ function callbackUrl(): string {
  * so /oauth/callback can pick the flow back up by upstream `state` alone — no
  * cookie required. `handle` must already exist (created by /oauth/authorize, T12).
  */
-export async function startUpstreamAuth(handle: string): Promise<string> {
+export async function startUpstreamAuth(handle: string, opts: { fresh?: boolean } = {}): Promise<string> {
   const oidcConfig = await getOidcConfig();
 
   const upstreamState = client.randomState();
@@ -100,6 +101,9 @@ export async function startUpstreamAuth(handle: string): Promise<string> {
     nonce: upstreamNonce,
     code_challenge: codeChallenge,
     code_challenge_method: "S256",
+    // A fresh sign-in makes the provider re-authenticate the user; the callback
+    // then holds it to max_age through the ID token's auth_time.
+    ...(opts.fresh ? { prompt: "login", max_age: String(FRESH_LOGIN_MAX_AGE_S) } : {}),
   });
 
   return url.toString();
@@ -177,6 +181,9 @@ export async function handleUpstreamCallback(
     expectedState: authRequest.upstreamState!,
     expectedNonce: authRequest.upstreamNonce,
     pkceCodeVerifier: authRequest.upstreamVerifier,
+    // openid-client then requires auth_time in the ID token and rejects one
+    // older than max_age (a provider that ignores prompt=login fails here).
+    ...(authRequest.requireFreshLogin ? { maxAge: FRESH_LOGIN_MAX_AGE_S } : {}),
   });
 
   const claims = tokens.claims();

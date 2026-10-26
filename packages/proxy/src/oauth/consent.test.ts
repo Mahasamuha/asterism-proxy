@@ -27,18 +27,27 @@ beforeAll(async () => {
 });
 afterAll(() => app.close());
 
+/** What the last consent GET stored on the request (authorizationRequest.updateMany), as the next findUnique reads it back. */
+let shownClaims: string[] = [];
+
 function flowRow(over: Record<string, unknown> = {}) {
   return {
+    shownClaims,
     handle: "h1", clientId: CLIENT_ID, resource: RESOURCE, scopes: ["read"], redirectUri: REDIRECT_URI, state: "st", codeChallenge: "c".repeat(43),
-    codeChallengeMethod: "S256", flowType: "oauth", subject: "u1", expiresAt: new Date(Date.now() + 60_000), ...over,
+    codeChallengeMethod: "S256", flowType: "oauth", subject: "u1", requireFreshLogin: false, expiresAt: new Date(Date.now() + 60_000), ...over,
   };
 }
 const deviceFlow = (over: Record<string, unknown> = {}) => flowRow({ flowType: "device", redirectUri: DEVICE_FLOW_REDIRECT_URI_SENTINEL, state: "ABCD2345", ...over });
 
 beforeEach(() => {
   db.reset();
+  shownClaims = [];
+  m("authorizationRequest", "updateMany").mockImplementation(async ({ data }: { data: { shownClaims: string[] } }) => {
+    shownClaims = data.shownClaims;
+    return { count: 1 };
+  });
   resolve.mockReset().mockResolvedValue(clientRow() as never);
-  m("authorizationRequest", "findUnique").mockResolvedValue(flowRow());
+  m("authorizationRequest", "findUnique").mockImplementation(async () => flowRow());
   m("authorizationRequest", "deleteMany").mockResolvedValue({ count: 1 });
   m("grant", "findUnique").mockResolvedValue(null);
   m("grant", "upsert").mockResolvedValue({ id: "g-new" });
@@ -302,7 +311,7 @@ describe("consent page display", () => {
     expect((await consentGet()).text).toContain('src="https://client.example.test/logo.png"');
     for (const logo of ["http://client.example.test/logo.png", "javascript:alert(1)", "data:image/png;base64,AAAA"]) {
       resolve.mockResolvedValue(clientRow({ metadata: { logo_uri: logo } }) as never);
-      expect((await consentGet()).text).not.toContain("<img");
+      expect((await consentGet()).text).not.toContain("client-logo");
     }
   });
 
@@ -540,6 +549,49 @@ describe("form-action on the consent page that submits to the client's redirect_
   });
 });
 
+describe("fresh-sign-in scopes", () => {
+  it("GET refuses a flow that was not forced fresh, on the proxy's own page, never redirecting to the client", async () => {
+    m("authorizationRequest", "findUnique").mockResolvedValue(flowRow({ scopes: ["read", "root"] }));
+    const r = await consentGet();
+    expect(r.status).toBe(400);
+    expect(r.headers.get("location")).toBeNull();
+    expect(r.text).toContain("needs a fresh sign-in");
+    expect(r.text).toContain("start again from the application");
+    expect(r.text).not.toContain("<form");
+    expect(m("authorizationRequest", "deleteMany")).toHaveBeenCalled();
+    expect(m("authCode", "create")).not.toHaveBeenCalled();
+  });
+
+  it("GET shows the consent page when the flow was forced fresh", async () => {
+    m("authorizationRequest", "findUnique").mockResolvedValue(flowRow({ scopes: ["read", "root"], requireFreshLogin: true }));
+    const r = await consentGet();
+    expect(r.status).toBe(200);
+    expect(r.text).toContain("Change credentials");
+  });
+
+  it("GET device flow is denied with the message", async () => {
+    m("authorizationRequest", "findUnique").mockResolvedValue(deviceFlow({ scopes: ["root"] }));
+    const r = await consentGet();
+    expect(r.text).toContain("needs a fresh sign-in");
+    expect(m("deviceCode", "updateMany").mock.calls[0]![0].data).toEqual({ status: "denied" });
+    expect(m("grant", "upsert")).not.toHaveBeenCalled();
+  });
+
+  it("POST approve re-checks: the scope became fresh-sign-in since the GET -> error page, nothing minted", async () => {
+    m("authorizationRequest", "findUnique").mockResolvedValue(flowRow({ scopes: ["admin"] }));
+    const client = await boundClient();
+    const page = await getPath(app.baseUrl, "/oauth/consent?flow=h1", client.fetch);
+    expect(page.status).toBe(200);
+    m("authorizationRequest", "findUnique").mockResolvedValue(flowRow({ scopes: ["admin", "root"] }));
+    const r = await postForm(app.baseUrl, "/oauth/consent", { flow: "h1", action: "approve", csrf_token: csrfFrom(page.text)! }, client.fetch);
+    expect(r.status).toBe(400);
+    expect(r.headers.get("location")).toBeNull();
+    expect(r.text).toContain("needs a fresh sign-in");
+    expect(m("authCode", "create")).not.toHaveBeenCalled();
+    expect(m("grant", "upsert")).not.toHaveBeenCalled();
+  });
+});
+
 describe("group-gated scopes and released claims", () => {
   const inGroups = (groups: unknown) => m("user", "findUnique").mockResolvedValue({ lastKnownClaims: groups === null ? null : { groups } });
 
@@ -633,6 +685,61 @@ describe("group-gated scopes and released claims", () => {
       const call = m("grant", "upsert").mock.calls[0]![0];
       expect(call.update.releasedClaims).toEqual(["name", "email", "groups"]);
       expect(call.create.releasedClaims).toEqual(["name", "email", "groups"]);
+    } finally {
+      server.releaseClaims = [];
+    }
+  });
+
+  it("the GET pins the listed claims on the request", async () => {
+    const server = (await import("../resource-registry.js")).lookupResourceServer(RESOURCE)!;
+    server.releaseClaims = ["email", "groups"];
+    try {
+      await consentGet();
+      expect(m("authorizationRequest", "updateMany")).toHaveBeenCalledWith({ where: { handle: "h1" }, data: { shownClaims: ["email", "groups"] } });
+    } finally {
+      server.releaseClaims = [];
+    }
+  });
+
+  it("approval records what the GET listed, not a claim the registry added since", async () => {
+    const server = (await import("../resource-registry.js")).lookupResourceServer(RESOURCE)!;
+    server.releaseClaims = ["email"];
+    try {
+      const client = await boundClient();
+      const page = await getPath(app.baseUrl, "/oauth/consent?flow=h1", client.fetch);
+      server.releaseClaims = ["email", "groups"]; // changed between the GET and the POST
+      await postForm(app.baseUrl, "/oauth/consent", { flow: "h1", action: "approve", csrf_token: csrfFrom(page.text) }, client.fetch);
+      const call = m("grant", "upsert").mock.calls[0]![0];
+      expect(call.create.releasedClaims).toEqual(["email"]);
+      expect(call.update.releasedClaims).toEqual(["email"]);
+    } finally {
+      server.releaseClaims = [];
+    }
+  });
+
+  it("approval records only shown claims that the registry still releases", async () => {
+    const server = (await import("../resource-registry.js")).lookupResourceServer(RESOURCE)!;
+    server.releaseClaims = ["email", "groups"];
+    try {
+      const client = await boundClient();
+      const page = await getPath(app.baseUrl, "/oauth/consent?flow=h1", client.fetch);
+      server.releaseClaims = ["email"]; // groups withdrawn after the page was shown
+      await postForm(app.baseUrl, "/oauth/consent", { flow: "h1", action: "approve", csrf_token: csrfFrom(page.text) }, client.fetch);
+      expect(m("grant", "upsert").mock.calls[0]![0].create.releasedClaims).toEqual(["email"]);
+    } finally {
+      server.releaseClaims = [];
+    }
+  });
+
+  it("a request that was never shown records no claims", async () => {
+    const server = (await import("../resource-registry.js")).lookupResourceServer(RESOURCE)!;
+    server.releaseClaims = ["email"];
+    try {
+      const client = await boundClient();
+      const page = await getPath(app.baseUrl, "/oauth/consent?flow=h1", client.fetch);
+      m("authorizationRequest", "findUnique").mockResolvedValue(flowRow({ shownClaims: [] }));
+      await postForm(app.baseUrl, "/oauth/consent", { flow: "h1", action: "approve", csrf_token: csrfFrom(page.text) }, client.fetch);
+      expect(m("grant", "upsert").mock.calls[0]![0].create.releasedClaims).toEqual([]);
     } finally {
       server.releaseClaims = [];
     }

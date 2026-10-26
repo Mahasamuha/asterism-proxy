@@ -1,7 +1,7 @@
 import { randomBytes, createHash } from "node:crypto";
 import { Router, Request, Response } from "express";
-import escHtml from "escape-html";
 import { prisma } from "../db.js";
+import { renderMessage } from "../pages.js";
 import { createLogger } from "../logger.js";
 import { resolveClient } from "../clients/cimd.js";
 import { lookupResourceServer, type ResourceServer } from "../resource-registry.js";
@@ -13,6 +13,7 @@ import { isFlowBound } from "../identity/flow-binding.js";
 import { getSessionUserId } from "../identity/session.js";
 import { incrementCounter } from "../metrics.js";
 import { bodyOf, stringField } from "../http-params.js";
+import { requestsFreshSignIn } from "./fresh-sign-in.js";
 import { allowFormSubmissionTo, CONSENT_FORM_SCRIPT } from "../security-headers.js";
 import type { AuthorizationRequest, Prisma } from "../generated/prisma/client.js";
 
@@ -23,14 +24,7 @@ export const consentRouter: Router = Router();
 const AUTH_CODE_TTL_MS = 10 * 60 * 1000;
 
 function renderErrorPage(res: Response, message: string): void {
-  res.status(400).send(`<!DOCTYPE html>
-<html lang="en">
-<head><meta charset="utf-8"><title>Authorization Error</title></head>
-<body>
-  <h1>Authorization Error</h1>
-  <p>${escHtml(message)}</p>
-</body>
-</html>`);
+  renderMessage(res, 400, { status: "error", heading: "Authorization failed", text: message });
 }
 
 const WRONG_BROWSER_MESSAGE = "This authorization request must be completed in the browser that started it. Please start again from the application.";
@@ -94,15 +88,8 @@ function isShortLivedScope(resource: string, scope: string): boolean {
   return lookupResourceServer(resource)?.scopes.find((s) => s.name === scope)?.shortLived === true;
 }
 
-function renderDeviceDonePage(res: Response, message: string): void {
-  res.send(`<!DOCTYPE html>
-<html lang="en">
-<head><meta charset="utf-8"><title>Device authorization</title></head>
-<body>
-  <h1>${escHtml(message)}</h1>
-  <p>You can close this tab.</p>
-</body>
-</html>`);
+function renderDeviceDonePage(res: Response, message: string, granted: boolean): void {
+  renderMessage(res, 200, { status: granted ? "success" : "info", heading: message, text: "You can close this tab." });
 }
 
 function httpsUrlOrNull(value: unknown): string | null {
@@ -173,7 +160,7 @@ async function completeDeviceFlow(
   }
 
   log.info({ userId: authRequest.subject, clientId: authRequest.clientId, resource: authRequest.resource, approved }, "Device consent completed");
-  renderDeviceDonePage(res, approved ? "Access granted." : deniedMessage);
+  renderDeviceDonePage(res, approved ? "Access granted." : deniedMessage, approved);
 }
 
 /** Consumes the request and mints the code atomically. `resolveGrantId` runs
@@ -257,6 +244,28 @@ async function refuseForbiddenScope(res: Response, authRequest: FlowRequest, sco
   }
 }
 
+/** A fresh-sign-in scope that was not one when the request was created (the
+ * server's metadata or the operator's policy changed in between) was never
+ * authenticated for. Checked on both GET and POST. */
+function lacksRequiredFreshSignIn(authRequest: FlowRequest, resourceServer: ResourceServer): boolean {
+  return !authRequest.requireFreshLogin && requestsFreshSignIn(resourceServer, authRequest.scopes);
+}
+
+/** Refuses such a flow. Request consumed. Like a group refusal, the redirect
+ * flow gets the proxy's own page and never a redirect to the client; the device
+ * flow is told access_denied, as for a manual Deny. */
+async function refuseMissingFreshSignIn(res: Response, authRequest: FlowRequest): Promise<void> {
+  log.info({ userId: authRequest.subject, clientId: authRequest.clientId, resource: authRequest.resource }, "Consent refused: a scope now needs a fresh sign-in");
+  incrementCounter("consent_total", { outcome: "fresh_sign_in_required" });
+  const message = "A permission in this request now needs a fresh sign-in. Please start again from the application.";
+  if (isDeviceFlow(authRequest)) {
+    await completeDeviceFlow(res, authRequest, false, undefined, message);
+  } else {
+    const consumed = await prisma.$transaction((tx) => consumeRequest(tx, authRequest.handle));
+    renderErrorPage(res, consumed ? message : REQUEST_USED_MESSAGE);
+  }
+}
+
 async function findLiveGrant(userId: string, clientId: string, resource: string) {
   const grant = await prisma.grant.findUnique({
     where: { userId_clientId_resource: { userId, clientId, resource } },
@@ -288,6 +297,10 @@ consentRouter.get("/oauth/consent", async (req: Request, res: Response) => {
   const forbiddenScope = await findForbiddenScope(authRequest, resourceServer);
   if (forbiddenScope) {
     await refuseForbiddenScope(res, authRequest, forbiddenScope);
+    return;
+  }
+  if (lacksRequiredFreshSignIn(authRequest, resourceServer)) {
+    await refuseMissingFreshSignIn(res, authRequest);
     return;
   }
 
@@ -333,6 +346,10 @@ consentRouter.get("/oauth/consent", async (req: Request, res: Response) => {
     const scope = resourceServer.scopes.find((s) => s.name === name);
     return { name, description: scope?.description ?? name };
   });
+
+  // Pin what this page lists, so approving records exactly that (see POST).
+  // updateMany: a request consumed in the meantime is simply not there.
+  await prisma.authorizationRequest.updateMany({ where: { handle: authRequest.handle }, data: { shownClaims: resourceServer.releaseClaims } });
 
   const csrfToken = issueCsrfToken(res, "csrf_consent");
   // Approve and deny both answer the POST with a redirect to the client's
@@ -405,6 +422,10 @@ consentRouter.post("/oauth/consent", async (req: Request, res: Response) => {
     await refuseForbiddenScope(res, authRequest, forbiddenScope);
     return;
   }
+  if (lacksRequiredFreshSignIn(authRequest, resourceServer)) {
+    await refuseMissingFreshSignIn(res, authRequest);
+    return;
+  }
 
   // Approving accumulates scopes onto any existing grant rather than
   // replacing it — approving a narrower follow-up request must not silently
@@ -419,9 +440,13 @@ consentRouter.post("/oauth/consent", async (req: Request, res: Response) => {
     // one (including any persisted before this rule existed).
     const persistable = (scope: string) => !isShortLivedScope(authRequest.resource, scope);
     const mergedScopes = Array.from(new Set([...(live?.scopes ?? []), ...authRequest.scopes].filter(persistable)));
-    // The consent page listed the resource server's current releaseClaims, so
-    // approving consents to exactly those, on top of any already consented to.
-    const mergedClaims = Array.from(new Set([...(live?.releasedClaims ?? []), ...resourceServer.releaseClaims]));
+    // Approving consents to the claims the page listed when it was shown (stored
+    // on the request by the GET), and only those the registry still releases: a
+    // claim added to the server since is not consented to. On top of any
+    // already consented to.
+    const stillReleased = new Set(resourceServer.releaseClaims);
+    const shown = authRequest.shownClaims.filter((c) => stillReleased.has(c));
+    const mergedClaims = Array.from(new Set([...(live?.releasedClaims ?? []), ...shown]));
     const grant = await tx.grant.upsert({
       where: { userId_clientId_resource: { userId: authRequest.subject, clientId: authRequest.clientId, resource: authRequest.resource } },
       create: { userId: authRequest.subject, clientId: authRequest.clientId, resource: authRequest.resource, scopes: mergedScopes, releasedClaims: mergedClaims },

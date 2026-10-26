@@ -24,11 +24,11 @@ services:
       OIDC_CLIENT_SECRET:
       OIDC_SUBJECT_CLAIM:
       OIDC_CLAIM_MAP:
+      ADMIN_GROUPS:
       ENABLE_LOCAL_ACCOUNTS:
       ENABLE_DCR:
       ALLOW_INSECURE_CLIENT_METADATA:
       TRUST_POLICY_PATH:
-      RESOURCE_SERVERS_PATH:
     depends_on:
       postgres:
         condition: service_healthy

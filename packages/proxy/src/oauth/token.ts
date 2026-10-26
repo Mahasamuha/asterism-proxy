@@ -2,7 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { Router, Request, Response, NextFunction } from "express";
 import { prisma } from "../db.js";
 import { createLogger } from "../logger.js";
-import { mintAccessToken } from "../crypto/access-token.js";
+import { mintAccessToken, UnregisteredResourceError, type MintAccessTokenParams, type MintedAccessToken } from "../crypto/access-token.js";
 import { issueRefreshToken, accessTokenScopes, refreshableScopes, permittedScopes } from "../crypto/refresh-token.js";
 import { resolveClient } from "../clients/cimd.js";
 import { authenticateConfidentialClient } from "./client-assertion.js";
@@ -11,7 +11,7 @@ import { bodyOf, stringField } from "../http-params.js";
 import { limitOauthEndpoint } from "../rate-limit.js";
 import { recheckUpstream } from "../identity/upstream-refresh.js";
 import { consentedClaimNames } from "../identity/released-claims.js";
-import { lookupResourceServer } from "../resource-registry.js";
+import { isRegisteredResource, lookupResourceServer } from "../resource-registry.js";
 
 const log = createLogger("token");
 
@@ -41,6 +41,20 @@ async function isUserActive(userId: string): Promise<boolean> {
 
 function rejectInactiveUser(res: Response): void {
   res.status(400).json({ error: "invalid_grant", error_description: "User account is deactivated" });
+}
+
+/** Mints, or answers invalid_grant (and returns null) when the resource has left
+ * the registry since the grant was made. Every grant calls this before it
+ * consumes or claims anything, so a refused request leaves its code, device code
+ * or refresh token untouched. */
+async function mintOrRefuse(params: MintAccessTokenParams, res: Response): Promise<MintedAccessToken | null> {
+  try {
+    return await mintAccessToken(params);
+  } catch (err) {
+    if (!(err instanceof UnregisteredResourceError)) throw err;
+    res.status(400).json({ error: "invalid_grant", error_description: "Resource is no longer registered" });
+    return null;
+  }
 }
 
 tokenRouter.post("/oauth/token", limitOauthEndpoint, async (req: Request, res: Response) => {
@@ -171,13 +185,15 @@ async function handleAuthorizationCodeGrant(body: Record<string, unknown>, res: 
   // Mint before the transaction: signing touches the DB on its own
   // connection, and a signing failure should happen before anything is
   // consumed. The JWT is discarded if the claim below is lost.
-  const { accessToken, expiresIn } = await mintAccessToken({
+  const minted = await mintOrRefuse({
     userId: entry.userId,
     clientId: entry.clientId,
     resource: entry.resource,
     scopes: accessTokenScopes(entry.scopes),
     releaseClaims: grantClaims(entry.resource, codeGrant.releasedClaims),
-  });
+  }, res);
+  if (!minted) return;
+  const { accessToken, expiresIn } = minted;
 
   // Atomically claim the code and issue the refresh token in ONE transaction
   // (§T14) — a failure after the claim rolls the claim back, so the client
@@ -298,6 +314,13 @@ async function handleRefreshTokenGrant(body: Record<string, unknown>, res: Respo
     return;
   }
 
+  // Removing or disabling a resource server stops its refresh tokens from
+  // minting; the grants stay (re-enabling the server brings them back).
+  if (!isRegisteredResource(entry.resource)) {
+    res.status(400).json({ error: "invalid_grant", error_description: "Resource is no longer registered" });
+    return;
+  }
+
   const grant = await prisma.grant.findUnique({ where: { id: entry.grantId } });
   if (!grant || grant.revokedAt !== null) {
     res.status(400).json({ error: "invalid_grant", error_description: "Grant has been revoked" });
@@ -326,13 +349,15 @@ async function handleRefreshTokenGrant(body: Record<string, unknown>, res: Respo
 
   // Mint first so a signing failure happens before anything is claimed; the
   // JWT is discarded if the claim below is lost.
-  const { accessToken, expiresIn } = await mintAccessToken({
+  const minted = await mintOrRefuse({
     userId: entry.userId,
     clientId: entry.clientId,
     resource: entry.resource,
     scopes: accessTokenScopes(scopes),
     releaseClaims: grantClaims(entry.resource, grant.releasedClaims),
-  });
+  }, res);
+  if (!minted) return;
+  const { accessToken, expiresIn } = minted;
 
   // Atomically claim this token for rotation and create its successor in one
   // transaction — otherwise a failed create would leave the old token marked
@@ -487,13 +512,15 @@ async function handleDeviceCodeGrant(body: Record<string, unknown>, res: Respons
   const deviceGrant = await prisma.grant.findUnique({
     where: { userId_clientId_resource: { userId, clientId: entry.clientId, resource: entry.resource } },
   });
-  const { accessToken, expiresIn } = await mintAccessToken({
+  const minted = await mintOrRefuse({
     userId,
     clientId: entry.clientId,
     resource: entry.resource,
     scopes: accessTokenScopes(entry.scopes),
     releaseClaims: grantClaims(entry.resource, deviceGrant?.releasedClaims ?? []),
-  });
+  }, res);
+  if (!minted) return;
+  const { accessToken, expiresIn } = minted;
 
   // Atomically claim (consume) the code and issue the refresh token in ONE
   // transaction — same TOCTOU close as the other two grants, and a failure

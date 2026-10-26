@@ -1,0 +1,35 @@
+<%- include('_head', { title: 'Resource servers', nav: 'servers' }) %>
+    <p class="lead-action"><a class="button" href="/admin/resource-servers/new">approve a new server →</a></p>
+    <% if (servers.length === 0) { %>
+    <%- include('../partials/empty', { title: 'Approve your first resource server', text: 'Approved servers can issue access to the clients you allow.', action: { href: '/admin/resource-servers/new', text: 'approve a new server →' } }) %>
+    <% } else { %>
+    <div class="table-wrap">
+    <table>
+      <thead><tr><th>Server</th><th>Status</th><th>Metadata</th><th>Gated scopes</th><th>Released claims</th><th>Flags</th></tr></thead>
+      <tbody>
+      <% servers.forEach(function (s) { %>
+        <% var gated = s.scopes.filter(function (sc) { return sc.requireGroups.length > 0; }); %>
+        <tr>
+          <td class="col-server"><a href="/admin/resource-servers/<%= s.id %>"><%= s.displayName %></a><br><code><%= s.identifier %></code></td>
+          <td>
+            <span class="badge <%= s.enabled ? 'success' : 'warning' %>"><%= s.enabled ? 'enabled' : 'disabled' %></span>
+            <% if (s.internal) { %><span class="tag">internal</span><% } %>
+          </td>
+          <td>
+            <% if (!s.hasSnapshot) { %><span class="badge warning">no snapshot</span><% } else { %>fetched <%= s.age %><% } %>
+            <% if (s.stale) { %><span class="badge warning">stale · expired <%= s.staleFor %> ago</span><% } %>
+            <% if (s.pending) { %><br><span class="badge warning">changes waiting for approval</span><% } %>
+            <% if (s.lastFetchError) { %><br><span class="muted">Last fetch failed: <%= s.lastFetchError %></span><% } %>
+          </td>
+          <td><%= gated.length === 0 ? 'none' : gated.map(function (sc) { return sc.name; }).join(', ') %></td>
+          <td><%= s.releaseClaims.length === 0 ? 'none' : s.releaseClaims.join(', ') %></td>
+          <td>
+            <% if (s.undeclaredPolicies.length > 0) { %><span class="badge warning">policy on undeclared scope: <%= s.undeclaredPolicies.map(function (p) { return p.scopeName; }).join(', ') %></span><% } %>
+          </td>
+        </tr>
+      <% }); %>
+      </tbody>
+    </table>
+    </div>
+    <% } %>
+<%- include('_foot') %>

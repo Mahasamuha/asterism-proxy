@@ -1,7 +1,7 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { createVerifier, TokenValidationError } from "../../asterism-verify/src/index.js";
 import { cookieClient, csrfFrom, form } from "./test-helpers/http.js";
-import { pkce } from "./test-helpers/seed.js";
+import { pkce, seedResourceServer } from "./test-helpers/seed.js";
 import { TEST_ISSUER_URL } from "./test-helpers/env.js";
 import {
   E2E_REDIRECT_URI,
@@ -13,17 +13,12 @@ import {
 } from "./test-helpers/e2e-flow.js";
 
 const GRANT_TYPE_DEVICE = "urn:ietf:params:oauth:grant-type:device_code";
-const FIXTURE_REGISTRY = new URL("./test-helpers/fixtures/e2e-resource-servers.yaml", import.meta.url).pathname;
 
 let app: { baseUrl: string; close: () => Promise<void> };
 let db: typeof import("./db.js");
 let clientId: string;
 
 beforeAll(async () => {
-  // config.ts and resource-registry.ts read the env at import, so point them
-  // at the fixture registry before a fresh import of the app.
-  vi.stubEnv("RESOURCE_SERVERS_PATH", FIXTURE_REGISTRY);
-  vi.resetModules();
   db = await import("./db.js");
   const { startApp } = await import("./test-helpers/app.js");
   app = await startApp();
@@ -32,12 +27,16 @@ beforeAll(async () => {
 afterAll(async () => {
   await app?.close();
   await db?.prisma.$disconnect();
-  vi.unstubAllEnvs();
 });
 
 beforeEach(async () => {
   const { truncateAll } = await import("./test-helpers/db.js");
   await truncateAll();
+  await seedResourceServer({
+    identifier: E2E_RESOURCE,
+    displayName: "E2E MCP",
+    scopes: [{ name: "files:read", description: "Read files" }, { name: "admin", description: "Administer", shortLived: true }],
+  });
   const { ensureActiveSigningKey } = await import("./crypto/signing-keys.js");
   await ensureActiveSigningKey();
   // Cache row so resolveClient never fetches a CIMD document.

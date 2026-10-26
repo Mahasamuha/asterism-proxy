@@ -13,12 +13,18 @@ import { bindFlow } from "./flow-binding.js";
 export const SELF_LOGIN_REDIRECT_URI_SENTINEL = "urn:mcp-auth:self-login";
 const SELF_LOGIN_TTL_MS = 10 * 60 * 1000;
 
+/** How recent a sign-in must be for the admin UI to accept a change. Also the
+ * `max_age` a fresh upstream sign-in is validated against. */
+export const FRESH_LOGIN_MAX_AGE_S = 10 * 60;
+
 /** Starts a login-only flow for the proxy's own account pages. Reuses the
  * same AuthorizationRequest row and T6/T7 identity dispatch as OAuth flows —
  * the OIDC callback and local login handlers check isSelfLogin() and, if
  * true, set a session cookie and redirect to `returnTo` directly instead of
- * going to /oauth/consent. The flow is bound to the calling browser. */
-export async function createSelfLoginRequest(returnTo: string, req: Request, res: Response): Promise<string> {
+ * going to /oauth/consent. The flow is bound to the calling browser.
+ * `fresh` marks a flow that must re-authenticate the user (OIDC: prompt=login
+ * and a max_age check on auth_time; local: the password form always does). */
+export async function createSelfLoginRequest(returnTo: string, req: Request, res: Response, opts: { fresh?: boolean } = {}): Promise<string> {
   const handle = randomBytes(24).toString("hex");
   await prisma.authorizationRequest.create({
     data: {
@@ -30,6 +36,7 @@ export async function createSelfLoginRequest(returnTo: string, req: Request, res
       redirectUri: SELF_LOGIN_REDIRECT_URI_SENTINEL,
       state: returnTo,
       codeChallenge: "self-login-no-pkce",
+      requireFreshLogin: opts.fresh === true,
       expiresAt: new Date(Date.now() + SELF_LOGIN_TTL_MS),
     },
   });
