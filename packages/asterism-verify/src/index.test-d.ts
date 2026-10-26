@@ -41,7 +41,7 @@ expectTypeOf<TokenValidationError["reason"]>().toEqualTypeOf<TokenValidationReas
 expectTypeOf(createBearerAuthMiddleware).parameters.toEqualTypeOf<[VerifierConfig]>();
 expectTypeOf(createBearerAuthMiddleware).returns.toEqualTypeOf<RequestHandler>();
 expectTypeOf(protectedResourceMetadataHandler).parameters.toEqualTypeOf<[VerifierConfig, ProtectedResourceMetadataOptions?]>();
-expectTypeOf<ProtectedResourceMetadataOptions>().toEqualTypeOf<{ resourceName?: string; scopes?: ResourceScope[]; scopesSupported?: string[] }>();
+expectTypeOf<ProtectedResourceMetadataOptions>().toEqualTypeOf<{ resourceName?: string; scopes?: ResourceScope[]; scopesSupported?: string[]; offlineAccess?: boolean }>();
 expectTypeOf<ResourceScope>().toEqualTypeOf<{ name: string; description: string; stepUp?: boolean; shortLived?: boolean; freshSignIn?: boolean }>();
 expectTypeOf(buildProtectedResourceMetadata).parameters.toEqualTypeOf<[VerifierConfig, ProtectedResourceMetadataOptions?]>();
 expectTypeOf(buildProtectedResourceMetadata).returns.toEqualTypeOf<Record<string, unknown>>();
