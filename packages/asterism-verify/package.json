@@ -1,6 +1,6 @@
 {
   "name": "@mahasamuha/asterism-verify",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Verify asterism-proxy JWT access tokens in an MCP resource server: JWKS caching, single-audience checks, and RFC 9728 Express helpers",
   "license": "MIT",
   "type": "module",

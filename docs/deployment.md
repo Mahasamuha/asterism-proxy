@@ -206,6 +206,12 @@ MCP servers describe themselves; asterism stores only your policy for them.
   characters (bidi overrides, zero-width characters and the like) or line and
   paragraph separators. A server also cannot declare the scope names
   `offline_access` or `openid`; they are reserved for the proxy.
+- **Refresh tokens need `offline_access` in `scopes_supported`.** The proxy issues a
+  refresh token only when the client asks for `offline_access`, and clients such as
+  Claude.ai request exactly what `scopes_supported` lists. A server that wants its
+  users to stay connected lists `offline_access` there (asterism-verify:
+  `offlineAccess: true`). It is accepted as that hint only, never as one of the
+  server's scopes, and stays out of `asterism_scopes`.
 - **You approve it.** `asterism-cli resource-server approve <identifier>` fetches
   and validates the metadata and refuses a server that fails. Only approved
   identifiers are ever fetched; a `resource` that is not approved (or is disabled)

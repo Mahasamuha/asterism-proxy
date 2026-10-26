@@ -85,6 +85,7 @@ app.get(
   protectedResourceMetadataPath(config.audience),
   protectedResourceMetadataHandler(config, {
     resourceName: "Constellation",
+    offlineAccess: true,
     scopes: [
       { name: "relay", description: "Use your Constellation shares" },
       { name: "admin", description: "Administer the relay", stepUp: true },
@@ -102,7 +103,7 @@ This emits `resource_name` and an `asterism_scopes` member, an extension to RFC 
   "resource_name": "Constellation",
   "authorization_servers": ["https://asterism.example"],
   "bearer_methods_supported": ["header"],
-  "scopes_supported": ["relay"],
+  "scopes_supported": ["relay", "offline_access"],
   "asterism_scopes": [
     { "name": "relay", "description": "Use your Constellation shares" },
     { "name": "admin", "description": "Administer the relay", "step_up": true },
@@ -121,8 +122,9 @@ This emits `resource_name` and an `asterism_scopes` member, an extension to RFC 
 
   `shortLived` on its own gives a scope a 5-minute access token that is not kept on the grant, while it stays in `scopes_supported`.
 - What asterism enforces: a `stepUp` scope is never stored on the grant and never refreshed, so getting it again means a new authorization and a consent screen. A `freshSignIn` scope additionally makes asterism re-authenticate the user (not a silent SSO sign-in) before consent. asterism cannot tell whether a request followed a 403 challenge, so "only on a step-up" is the client's behaviour; it is kept honest by keeping the scope out of `scopes_supported`, which is what Claude.ai requests from. Request a step-up scope through an `insufficient_scope` challenge.
-- `scopes_supported` is derived: exactly the scopes that are neither `stepUp` nor `freshSignIn`, in order.
+- `scopes_supported` is derived: exactly the scopes that are neither `stepUp` nor `freshSignIn`, in order, then `offline_access` when `offlineAccess` is set.
 - `stepUp`, `shortLived` and `freshSignIn` are omitted from the output when false. The implications are applied by asterism, so `freshSignIn: true` alone is enough.
+- `offlineAccess: true` adds `offline_access` to `scopes_supported`. The proxy issues refresh tokens only to clients that ask for it, and Claude.ai asks for exactly what is listed, so set it unless every connection should end when its access token expires. It is the proxy's scope, not yours: it never appears in `asterism_scopes`, and declaring `offline_access` or `openid` in `scopes` throws.
 - `scopes` and `scopesSupported` are alternatives; passing both throws.
 - Options are validated when the handler is created: scope names follow the same rules as `requireScopes`, must be unique, at most 50 scopes; each description is a non-empty string of at most 300 characters; `resourceName` is non-empty and at most 200 characters.
 

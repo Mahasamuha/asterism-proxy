@@ -32,11 +32,17 @@ export interface ProtectedResourceMetadataOptions {
    * clients should request by default: Claude.ai requests exactly these, so leave step-up-only
    * scopes (e.g. `admin`) out. */
   scopesSupported?: string[];
+  /** Adds `offline_access` to `scopes_supported`, so clients that request exactly what is listed
+   * there (Claude.ai) ask for it and asterism issues them refresh tokens. It is the proxy's own
+   * scope, not this server's, so it never appears in `asterism_scopes`. */
+  offlineAccess?: boolean;
 }
 
 const MAX_SCOPES = 50;
 const MAX_DESCRIPTION = 300;
 const MAX_RESOURCE_NAME = 200;
+/** The proxy's protocol scopes; a server must not declare them as its own. */
+const RESERVED_SCOPES = new Set(["offline_access", "openid"]);
 
 const WELL_KNOWN_PRS = "/.well-known/oauth-protected-resource";
 
@@ -156,7 +162,7 @@ export function requireScopes(config: VerifierConfig, ...scopes: string[]): Requ
  * when false). Throws on invalid
  * options, on both `scopes` and `scopesSupported`, and on an invalid scope string. */
 export function buildProtectedResourceMetadata(config: VerifierConfig, options: ProtectedResourceMetadataOptions = {}): Record<string, unknown> {
-  const { resourceName, scopes, scopesSupported } = options;
+  const { resourceName, scopes, scopesSupported, offlineAccess } = options;
   if (resourceName !== undefined && (typeof resourceName !== "string" || resourceName.length === 0 || resourceName.length > MAX_RESOURCE_NAME)) {
     throw new Error(`Invalid resourceName: must be a non-empty string of at most ${MAX_RESOURCE_NAME} characters`);
   }
@@ -167,6 +173,9 @@ export function buildProtectedResourceMetadata(config: VerifierConfig, options: 
     assertValidScopes(scopes.map((s) => s.name));
     const seen = new Set<string>();
     for (const { name, description } of scopes) {
+      if (RESERVED_SCOPES.has(name)) {
+        throw new Error(`Scope ${JSON.stringify(name)} is reserved for the proxy and cannot be declared${name === "offline_access" ? "; use offlineAccess: true to advertise it" : ""}`);
+      }
       if (seen.has(name)) throw new Error(`Duplicate scope ${JSON.stringify(name)}`);
       seen.add(name);
       if (typeof description !== "string" || description.trim().length === 0 || description.length > MAX_DESCRIPTION) {
@@ -174,13 +183,14 @@ export function buildProtectedResourceMetadata(config: VerifierConfig, options: 
       }
     }
   }
+  const listed = scopes ? scopes.filter((s) => !s.stepUp && !s.freshSignIn).map((s) => s.name) : scopesSupported;
+  const advertised = offlineAccess ? [...(listed ?? []).filter((s) => s !== "offline_access"), "offline_access"] : listed;
   return {
     resource: config.audience,
     ...(resourceName !== undefined && { resource_name: resourceName }),
     authorization_servers: [config.issuer],
     bearer_methods_supported: ["header"],
-    ...(scopes && { scopes_supported: scopes.filter((s) => !s.stepUp && !s.freshSignIn).map((s) => s.name) }),
-    ...(scopesSupported && { scopes_supported: scopesSupported }),
+    ...(advertised && { scopes_supported: advertised }),
     ...(scopes && {
       asterism_scopes: scopes.map((s) => ({
         name: s.name,

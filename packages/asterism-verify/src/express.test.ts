@@ -242,6 +242,20 @@ describe("buildProtectedResourceMetadata", () => {
     expect(out).not.toHaveProperty("asterism_scopes");
   });
 
+  it("P1 offlineAccess appends offline_access to scopes_supported, never to asterism_scopes", () => {
+    const out = build({ scopes: [scope({ name: "relay" }), scope({ name: "admin", stepUp: true })], offlineAccess: true });
+    expect(out.scopes_supported).toEqual(["relay", "offline_access"]);
+    expect(out.asterism_scopes).toEqual([{ name: "relay", description: "Read things" }, { name: "admin", description: "Read things", step_up: true }]);
+    expect(build({ scopesSupported: ["a", "offline_access"], offlineAccess: true }).scopes_supported).toEqual(["a", "offline_access"]);
+    expect(build({ offlineAccess: true }).scopes_supported).toEqual(["offline_access"]);
+    expect(build({ scopes: [scope()], offlineAccess: false }).scopes_supported).toEqual(["read"]);
+  });
+
+  it("P1 rejects the proxy's protocol scopes as declared scopes", () => {
+    expect(() => build({ scopes: [scope({ name: "offline_access" })] })).toThrow(/reserved.*offlineAccess: true/);
+    expect(() => build({ scopes: [scope({ name: "openid" })] })).toThrow(/reserved/);
+  });
+
   it("P1 throws when both scopes and scopesSupported are given", () => {
     expect(() => build({ scopes: [scope()], scopesSupported: ["read"] })).toThrow(/not both/);
   });
