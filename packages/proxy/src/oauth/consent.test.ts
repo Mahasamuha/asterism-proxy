@@ -367,14 +367,14 @@ describe("approve (P0/P1)", () => {
     m("grant", "findUnique").mockResolvedValue({ id: "g-old", scopes: ["write"], revokedAt: null });
     await submit();
     const call = m("grant", "upsert").mock.calls[0]![0];
-    expect(call.update).toEqual({ scopes: ["write", "read"], revokedAt: null });
+    expect(call.update).toEqual({ scopes: ["write", "read"], releasedClaims: [], revokedAt: null });
     expect(call.create.scopes).toEqual(["write", "read"]);
   });
 
   it("un-revokes a revoked grant WITHOUT resurrecting its old scopes", async () => {
     m("grant", "findUnique").mockResolvedValue({ id: "g-old", scopes: ["write", "admin"], revokedAt: new Date() });
     await submit();
-    expect(m("grant", "upsert").mock.calls[0]![0].update).toEqual({ scopes: ["read"], revokedAt: null });
+    expect(m("grant", "upsert").mock.calls[0]![0].update).toEqual({ scopes: ["read"], releasedClaims: [], revokedAt: null });
   });
 
   it("a repeated action field is treated as a denial, not an approval", async () => {
@@ -543,16 +543,14 @@ describe("form-action on the consent page that submits to the client's redirect_
 describe("group-gated scopes and released claims", () => {
   const inGroups = (groups: unknown) => m("user", "findUnique").mockResolvedValue({ lastKnownClaims: groups === null ? null : { groups } });
 
-  it("GET refuses a gated scope for a user outside the group: invalid_scope redirect, request consumed, no page", async () => {
+  it("GET refuses a gated scope for a user outside the group on the proxy's own page, never redirecting to the client", async () => {
     m("authorizationRequest", "findUnique").mockResolvedValue(flowRow({ scopes: ["read", "ops"] }));
     inGroups(["staff"]);
     const r = await consentGet();
-    expect(r.status).toBe(302);
-    const url = new URL(r.headers.get("location")!);
-    expect(url.origin + url.pathname).toBe(REDIRECT_URI);
-    expect(url.searchParams.get("error")).toBe("invalid_scope");
-    expect(url.searchParams.get("state")).toBe("st");
-    expect(url.searchParams.get("iss")).toBe(config.issuerUrl);
+    expect(r.status).toBe(400);
+    expect(r.headers.get("location")).toBeNull();
+    expect(r.text).toContain("You are not permitted to grant ops.");
+    expect(r.text).not.toContain("<form");
     expect(m("authorizationRequest", "deleteMany")).toHaveBeenCalled();
     expect(m("authCode", "create")).not.toHaveBeenCalled();
   });
@@ -561,7 +559,9 @@ describe("group-gated scopes and released claims", () => {
     m("authorizationRequest", "findUnique").mockResolvedValue(flowRow({ scopes: ["ops"] }));
     inGroups(groups);
     const r = await consentGet();
-    expect(new URL(r.headers.get("location")!).searchParams.get("error")).toBe("invalid_scope");
+    expect(r.status).toBe(400);
+    expect(r.headers.get("location")).toBeNull();
+    expect(r.text).toContain("not permitted to grant ops");
   });
 
   it("GET device flow marks the device code denied and shows the done page with the message", async () => {
@@ -589,7 +589,7 @@ describe("group-gated scopes and released claims", () => {
     expect(m("user", "findUnique")).not.toHaveBeenCalled();
   });
 
-  it("POST approve re-checks: groups lost since the GET -> invalid_scope, nothing minted", async () => {
+  it("POST approve re-checks: groups lost since the GET -> error page, no redirect, nothing minted", async () => {
     m("authorizationRequest", "findUnique").mockResolvedValue(flowRow({ scopes: ["ops"] }));
     inGroups(["ops"]);
     const client = await boundClient();
@@ -597,8 +597,9 @@ describe("group-gated scopes and released claims", () => {
     expect(page.status).toBe(200);
     inGroups([]);
     const r = await postForm(app.baseUrl, "/oauth/consent", { flow: "h1", action: "approve", csrf_token: csrfFrom(page.text)! }, client.fetch);
-    expect(r.status).toBe(302);
-    expect(new URL(r.headers.get("location")!).searchParams.get("error")).toBe("invalid_scope");
+    expect(r.status).toBe(400);
+    expect(r.headers.get("location")).toBeNull();
+    expect(r.text).toContain("not permitted to grant ops");
     expect(m("authCode", "create")).not.toHaveBeenCalled();
     expect(m("grant", "upsert")).not.toHaveBeenCalled();
   });
@@ -623,13 +624,39 @@ describe("group-gated scopes and released claims", () => {
     expect(new URL(r.headers.get("location")!).searchParams.has("code")).toBe(true);
   });
 
-  it("the consent page lists the claims the resource server will receive, escaped; none -> no line", async () => {
-    expect((await consentGet()).text).not.toContain("will also receive");
+  it("approval records the released claims on the grant, unioned with those already consented to", async () => {
+    const server = (await import("../resource-registry.js")).lookupResourceServer(RESOURCE)!;
+    server.releaseClaims = ["email", "groups"];
+    try {
+      m("grant", "findUnique").mockResolvedValue({ id: "g-old", scopes: ["read"], releasedClaims: ["name", "email"], revokedAt: null });
+      await submit();
+      const call = m("grant", "upsert").mock.calls[0]![0];
+      expect(call.update.releasedClaims).toEqual(["name", "email", "groups"]);
+      expect(call.create.releasedClaims).toEqual(["name", "email", "groups"]);
+    } finally {
+      server.releaseClaims = [];
+    }
+  });
+
+  it("a revoked grant's old claim consent is not resurrected", async () => {
+    const server = (await import("../resource-registry.js")).lookupResourceServer(RESOURCE)!;
+    server.releaseClaims = ["email"];
+    try {
+      m("grant", "findUnique").mockResolvedValue({ id: "g-old", scopes: ["read"], releasedClaims: ["name"], revokedAt: new Date() });
+      await submit();
+      expect(m("grant", "upsert").mock.calls[0]![0].update.releasedClaims).toEqual(["email"]);
+    } finally {
+      server.releaseClaims = [];
+    }
+  });
+
+  it("the consent page lists the claims the client and resource server will receive, escaped; none -> no line", async () => {
+    expect((await consentGet()).text).not.toContain("will receive these details");
     const server = (await import("../resource-registry.js")).lookupResourceServer(RESOURCE)!;
     server.releaseClaims = ["email", "groups", "<b>x</b>"];
     try {
       const text = (await consentGet()).text;
-      expect(text).toContain("Test MCP will also receive these details from your account: email, groups, &lt;b&gt;x&lt;/b&gt;");
+      expect(text).toContain("Test client and Test MCP will receive these details from your account: email, groups, &lt;b&gt;x&lt;/b&gt;");
     } finally {
       server.releaseClaims = [];
     }

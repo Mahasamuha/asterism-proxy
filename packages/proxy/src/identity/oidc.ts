@@ -8,6 +8,12 @@ const log = createLogger("oidc");
 
 const DISCOVERY_TTL_MS = 24 * 60 * 60 * 1000;
 
+/** Seconds before a call to the provider (token endpoint, userinfo, JWKS) gives up.
+ * openid-client's default is 30. The upstream re-check runs between an asterism
+ * refresh's reuse check and its token rotation, so a slow provider would let a
+ * client retry look like refresh-token reuse and revoke the whole grant. */
+const UPSTREAM_TIMEOUT_S = 10;
+
 let _config: client.Configuration | null = null;
 let _configFetchedAt = 0;
 
@@ -41,6 +47,7 @@ export async function getOidcConfig(): Promise<client.Configuration> {
       undefined,
       discoveryOptions(oidc.issuer)
     );
+    _config.timeout = UPSTREAM_TIMEOUT_S;
     _configFetchedAt = Date.now();
     log.info({ issuer: oidc.issuer }, "OIDC provider discovered");
   } catch (err) {

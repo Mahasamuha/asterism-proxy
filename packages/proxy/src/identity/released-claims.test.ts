@@ -1,10 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const h = vi.hoisted(() => ({ findUnique: vi.fn(), claimMap: {} as Record<string, string> }));
+const h = vi.hoisted(() => ({ findUnique: vi.fn(), warn: vi.fn(), claimMap: {} as Record<string, string> }));
+vi.mock("../logger.js", () => ({ createLogger: () => ({ warn: h.warn, info: vi.fn(), error: vi.fn() }) }));
 vi.mock("../db.js", () => ({ prisma: { user: { findUnique: h.findUnique } } }));
 vi.mock("../config.js", () => ({ config: { get claimMap() { return h.claimMap; } } }));
 
-import { groupsFromClaims, groupsSatisfy, loadReleasedClaims, loadUserGroups, normalizedClaim, selectReleasedClaims } from "./released-claims.js";
+import { groupsFromClaims, groupsSatisfy, loadReleasedClaims, loadUserGroups, consentedClaimNames, normalizedClaim, selectReleasedClaims } from "./released-claims.js";
 
 const AUTHENTIK = {
   sub: "abc", email: "j@example.test", email_verified: false, name: "Joe", given_name: "Joe", preferred_username: "jrybka", nickname: "j",
@@ -13,6 +14,7 @@ const AUTHENTIK = {
 
 beforeEach(() => {
   h.findUnique.mockReset();
+  h.warn.mockReset();
   h.claimMap = {};
 });
 
@@ -49,6 +51,14 @@ describe("selectReleasedClaims", () => {
 
   it("applies the claim map", () => {
     expect(selectReleasedClaims({ mail: "m@x" }, ["email"], { email: "mail" })).toEqual({ email: "m@x" });
+  });
+
+  it("drops a value whose JSON is over 4096 characters, keeping one at the limit", () => {
+    const atLimit = "a".repeat(4094); // 4096 with the quotes
+    const over = "a".repeat(4095);
+    expect(selectReleasedClaims({ ok: atLimit, big: over, bigList: Array(2000).fill("xx") }, ["ok", "big", "bigList"], {})).toEqual({ ok: atLimit });
+    expect(h.warn.mock.calls.map((c) => c[0])).toEqual([{ claim: "big", size: 4097 }, { claim: "bigList", size: 10001 }]);
+    expect(JSON.stringify(h.warn.mock.calls)).not.toContain("aaaa");
   });
 
   it("throws on a reserved name", () => {
@@ -101,5 +111,17 @@ describe("loaders", () => {
   it("loads normalized groups", async () => {
     h.findUnique.mockResolvedValue({ lastKnownClaims: AUTHENTIK });
     expect(await loadUserGroups("u1")).toEqual(["authentik Admins", "constellation-admins"]);
+  });
+});
+
+describe("consentedClaimNames", () => {
+  it("is the intersection, in registry order", () => {
+    expect(consentedClaimNames(["name", "email"], ["groups", "email", "name"])).toEqual(["email", "name"]);
+  });
+
+  it("a claim removed from the registry stops; one added needs consent", () => {
+    expect(consentedClaimNames(["email", "groups"], ["email"])).toEqual(["email"]);
+    expect(consentedClaimNames(["email"], ["email", "groups"])).toEqual(["email"]);
+    expect(consentedClaimNames([], ["email"])).toEqual([]);
   });
 });

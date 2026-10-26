@@ -239,6 +239,10 @@ model Grant {
   clientId  String    @map("client_id")
   resource  String
   scopes    String[]
+  // Identity claims the user saw on the consent page, as a union across
+  // approvals. Access tokens carry only claims listed here AND still released
+  // by the registry.
+  releasedClaims String[] @default([]) @map("released_claims")
   grantedAt DateTime  @default(now()) @map("granted_at")
   revokedAt DateTime? @map("revoked_at")
 

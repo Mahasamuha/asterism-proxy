@@ -241,15 +241,19 @@ async function findForbiddenScope(authRequest: FlowRequest, resourceServer: Reso
   return gated.find((name) => !groupsSatisfy(groups, required(name))) ?? null;
 }
 
-/** Refuses a flow the user is not permitted to complete: the same terminal
- * outcome as Deny (request consumed), but the client is told invalid_scope. */
+/** Refuses a flow the user is not permitted to complete. Request consumed, as
+ * for Deny. The device flow tells the client only access_denied, same as a
+ * manual Deny. The redirect flow must NOT go back to the client: with SSO that
+ * needs no interaction, so a distinct error would tell any client whether the
+ * victim is in a group. The proxy's own page answers instead. */
 async function refuseForbiddenScope(res: Response, authRequest: FlowRequest, scope: string): Promise<void> {
   log.info({ userId: authRequest.subject, clientId: authRequest.clientId, resource: authRequest.resource, scope }, "Consent refused: user not in a required group");
   incrementCounter("consent_total", { outcome: "forbidden_scope" });
   if (isDeviceFlow(authRequest)) {
     await completeDeviceFlow(res, authRequest, false, undefined, `You are not permitted to grant ${scope}`);
   } else {
-    await denyAndRedirect(res, authRequest, "invalid_scope");
+    const consumed = await prisma.$transaction((tx) => consumeRequest(tx, authRequest.handle));
+    renderErrorPage(res, consumed ? `You are not permitted to grant ${scope}.` : REQUEST_USED_MESSAGE);
   }
 }
 
@@ -415,10 +419,13 @@ consentRouter.post("/oauth/consent", async (req: Request, res: Response) => {
     // one (including any persisted before this rule existed).
     const persistable = (scope: string) => !isShortLivedScope(authRequest.resource, scope);
     const mergedScopes = Array.from(new Set([...(live?.scopes ?? []), ...authRequest.scopes].filter(persistable)));
+    // The consent page listed the resource server's current releaseClaims, so
+    // approving consents to exactly those, on top of any already consented to.
+    const mergedClaims = Array.from(new Set([...(live?.releasedClaims ?? []), ...resourceServer.releaseClaims]));
     const grant = await tx.grant.upsert({
       where: { userId_clientId_resource: { userId: authRequest.subject, clientId: authRequest.clientId, resource: authRequest.resource } },
-      create: { userId: authRequest.subject, clientId: authRequest.clientId, resource: authRequest.resource, scopes: mergedScopes },
-      update: { scopes: mergedScopes, revokedAt: null },
+      create: { userId: authRequest.subject, clientId: authRequest.clientId, resource: authRequest.resource, scopes: mergedScopes, releasedClaims: mergedClaims },
+      update: { scopes: mergedScopes, releasedClaims: mergedClaims, revokedAt: null },
     });
     return grant.id;
   };

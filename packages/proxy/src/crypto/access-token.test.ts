@@ -9,6 +9,7 @@ const h = vi.hoisted(() => ({
 vi.mock("../db.js", () => ({ prisma: { user: { findUnique: h.findUnique } } }));
 
 vi.mock("./signing-keys.js", () => ({ signJwt: h.signJwt }));
+vi.mock("../logger.js", () => ({ createLogger: () => ({ warn: vi.fn(), info: vi.fn(), error: vi.fn() }) }));
 vi.mock("../resource-registry.js", () => ({
   lookupResourceServer: (id: string) => {
     const s = h.servers.get(id);
@@ -21,7 +22,7 @@ vi.mock("../config.js", () => ({ config: { issuerUrl: "https://as.example.test",
 import { mintAccessToken } from "./access-token.js";
 
 const RESOURCE = "https://mcp.example.test";
-const params = (over: Record<string, unknown> = {}) => ({ userId: "u1", clientId: "c1", resource: RESOURCE, scopes: ["read"], ...over }) as Parameters<typeof mintAccessToken>[0];
+const params = (over: Record<string, unknown> = {}) => ({ userId: "u1", clientId: "c1", resource: RESOURCE, scopes: ["read"], releaseClaims: [], ...over }) as Parameters<typeof mintAccessToken>[0];
 
 beforeEach(() => {
   h.signJwt.mockClear();
@@ -77,9 +78,11 @@ describe("mintAccessToken", () => {
       h.findUnique.mockReset();
     });
 
+    const ALL = ["email", "groups", "constellation_username", "missing"];
+
     it("adds present claims at the top level and keeps the protocol claims", async () => {
       h.findUnique.mockResolvedValue({ lastKnownClaims: { sub: "upstream", email: "j@x", groups: ["g"], constellation_username: "jrybka" } });
-      await mintAccessToken(params({ resource: RELEASE }));
+      await mintAccessToken(params({ resource: RELEASE, releaseClaims: ALL }));
       const [payload] = h.signJwt.mock.calls[0]!;
       expect(payload).toMatchObject({ sub: "u1", aud: RELEASE, client_id: "c1", email: "j@x", groups: ["g"], constellation_username: "jrybka" });
       expect(payload).not.toHaveProperty("missing");
@@ -89,15 +92,28 @@ describe("mintAccessToken", () => {
     it("applies the claim map", async () => {
       h.claimMap = { groups: "roles" };
       h.findUnique.mockResolvedValue({ lastKnownClaims: { roles: ["r"], groups: ["wrong"] } });
-      await mintAccessToken(params({ resource: RELEASE }));
+      await mintAccessToken(params({ resource: RELEASE, releaseClaims: ALL }));
       expect(h.signJwt.mock.calls[0]![0]["groups"]).toEqual(["r"]);
       h.claimMap = {};
     });
 
     it("releases nothing for a local-account user", async () => {
       h.findUnique.mockResolvedValue({ lastKnownClaims: null });
-      await mintAccessToken(params({ resource: RELEASE }));
+      await mintAccessToken(params({ resource: RELEASE, releaseClaims: ALL }));
       expect(Object.keys(h.signJwt.mock.calls[0]![0]).sort()).toEqual(["aud", "client_id", "iss", "jti", "scope", "sub"]);
+    });
+
+    it("mints only the claims the caller passes, not the registry's whole list", async () => {
+      h.findUnique.mockResolvedValue({ lastKnownClaims: { email: "j@x", groups: ["g"] } });
+      await mintAccessToken(params({ resource: RELEASE, releaseClaims: ["email"] }));
+      const [payload] = h.signJwt.mock.calls[0]!;
+      expect(payload).toHaveProperty("email", "j@x");
+      expect(payload).not.toHaveProperty("groups");
+    });
+
+    it("does not read the user when no claims are passed, even if the registry releases some", async () => {
+      await mintAccessToken(params({ resource: RELEASE }));
+      expect(h.findUnique).not.toHaveBeenCalled();
     });
 
     it("does not read the user when the resource releases nothing", async () => {
@@ -108,7 +124,7 @@ describe("mintAccessToken", () => {
     it("never lets a released value override a protocol claim", async () => {
       h.servers.set(RELEASE, { scopes: [{ name: "read" }], releaseClaims: ["sub"] });
       h.findUnique.mockResolvedValue({ lastKnownClaims: { sub: "evil" } });
-      await expect(mintAccessToken(params({ resource: RELEASE }))).rejects.toThrow(/reserved/);
+      await expect(mintAccessToken(params({ resource: RELEASE, releaseClaims: ["sub"] }))).rejects.toThrow(/reserved/);
       expect(h.signJwt).not.toHaveBeenCalled();
     });
   });

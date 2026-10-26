@@ -39,7 +39,7 @@ export function recheckUpstream(userId: string): Promise<UpstreamRecheck> {
 
 // When the provider was just found unavailable for a user, later refreshes within
 // this window reuse that verdict instead of calling it again (each failed call can
-// take up to openid-client's 30 s timeout).
+// take up to the upstream timeout).
 export const UPSTREAM_FAILURE_BACKOFF_MS = 60 * 1000;
 const recentFailures = new Map<string, number>();
 
@@ -62,31 +62,68 @@ async function doRecheck(userId: string): Promise<UpstreamRecheck> {
   const storedToken = user.upstreamRefreshToken;
   if (!storedToken) return { ok: false, reason: "no_upstream_token" };
 
+  const checkedAt = user.upstreamCheckedAt;
   const failOpen = (err: unknown): UpstreamRecheck => {
-    if (user.upstreamCheckedAt && now - user.upstreamCheckedAt.getTime() < UPSTREAM_FAIL_OPEN_MS) {
+    if (checkedAt && now - checkedAt.getTime() < UPSTREAM_FAIL_OPEN_MS) {
       log.warn({ userId, err }, "Upstream unavailable; allowing refresh on a recent check");
       return { ok: true };
     }
     log.error({ userId, err }, "Upstream unavailable and last check is too old");
     return { ok: false, reason: "upstream_unavailable" };
   };
+  const unavailable = (err: unknown): UpstreamRecheck => {
+    // Stamped after the call, so the back-off runs from when it failed, not started.
+    recentFailures.set(userId, Date.now());
+    return failOpen(err);
+  };
+  const rejected = async (err: unknown): Promise<UpstreamRecheck> => {
+    recentFailures.delete(userId);
+    await clearUpstreamToken(userId, storedToken, checkedAt);
+    log.warn({ userId, err }, "Upstream rejected the refresh; user must sign in again");
+    return { ok: false, reason: "upstream_rejected" };
+  };
+  // Refused without failing open, and the token is kept: whatever went wrong says
+  // nothing certain about the user (a misconfigured client, a bad response, a bug).
+  const refused = (where: string, err: unknown): UpstreamRecheck => {
+    recentFailures.delete(userId);
+    log.error({ userId, err }, `Upstream ${where} failed; refusing without clearing the token`);
+    return { ok: false, reason: "upstream_error" };
+  };
+  const fail = (endpoint: "token" | "userinfo", err: unknown): Promise<UpstreamRecheck> | UpstreamRecheck => {
+    switch (classifyUpstreamError(endpoint, err)) {
+      case "rejected":
+        return rejected(err);
+      case "unavailable":
+        return unavailable(err);
+      case "refuse":
+        return refused(endpoint, err);
+    }
+  };
 
   const failedAt = recentFailures.get(userId);
   if (failedAt !== undefined && now - failedAt < UPSTREAM_FAILURE_BACKOFF_MS) return failOpen(undefined);
 
+  let oidcConfig: Awaited<ReturnType<typeof getOidcConfig>>;
+  try {
+    oidcConfig = await getOidcConfig();
+  } catch (err) {
+    // Discovery says nothing about the user, whatever the error type.
+    return unavailable(err);
+  }
+
   let tokens: Awaited<ReturnType<typeof client.refreshTokenGrant>>;
+  try {
+    tokens = await client.refreshTokenGrant(oidcConfig, storedToken);
+  } catch (err) {
+    return fail("token", err);
+  }
+
+  // The refreshed ID token is optional. Without one, ask the userinfo endpoint. The
+  // subject is compared below rather than by fetchUserInfo's expectedSubject, which
+  // only knows the `sub` claim, not a custom OIDC_SUBJECT_CLAIM, and whose failure
+  // is indistinguishable from a network error (which would fail open).
   let claims: object;
   try {
-    const oidcConfig = await getOidcConfig();
-    try {
-      tokens = await client.refreshTokenGrant(oidcConfig, storedToken);
-    } catch (err) {
-      throw new UpstreamCallError("token", err);
-    }
-    // The refreshed ID token is optional. Without one, ask the userinfo endpoint. The
-    // subject is compared below rather than by fetchUserInfo's expectedSubject, which
-    // only knows the `sub` claim, not a custom OIDC_SUBJECT_CLAIM, and whose failure
-    // is indistinguishable from a network error (which would fail open).
     const idTokenClaims = tokens.claims();
     if (idTokenClaims) {
       claims = idTokenClaims;
@@ -94,27 +131,12 @@ async function doRecheck(userId: string): Promise<UpstreamRecheck> {
       try {
         claims = await client.fetchUserInfo(oidcConfig, tokens.access_token, client.skipSubjectCheck);
       } catch (err) {
-        throw new UpstreamCallError("userinfo", err);
+        return fail("userinfo", err);
       }
     }
-  } catch (wrapped) {
-    const endpoint = wrapped instanceof UpstreamCallError ? wrapped.endpoint : "discovery";
-    const err = wrapped instanceof UpstreamCallError ? wrapped.cause : wrapped;
-    if (isUpstreamRejection(endpoint, err)) {
-      await clearUpstreamToken(userId, storedToken);
-      log.warn({ userId, err }, "Upstream rejected the refresh; user must sign in again");
-      return { ok: false, reason: "upstream_rejected" };
-    }
-    // Discovery says nothing about the user, whatever the error type.
-    if (endpoint === "discovery" || isUpstreamUnavailable(err)) {
-      recentFailures.set(userId, now);
-      return failOpen(err);
-    }
-    // Anything else (a refreshed ID token failing validation, an unparseable
-    // answer) is refused without failing open, but the token is kept: it says
-    // nothing certain about the user.
-    log.error({ userId, err }, "Upstream refresh failed validation");
-    return { ok: false, reason: "upstream_invalid_response" };
+  } catch (err) {
+    // Not a call to the provider (e.g. reading the ID token claims): never fail open.
+    return refused("claims", err);
   }
   recentFailures.delete(userId);
 
@@ -125,17 +147,23 @@ async function doRecheck(userId: string): Promise<UpstreamRecheck> {
     subject = null;
   }
   if (subject !== user.oidcSub) {
-    await clearUpstreamToken(userId, storedToken);
+    await clearUpstreamToken(userId, storedToken, checkedAt);
+    if (subject === null) {
+      log.warn({ userId }, "Upstream response has no usable subject claim");
+      return { ok: false, reason: "subject_missing" };
+    }
     log.warn({ userId }, "Upstream subject does not match the stored user");
     return { ok: false, reason: "subject_mismatch" };
   }
 
   const email = emailFromClaims(claims);
   try {
-    // Compare-and-set on the token we used: a sign-in that stored a newer token
-    // (and fresher claims) while this call was in flight wins, and is left alone.
+    // Compare-and-set on the token we used and the check time we read: a sign-in
+    // that stored fresher claims while this call was in flight wins, and is left
+    // alone. The check time matters when the provider issued no new refresh token
+    // at sign-in, so the stored token is unchanged.
     await prisma.user.updateMany({
-      where: { id: userId, upstreamRefreshToken: storedToken },
+      where: { id: userId, upstreamRefreshToken: storedToken, upstreamCheckedAt: checkedAt },
       data: {
         ...(email !== undefined && { email }),
         lastKnownClaims: claimsToStore(claims),
@@ -153,44 +181,74 @@ async function doRecheck(userId: string): Promise<UpstreamRecheck> {
   return { ok: true };
 }
 
-class UpstreamCallError extends Error {
-  constructor(
-    readonly endpoint: "token" | "userinfo",
-    override readonly cause: unknown
-  ) {
-    super(`upstream ${endpoint} call failed`);
+type Verdict = "rejected" | "unavailable" | "refuse";
+
+/** The HTTP status of a Response, or undefined for anything else. */
+function statusOf(response: unknown): number | undefined {
+  return response instanceof Response ? response.status : undefined;
+}
+
+/**
+ * Sorts a failed upstream call into what it says about the user.
+ *
+ * rejected: the provider refused this user's session (`invalid_grant` from the token
+ *   endpoint, 401/403 from userinfo for the access token it just issued). The token
+ *   is cleared and the refresh refused.
+ * unavailable: the provider is down or unreachable (network failure, timeout, 5xx,
+ *   429, unparseable or truncated answer). May fail open for UPSTREAM_FAIL_OPEN_MS.
+ * refuse: anything else (other 4xx such as invalid_client, which a disabled user or
+ *   a wrong client secret may produce; auth challenges from the token endpoint;
+ *   validation failures; our own misconfiguration or bugs). Refused without
+ *   clearing the token and without failing open.
+ */
+function classifyUpstreamError(endpoint: "token" | "userinfo", err: unknown): Verdict {
+  if (err instanceof client.ResponseBodyError) {
+    if (endpoint === "token" && err.error === "invalid_grant") return "rejected";
+    return err.status >= 500 || err.status === 429 ? "unavailable" : "refuse";
   }
+  if (err instanceof client.WWWAuthenticateChallengeError) {
+    return endpoint === "userinfo" && (err.status === 401 || err.status === 403) ? "rejected" : "refuse";
+  }
+  if (err instanceof client.ClientError) {
+    switch (err.code) {
+      case "OAUTH_RESPONSE_IS_NOT_CONFORM": {
+        // The cause is the unexpected Response.
+        const status = statusOf(err.cause);
+        if (status === undefined) return "refuse";
+        if (endpoint === "userinfo" && (status === 401 || status === 403)) return "rejected";
+        return status >= 500 || status === 429 ? "unavailable" : "refuse";
+      }
+      case "OAUTH_RESPONSE_IS_NOT_JSON": {
+        // Also carries the Response. A 2xx or 5xx HTML page is an outage; a 4xx one
+        // (e.g. a gateway's 401/403/404) is not, and must not fail open.
+        const status = statusOf(err.cause);
+        if (status === undefined || status >= 500 || status === 429 || status < 400) return "unavailable";
+        return endpoint === "userinfo" && (status === 401 || status === 403) ? "rejected" : "refuse";
+      }
+      case "OAUTH_PARSE_ERROR":
+      case "OAUTH_TIMEOUT":
+      case "OAUTH_ABORT":
+        return "unavailable";
+      default:
+        return "refuse";
+    }
+  }
+  // A bare fetch failure is a TypeError without a code; oauth4webapi's CodedTypeError
+  // (bad arguments, i.e. our own misconfiguration) carries one and must not fail open.
+  if (err instanceof TypeError && typeof (err as { code?: unknown }).code !== "string") return "unavailable";
+  return "refuse";
 }
 
-/** The provider refused this user's session: `invalid_grant` from the token endpoint,
- * or a 401 challenge from userinfo for the access token it just issued. A challenge
- * from the token endpoint (e.g. 401 invalid_client with WWW-Authenticate, which
- * oauth4webapi raises before reading the body) is about asterism's own client, not
- * the user, so it must not clear anyone's token. */
-function isUpstreamRejection(endpoint: "token" | "userinfo" | "discovery", err: unknown): boolean {
-  if (endpoint === "token") return err instanceof client.ResponseBodyError && err.error === "invalid_grant";
-  if (endpoint === "userinfo") return err instanceof client.WWWAuthenticateChallengeError && err.status === 401;
-  return false;
-}
-
-const TRANSIENT_CLIENT_ERROR_CODES = new Set([
-  "OAUTH_RESPONSE_IS_NOT_CONFORM",
-  "OAUTH_RESPONSE_IS_NOT_JSON",
-  "OAUTH_TIMEOUT",
-  "OAUTH_ABORT",
-]);
-
-/** Failures that say the provider (or asterism's client config) is down or
- * misbehaving, not that the user is gone: network errors, timeouts, non-JSON or
- * unexpected-status answers, other OAuth error bodies (5xx, 429, invalid_client)
- * and auth challenges. These may fail open for UPSTREAM_FAIL_OPEN_MS. */
-function isUpstreamUnavailable(err: unknown): boolean {
-  if (err instanceof TypeError) return true;
-  if (err instanceof client.ResponseBodyError || err instanceof client.WWWAuthenticateChallengeError) return true;
-  return err instanceof client.ClientError && typeof err.code === "string" && TRANSIENT_CLIENT_ERROR_CODES.has(err.code);
-}
-
-/** Clears the stored token, but only if it is still the one that was refused. */
-async function clearUpstreamToken(userId: string, refusedToken: string): Promise<void> {
-  await prisma.user.updateMany({ where: { id: userId, upstreamRefreshToken: refusedToken }, data: { upstreamRefreshToken: null } });
+/** Clears the stored token, but only if it is still the one that was refused and
+ * no sign-in has stamped a newer check since. A database error is logged, not
+ * thrown: the refresh is refused either way. */
+async function clearUpstreamToken(userId: string, refusedToken: string, checkedAt: Date | null): Promise<void> {
+  try {
+    await prisma.user.updateMany({
+      where: { id: userId, upstreamRefreshToken: refusedToken, upstreamCheckedAt: checkedAt },
+      data: { upstreamRefreshToken: null },
+    });
+  } catch (err) {
+    log.error({ userId, err }, "Could not clear the refused upstream token");
+  }
 }

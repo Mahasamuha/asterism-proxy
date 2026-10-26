@@ -1,6 +1,9 @@
 import { prisma } from "../db.js";
 import { config } from "../config.js";
 import { RESERVED_CLAIMS } from "../reserved-claims.js";
+import { createLogger } from "../logger.js";
+
+const log = createLogger("released-claims");
 
 export type Claims = Record<string, unknown>;
 
@@ -15,6 +18,16 @@ export function normalizedClaim(upstream: unknown, name: string, claimMap: Recor
   return Object.hasOwn(upstream, source) ? upstream[source] : undefined;
 }
 
+/** Largest JSON size of one released value; bigger ones are dropped. */
+const MAX_CLAIM_JSON_LENGTH = 4096;
+
+/** Claims to mint for a grant: consented to by the user AND still released by
+ * the registry. A claim dropped from the registry stops at once; one added
+ * needs a fresh consent. */
+export function consentedClaimNames(grantReleased: readonly string[], registryReleased: readonly string[]): string[] {
+  return registryReleased.filter((name) => grantReleased.includes(name));
+}
+
 /** The subset of `names` present (not undefined/null) in the user's upstream
  * claims, keyed by released name. A reserved protocol name is a bug upstream of
  * here (the registry rejects it), so it throws rather than being skipped. */
@@ -23,7 +36,13 @@ export function selectReleasedClaims(upstream: unknown, names: readonly string[]
   for (const name of names) {
     if (RESERVED_CLAIMS.has(name)) throw new Error(`released claim ${JSON.stringify(name)} is a reserved protocol claim`);
     const value = normalizedClaim(upstream, name, claimMap);
-    if (value !== undefined && value !== null) out[name] = value;
+    if (value === undefined || value === null) continue;
+    const size = JSON.stringify(value).length;
+    if (size > MAX_CLAIM_JSON_LENGTH) {
+      log.warn({ claim: name, size }, "Released claim dropped: value too large");
+      continue;
+    }
+    out[name] = value;
   }
   return out;
 }

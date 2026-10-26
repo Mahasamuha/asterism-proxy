@@ -14,6 +14,9 @@ export interface MintAccessTokenParams {
   clientId: string;
   resource: string;
   scopes: string[];
+  /** Claim names the user consented to for this grant (already intersected with
+   * the registry's current releaseClaims by the caller). Empty releases none. */
+  releaseClaims: string[];
 }
 
 export interface MintedAccessToken {
@@ -47,10 +50,10 @@ export async function mintAccessToken(params: MintAccessTokenParams): Promise<Mi
   );
   const expiresIn = isShortLived ? SHORT_LIVED_TTL_SECONDS : DEFAULT_TTL_SECONDS;
 
-  // Upstream identity claims this resource server asked for. Spread first, so
+  // Upstream identity claims the user consented to for this grant. Spread first, so
   // the protocol claims below always win (reserved names are also rejected at
   // registry load and in selectReleasedClaims).
-  const released = await loadReleasedClaims(params.userId, resourceServer.releaseClaims);
+  const released = await loadReleasedClaims(params.userId, params.releaseClaims);
 
   const accessToken = await signJwt(
     {

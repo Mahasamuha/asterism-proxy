@@ -35,6 +35,13 @@ function grant(over: { claims?: Record<string, unknown> | undefined; refresh_tok
 function bodyError(error: string, status = 400) {
   return new realClient.ResponseBodyError("err", { cause: { error }, response: new Response(null, { status }) });
 }
+function clientError(code: string, cause?: unknown) {
+  return Object.assign(new realClient.ClientError(code, { cause }), { code });
+}
+function challenge(status: number) {
+  return new realClient.WWWAuthenticateChallengeError("bad", { cause: [], response: new Response(null, { status }) } as never);
+}
+const CHECKED = new Date(NOW - HOUR);
 const updates = () => db.prisma.user.updateMany.mock.calls.map((c) => (c[0] as { data: Record<string, unknown> }).data);
 
 beforeEach(async () => {
@@ -99,7 +106,7 @@ describe("recheckUpstream: successful refresh", () => {
     expect(oc.refreshTokenGrant.mock.calls[0]?.[1]).toBe("rt-old");
     expect(oc.fetchUserInfo).not.toHaveBeenCalled();
     expect(db.prisma.user.updateMany).toHaveBeenCalledWith({
-      where: { id: "u1", upstreamRefreshToken: "rt-old" },
+      where: { id: "u1", upstreamRefreshToken: "rt-old", upstreamCheckedAt: CHECKED },
       data: { email: "new@example.test", lastKnownClaims: { sub: "sub-1", email: "new@example.test", name: "N" }, upstreamCheckedAt: new Date(NOW) },
     });
   });
@@ -137,13 +144,16 @@ describe("recheckUpstream: successful refresh", () => {
   });
 });
 
-describe("recheckUpstream: subject mismatch", () => {
-  it.each([
-    ["a different subject", { sub: "someone-else" }],
-    ["a missing subject", { name: "N" }],
-  ])("%s is refused, the token cleared and nothing else updated", async (_n, claims) => {
-    grant({ claims });
+describe("recheckUpstream: subject checks", () => {
+  it("a different subject is refused with subject_mismatch, the token cleared and nothing else updated", async () => {
+    grant({ claims: { sub: "someone-else" } });
     expect(await mod.recheckUpstream("u1")).toEqual({ ok: false, reason: "subject_mismatch" });
+    expect(updates()).toEqual([{ upstreamRefreshToken: null }]);
+  });
+
+  it("a missing subject is refused with subject_missing, the token cleared", async () => {
+    grant({ claims: { name: "N" } });
+    expect(await mod.recheckUpstream("u1")).toEqual({ ok: false, reason: "subject_missing" });
     expect(updates()).toEqual([{ upstreamRefreshToken: null }]);
   });
 
@@ -154,8 +164,8 @@ describe("recheckUpstream: subject mismatch", () => {
   });
 });
 
-describe("recheckUpstream: upstream failures", () => {
-  it("an OAuth error (invalid_grant) clears the stored token and refuses", async () => {
+describe("recheckUpstream: token endpoint failures", () => {
+  it("invalid_grant clears the stored token and refuses", async () => {
     oc.refreshTokenGrant.mockRejectedValue(bodyError("invalid_grant"));
     expect(await mod.recheckUpstream("u1")).toEqual({ ok: false, reason: "upstream_rejected" });
     expect(updates()).toEqual([{ upstreamRefreshToken: null }]);
@@ -167,18 +177,50 @@ describe("recheckUpstream: upstream failures", () => {
     expect(await mod.recheckUpstream("u1")).toEqual({ ok: false, reason: "upstream_rejected" });
   });
 
-  it("a 401 from userinfo counts as a rejection", async () => {
-    grant({ claims: undefined });
-    oc.fetchUserInfo.mockRejectedValue(new realClient.WWWAuthenticateChallengeError("bad", { cause: [], response: new Response(null, { status: 401 }) } as never));
-    expect(await mod.recheckUpstream("u1")).toEqual({ ok: false, reason: "upstream_rejected" });
-    expect(updates()).toEqual([{ upstreamRefreshToken: null }]);
+  it.each([
+    ["a 5xx error body", () => bodyError("server_error", 503)],
+    ["a 429 error body", () => bodyError("rate_limited", 429)],
+    ["a plain network TypeError", () => new TypeError("fetch failed")],
+    ["a timeout", () => clientError("OAUTH_TIMEOUT")],
+    ["an abort", () => clientError("OAUTH_ABORT")],
+    ["a non-JSON answer", () => clientError("OAUTH_RESPONSE_IS_NOT_JSON", new Response(null, { status: 200 }))],
+    ["an HTML 502", () => clientError("OAUTH_RESPONSE_IS_NOT_JSON", new Response(null, { status: 502 }))],
+    ["a truncated body", () => clientError("OAUTH_PARSE_ERROR")],
+    ["an unexpected 502", () => clientError("OAUTH_RESPONSE_IS_NOT_CONFORM", new Response(null, { status: 502 }))],
+  ])("%s is unavailable: fails open, changes nothing", async (_n, make) => {
+    oc.refreshTokenGrant.mockRejectedValue(make());
+    expect(await mod.recheckUpstream("u1")).toEqual({ ok: true });
+    expect(db.prisma.user.updateMany).not.toHaveBeenCalled();
   });
 
-  it("a network error within 24h of the last check fails open and changes nothing", async () => {
+  it.each([
+    ["invalid_client (401)", () => bodyError("invalid_client", 401)],
+    ["access_denied (403)", () => bodyError("access_denied", 403)],
+    ["unauthorized_client (400)", () => bodyError("unauthorized_client", 400)],
+    ["invalid_request (400)", () => bodyError("invalid_request", 400)],
+    ["a 401 challenge", () => challenge(401)],
+    ["an unexpected 404", () => clientError("OAUTH_RESPONSE_IS_NOT_CONFORM", new Response(null, { status: 404 }))],
+    ["an HTML 401 from a gateway", () => clientError("OAUTH_RESPONSE_IS_NOT_JSON", new Response(null, { status: 401 }))],
+    ["an HTML 404 from a gateway", () => clientError("OAUTH_RESPONSE_IS_NOT_JSON", new Response(null, { status: 404 }))],
+    ["an unexpected answer with no Response", () => clientError("OAUTH_RESPONSE_IS_NOT_CONFORM")],
+    ["an ID token failing validation", () => clientError("OAUTH_JWT_CLAIM_COMPARISON_FAILED")],
+    ["a coded TypeError (misconfiguration)", () => Object.assign(new TypeError("must be a string"), { code: "ERR_INVALID_ARG_VALUE" })],
+    ["an unrelated exception", () => new Error("boom")],
+  ])("%s is refused, never failing open, and the token is kept", async (_n, make) => {
+    oc.refreshTokenGrant.mockRejectedValue(make());
+    expect(await mod.recheckUpstream("u1")).toEqual({ ok: false, reason: "upstream_error" });
+    expect(db.prisma.user.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("an upstream_error is not softened by a recent check", async () => {
+    oc.refreshTokenGrant.mockRejectedValue(bodyError("invalid_client", 401));
+    expect(await mod.recheckUpstream("u1")).toEqual({ ok: false, reason: "upstream_error" });
+  });
+
+  it("a network error within 24h of the last check fails open", async () => {
     db.prisma.user.findUnique.mockResolvedValue(userRow({ upstreamCheckedAt: new Date(NOW - mod.UPSTREAM_FAIL_OPEN_MS + 1) }));
     oc.refreshTokenGrant.mockRejectedValue(new TypeError("fetch failed"));
     expect(await mod.recheckUpstream("u1")).toEqual({ ok: true });
-    expect(db.prisma.user.updateMany).not.toHaveBeenCalled();
   });
 
   it("a network error 24h or more after the last check is refused, keeping the token", async () => {
@@ -187,40 +229,61 @@ describe("recheckUpstream: upstream failures", () => {
     expect(await mod.recheckUpstream("u1")).toEqual({ ok: false, reason: "upstream_unavailable" });
     expect(db.prisma.user.updateMany).not.toHaveBeenCalled();
   });
+});
 
-  it("a 5xx error body is treated as unavailable, not as a rejection", async () => {
-    oc.refreshTokenGrant.mockRejectedValue(bodyError("server_error", 503));
-    expect(await mod.recheckUpstream("u1")).toEqual({ ok: true });
-    expect(db.prisma.user.updateMany).not.toHaveBeenCalled();
+describe("recheckUpstream: userinfo failures", () => {
+  beforeEach(() => grant({ claims: undefined }));
+
+  it.each([
+    ["a 401 challenge", () => challenge(401)],
+    ["a 403 challenge", () => challenge(403)],
+    ["an unexpected 401", () => clientError("OAUTH_RESPONSE_IS_NOT_CONFORM", new Response(null, { status: 401 }))],
+    ["an unexpected 403", () => clientError("OAUTH_RESPONSE_IS_NOT_CONFORM", new Response(null, { status: 403 }))],
+    ["an HTML 401", () => clientError("OAUTH_RESPONSE_IS_NOT_JSON", new Response(null, { status: 401 }))],
+  ])("%s counts as a rejection", async (_n, make) => {
+    oc.fetchUserInfo.mockRejectedValue(make());
+    expect(await mod.recheckUpstream("u1")).toEqual({ ok: false, reason: "upstream_rejected" });
+    expect(updates()).toEqual([{ upstreamRefreshToken: null }]);
   });
 
   it.each([
-    ["invalid_client", 401],
-    ["rate_limited", 429],
-    ["invalid_request", 400],
-  ])("a %s (%i) error body says nothing about the user: unavailable, token kept", async (error, status) => {
-    oc.refreshTokenGrant.mockRejectedValue(bodyError(error, status));
+    ["a network error", () => new TypeError("fetch failed")],
+    ["a timeout", () => clientError("OAUTH_TIMEOUT")],
+    ["an unexpected 503", () => clientError("OAUTH_RESPONSE_IS_NOT_CONFORM", new Response(null, { status: 503 }))],
+    ["a non-JSON answer", () => clientError("OAUTH_RESPONSE_IS_NOT_JSON", new Response(null, { status: 200 }))],
+  ])("%s is unavailable", async (_n, make) => {
+    oc.fetchUserInfo.mockRejectedValue(make());
     expect(await mod.recheckUpstream("u1")).toEqual({ ok: true });
     expect(db.prisma.user.updateMany).not.toHaveBeenCalled();
   });
 
-  it("a 401 challenge from the token endpoint (invalid_client) is unavailable, not a rejection", async () => {
-    oc.refreshTokenGrant.mockRejectedValue(new realClient.WWWAuthenticateChallengeError("bad", { cause: [], response: new Response(null, { status: 401 }) } as never));
-    expect(await mod.recheckUpstream("u1")).toEqual({ ok: true });
+  it("an unexpected 404 is refused, keeping the token", async () => {
+    oc.fetchUserInfo.mockRejectedValue(clientError("OAUTH_RESPONSE_IS_NOT_CONFORM", new Response(null, { status: 404 })));
+    expect(await mod.recheckUpstream("u1")).toEqual({ ok: false, reason: "upstream_error" });
     expect(db.prisma.user.updateMany).not.toHaveBeenCalled();
   });
+});
 
-  it("an ID token failing validation is refused without failing open, keeping the token", async () => {
-    oc.refreshTokenGrant.mockRejectedValue(Object.assign(new realClient.ClientError("unexpected JWT claim value encountered"), { code: "OAUTH_JWT_CLAIM_COMPARISON_FAILED" }));
-    expect(await mod.recheckUpstream("u1")).toEqual({ ok: false, reason: "upstream_invalid_response" });
+describe("recheckUpstream: discovery and other exceptions", () => {
+  it("a discovery failure is treated as unavailable", async () => {
+    oc.discovery.mockRejectedValue(new Error("idp down"));
+    expect(await mod.recheckUpstream("u1")).toEqual({ ok: true });
+    expect(oc.refreshTokenGrant).not.toHaveBeenCalled();
+  });
+
+  it("an exception from reading the ID token claims is refused, not failed open", async () => {
+    oc.refreshTokenGrant.mockResolvedValue({
+      access_token: "at",
+      claims: () => {
+        throw new Error("bad id token");
+      },
+    });
+    expect(await mod.recheckUpstream("u1")).toEqual({ ok: false, reason: "upstream_error" });
     expect(db.prisma.user.updateMany).not.toHaveBeenCalled();
   });
+});
 
-  it("a timeout is treated as unavailable", async () => {
-    oc.refreshTokenGrant.mockRejectedValue(Object.assign(new realClient.ClientError("operation timed out"), { code: "OAUTH_TIMEOUT" }));
-    expect(await mod.recheckUpstream("u1")).toEqual({ ok: true });
-  });
-
+describe("recheckUpstream: back-off", () => {
   it("after an unavailable answer, the next refresh within the backoff does not call upstream again", async () => {
     oc.refreshTokenGrant.mockRejectedValue(new TypeError("fetch failed"));
     expect(await mod.recheckUpstream("u1")).toEqual({ ok: true });
@@ -231,23 +294,79 @@ describe("recheckUpstream: upstream failures", () => {
     expect(oc.refreshTokenGrant).toHaveBeenCalledTimes(2);
   });
 
-  it("a discovery failure is treated as unavailable", async () => {
-    oc.discovery.mockRejectedValue(new Error("idp down"));
-    expect(await mod.recheckUpstream("u1")).toEqual({ ok: true });
-    expect(oc.refreshTokenGrant).not.toHaveBeenCalled();
+  it("runs from when the call failed, not when it started", async () => {
+    oc.refreshTokenGrant.mockImplementation(async () => {
+      vi.setSystemTime(NOW + 30_000);
+      throw new TypeError("fetch failed");
+    });
+    await mod.recheckUpstream("u1");
+    vi.setSystemTime(NOW + mod.UPSTREAM_FAILURE_BACKOFF_MS + 1);
+    await mod.recheckUpstream("u1");
+    expect(oc.refreshTokenGrant).toHaveBeenCalledTimes(1);
+    vi.setSystemTime(NOW + 30_000 + mod.UPSTREAM_FAILURE_BACKOFF_MS);
+    await mod.recheckUpstream("u1");
+    expect(oc.refreshTokenGrant).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    ["rejection", () => bodyError("invalid_grant")],
+    ["refusal", () => bodyError("invalid_client", 401)],
+  ])("a %s ends the back-off", async (_n, make) => {
+    oc.refreshTokenGrant.mockRejectedValueOnce(new TypeError("fetch failed")).mockRejectedValueOnce(make());
+    await mod.recheckUpstream("u1");
+    vi.setSystemTime(NOW + mod.UPSTREAM_FAILURE_BACKOFF_MS);
+    await mod.recheckUpstream("u1");
+    expect(oc.refreshTokenGrant).toHaveBeenCalledTimes(2);
+    // Back-off cleared: the next call goes upstream rather than failing open on it.
+    oc.refreshTokenGrant.mockRejectedValueOnce(new TypeError("fetch failed"));
+    await mod.recheckUpstream("u1");
+    expect(oc.refreshTokenGrant).toHaveBeenCalledTimes(3);
+  });
+
+  it("a success ends the back-off", async () => {
+    oc.refreshTokenGrant.mockRejectedValueOnce(new TypeError("fetch failed"));
+    await mod.recheckUpstream("u1");
+    vi.setSystemTime(NOW + mod.UPSTREAM_FAILURE_BACKOFF_MS);
+    grant();
+    await mod.recheckUpstream("u1");
+    oc.refreshTokenGrant.mockRejectedValueOnce(new TypeError("fetch failed"));
+    db.prisma.user.findUnique.mockResolvedValue(userRow());
+    await mod.recheckUpstream("u1");
+    expect(oc.refreshTokenGrant).toHaveBeenCalledTimes(3);
   });
 });
 
 describe("recheckUpstream: races with sign-in", () => {
-  it("a rejection only clears the token it refused, never a newer one", async () => {
+  it("a rejection only clears the token and check time it refused, never newer ones", async () => {
     oc.refreshTokenGrant.mockRejectedValue(bodyError("invalid_grant"));
     await mod.recheckUpstream("u1");
-    expect(db.prisma.user.updateMany).toHaveBeenCalledWith({ where: { id: "u1", upstreamRefreshToken: "rt-old" }, data: { upstreamRefreshToken: null } });
+    expect(db.prisma.user.updateMany).toHaveBeenCalledWith({
+      where: { id: "u1", upstreamRefreshToken: "rt-old", upstreamCheckedAt: CHECKED },
+      data: { upstreamRefreshToken: null },
+    });
+  });
+
+  it("a user never checked is matched on a null check time", async () => {
+    db.prisma.user.findUnique.mockResolvedValue(userRow({ upstreamCheckedAt: null }));
+    await mod.recheckUpstream("u1");
+    expect(db.prisma.user.updateMany.mock.calls[0]?.[0]).toMatchObject({ where: { upstreamCheckedAt: null } });
   });
 
   it("a failed write after a successful upstream check still lets the refresh through", async () => {
     db.prisma.user.updateMany.mockRejectedValue(new Error("db down"));
     expect(await mod.recheckUpstream("u1")).toEqual({ ok: true });
+  });
+
+  it("a failed clear still refuses the rejected user", async () => {
+    db.prisma.user.updateMany.mockRejectedValue(new Error("db down"));
+    oc.refreshTokenGrant.mockRejectedValue(bodyError("invalid_grant"));
+    expect(await mod.recheckUpstream("u1")).toEqual({ ok: false, reason: "upstream_rejected" });
+  });
+
+  it("a failed clear still refuses a subject mismatch", async () => {
+    db.prisma.user.updateMany.mockRejectedValue(new Error("db down"));
+    grant({ claims: { sub: "someone-else" } });
+    expect(await mod.recheckUpstream("u1")).toEqual({ ok: false, reason: "subject_mismatch" });
   });
 });
 

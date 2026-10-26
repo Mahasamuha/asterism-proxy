@@ -62,6 +62,10 @@ describe("getOidcConfig", () => {
     expect(oc.discovery).toHaveBeenCalledTimes(2);
   });
 
+  it("gives the discovered configuration a 10 s timeout", async () => {
+    expect((await oidc.getOidcConfig()).timeout).toBe(10);
+  });
+
   it("P1 serves the stale config when re-discovery fails, but throws on a cold failure", async () => {
     await oidc.getOidcConfig();
     vi.setSystemTime(NOW + 25 * 3600_000);

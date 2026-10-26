@@ -82,6 +82,11 @@ const trustProxy = z
 /** OIDC_CLAIM_MAP: comma-separated `released=upstream` pairs. A released claim
  * `X` is read from the upstream claim `map[X] ?? X`. Malformed input is a
  * startup error: a silently ignored mapping would release the wrong data. */
+// Claims a provider lets users or admins change, or that are not unique per user.
+// Keyed on one of these, renaming or re-using a name would hand a user someone else's
+// identity and grants.
+const MUTABLE_SUBJECT_CLAIMS = ["email", "preferred_username", "name", "given_name", "family_name", "nickname", "upn", "unique_name"];
+
 const claimMap = z
   .string()
   .optional()
@@ -138,7 +143,14 @@ const envSchema = z
     // Which ID token claim identifies the user (stored as User.oidcSub). `sub` for
     // most providers; e.g. `oid` for Microsoft Entra. Changing it after users exist
     // orphans them: they would look like new users.
-    OIDC_SUBJECT_CLAIM: z.string().trim().min(1, "OIDC_SUBJECT_CLAIM must not be empty").default("sub"),
+    OIDC_SUBJECT_CLAIM: z
+      .string()
+      .trim()
+      .min(1, "OIDC_SUBJECT_CLAIM must not be empty")
+      .refine((claim) => !MUTABLE_SUBJECT_CLAIMS.includes(claim.toLowerCase()), {
+        message: `OIDC_SUBJECT_CLAIM must be immutable and unique per user (e.g. sub or oid), not a name or address that can change or be reused: ${MUTABLE_SUBJECT_CLAIMS.join(", ")} are refused`,
+      })
+      .default("sub"),
 
     ENABLE_LOCAL_ACCOUNTS: boolFromEnv(false),
     ENABLE_DCR: boolFromEnv(false),

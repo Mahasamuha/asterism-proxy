@@ -58,8 +58,12 @@ to an OIDC provider. Safari is not a target browser and has not been tested.
 Users sign in through the provider named by `OIDC_ISSUER` and are keyed on the
 provider's issuer plus one claim, `OIDC_SUBJECT_CLAIM` (default `sub`; for example
 `oid` for Microsoft Entra). The claim must be a non-empty string or the sign-in
-fails. **Changing `OIDC_SUBJECT_CLAIM` after users exist orphans them:** their
-stored identifiers no longer match, so they look like new users with no grants.
+fails. It must be immutable and unique per user, such as `sub` or `oid`: startup
+is refused for `email`, `preferred_username`, `name`, `given_name`, `family_name`,
+`nickname`, `upn` and `unique_name`, because those can be changed or reused, which
+would hand one person another's identity and grants. **Changing `OIDC_SUBJECT_CLAIM`
+after users exist orphans them:** their stored identifiers no longer match, so they
+look like new users with no grants.
 
 Asterism asks for the `offline_access` scope and stores the provider's refresh token
 on the user (plaintext in the database, like the signing keys' private JWKs).
@@ -70,9 +74,17 @@ lifetime instead of waiting for their next upstream sign-in. Behaviour:
 
 - the provider rejects the token (user disabled, session revoked, token expired):
   the refresh fails with `invalid_grant` and the client must sign in again;
-- the provider is unreachable: a user last confirmed within 24 hours is let
-  through, anyone else is refused;
-- the refreshed identity has a different subject than the stored user: refused.
+- the provider is unreachable or failing (network error, timeout after 10 seconds,
+  5xx, 429, an answer that is not valid JSON): a user last confirmed within 24 hours
+  is let through, anyone else is refused (`upstream_unavailable`);
+- the provider answers with any other error (for example `invalid_client`,
+  `access_denied`, or a wrong `OIDC_CLIENT_SECRET`): the refresh is refused
+  (`upstream_error`) but the stored token is kept, and the error is logged. This is
+  deliberately not a fail-open case, so a misconfigured client or a disabled user
+  is never extended by the 24 hour window;
+- the refreshed identity has a different subject than the stored user
+  (`subject_mismatch`), or lacks the configured subject claim (`subject_missing`):
+  refused and the stored token is cleared.
 
 Local accounts are not affected.
 
@@ -186,11 +198,24 @@ no group.
   to the top level of that server's access tokens when the user has them (absent
   and null claims are skipped). Protocol claims (`iss sub aud exp nbf iat jti
   client_id scope cnf act azp nonce auth_time`) and duplicates are rejected when
-  the registry loads. The consent page tells the user which details are released.
+  the registry loads. The consent page tells the user which details are released,
+  and that both the client and the resource server receive them: access tokens are
+  signed, not encrypted, so the client can read every released claim. A value
+  whose JSON is longer than 4096 characters is dropped (logged by claim name and
+  size only). `groups` is released in full, so release it only to resource
+  servers that need it.
+- Claims need consent per grant. Approving consent records the resource server's
+  `releaseClaims` on the grant, and a token carries only claims that are both
+  recorded on the grant and still in `releaseClaims`. Removing a claim from the
+  registry stops it at once; adding one releases nothing until each user approves
+  consent again. Grants made before this existed have none recorded, so they
+  release no claims until the user re-consents.
 - `requireGroups` (scope): a non-empty list; the scope is issued only to a user
   whose `groups` claim (after `OIDC_CLAIM_MAP`) contains at least one entry. It is
-  checked when the consent page is opened and again on approval; otherwise the
-  client gets `error=invalid_scope` (device flow: the code is denied).
+  checked when the consent page is opened and again on approval. If it fails, the
+  proxy shows its own error page and does not redirect to the client (a redirect
+  would tell the client whether the user is in the group); in the device flow the
+  code is denied, as for a manual Deny.
 
 `email_verified` may be false upstream (it is with the Authentik setup this was
 built for), so resource servers must not authorize by `email`. Use `sub`, or a

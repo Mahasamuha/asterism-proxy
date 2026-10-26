@@ -306,7 +306,7 @@ describe("authorization_code: response and offline_access (P0/P1)", () => {
   it("the access token never carries offline_access", async () => {
     arrange();
     await token(codeFields());
-    expect(mint.mock.calls[0]![0]).toEqual({ userId: "u1", clientId: CLIENT_ID, resource: RESOURCE, scopes: ["read"] });
+    expect(mint.mock.calls[0]![0]).toEqual({ userId: "u1", clientId: CLIENT_ID, resource: RESOURCE, scopes: ["read"], releaseClaims: [] });
   });
 
   it("without offline_access: no refresh token is issued", async () => {
@@ -656,5 +656,42 @@ describe("device_code grant", () => {
     const r = await token(deviceFields());
     expect(r.status).toBe(400);
     expect(r.json["error"]).toBe("invalid_grant");
+  });
+});
+
+describe("released claims are minted only for consented claims the registry still releases", () => {
+  const claimsOf = async (flow: () => Promise<unknown>, grantClaims: string[], registry: string[]) => {
+    const server = (await import("../resource-registry.js")).lookupResourceServer(RESOURCE)!;
+    server.releaseClaims = registry;
+    try {
+      await flow();
+    } finally {
+      server.releaseClaims = [];
+    }
+    return mint.mock.calls[0]![0].releaseClaims;
+  };
+
+  it("authorization_code", async () => {
+    arrange();
+    m("grant", "findUnique").mockResolvedValue({ id: "g1", revokedAt: null, releasedClaims: ["email", "name"] });
+    expect(await claimsOf(() => token(codeFields()), ["email", "name"], ["email", "groups"])).toEqual(["email"]);
+  });
+
+  it("refresh_token", async () => {
+    arrangeRefresh();
+    m("grant", "findUnique").mockResolvedValue({ id: "g1", revokedAt: null, releasedClaims: ["email", "name"] });
+    expect(await claimsOf(() => token(refreshFields()), ["email", "name"], ["email", "groups"])).toEqual(["email"]);
+  });
+
+  it("device_code", async () => {
+    arrangeDevice();
+    m("grant", "findUnique").mockResolvedValue({ id: "g1", userId: "u1", revokedAt: null, releasedClaims: ["groups"] });
+    expect(await claimsOf(() => token(deviceFields()), ["groups"], ["email", "groups"])).toEqual(["groups"]);
+  });
+
+  it("a grant that predates claim consent (empty releasedClaims) mints none", async () => {
+    arrangeRefresh();
+    m("grant", "findUnique").mockResolvedValue({ id: "g1", revokedAt: null, releasedClaims: [] });
+    expect(await claimsOf(() => token(refreshFields()), [], ["email"])).toEqual([]);
   });
 });

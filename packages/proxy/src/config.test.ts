@@ -86,6 +86,14 @@ describe("identity providers", () => {
     await expect(loadConfigWith({ ...oidcEnv, OIDC_SUBJECT_CLAIM: "" })).rejects.toThrow(/OIDC_SUBJECT_CLAIM/);
   });
 
+  it.each(["email", "preferred_username", "name", "given_name", "family_name", "nickname", "upn", "unique_name", "Email"])(
+    "refuses the mutable OIDC_SUBJECT_CLAIM %s",
+    async (claim) => {
+      const oidcEnv = { ENABLE_OIDC: "true", OIDC_ISSUER: "https://idp.example.com", OIDC_CLIENT_ID: "cid", OIDC_CLIENT_SECRET: "secret" };
+      await expect(loadConfigWith({ ...oidcEnv, OIDC_SUBJECT_CLAIM: claim })).rejects.toThrow(/immutable and unique/);
+    }
+  );
+
   it.each(["OIDC_ISSUER", "OIDC_CLIENT_ID", "OIDC_CLIENT_SECRET"])("requires %s when OIDC is on", async (missing) => {
     const env: Record<string, string | undefined> = {
       ENABLE_OIDC: "true",
