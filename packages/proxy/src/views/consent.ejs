@@ -28,12 +28,15 @@
       <% if (unverified) { %>
         <%- include('partials/banner', { status: 'warning', title: null, text: "This client's identity has not been verified. Only approve if you recognize and trust it." }) %>
       <% } %>
-      <p>This will allow access to <strong><%= resourceServerName %></strong> with the following permissions:</p>
-      <ul class="scope-list">
-        <% scopes.forEach(function(scope) { %>
-          <li><%= scope.description %></li>
-        <% }) %>
-      </ul>
+      <section class="grant-box" aria-labelledby="grant-title">
+        <p class="eyebrow" id="grant-title">what you're allowing</p>
+        <p class="grant-lead">This will allow access to <strong><%= resourceServerName %></strong> with the following permissions:</p>
+        <ul class="scope-list">
+          <% scopes.forEach(function(scope) { %>
+            <li><%= scope.description %></li>
+          <% }) %>
+        </ul>
+      </section>
       <% if (releasedClaims && releasedClaims.length) { %>
         <p><%= clientName %> and <%= resourceServerName %> will receive these details from your account: <%= releasedClaims.join(", ") %></p>
       <% } %>
