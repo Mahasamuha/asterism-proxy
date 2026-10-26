@@ -387,7 +387,8 @@ td button.ghost { padding: 0; }
 /* EmptyState: the network mark, a headline naming the space, one line, one
    action. */
 .empty { display: flex; flex-direction: column; align-items: center; text-align: center; gap: 12px; padding: 40px 24px; }
-.empty img { display: block; margin-bottom: 4px; }
+.empty picture, .empty img { display: block; }
+.empty picture { margin-bottom: 4px; }
 .empty .title { margin: 0; font-size: 18px; font-weight: 500; line-height: 1.3; letter-spacing: -0.005em; color: var(--text-heading); }
 .empty .text { margin: 0; max-width: 360px; color: var(--text-body); }
 .empty .actions { margin-top: 8px; }
