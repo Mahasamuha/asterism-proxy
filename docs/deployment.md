@@ -53,6 +53,40 @@ the redirect to an https client on another origin, the code exchange and a refre
 **Not yet checked by hand:** a custom-scheme redirect and the device-entry redirect
 to an OIDC provider. Safari is not a target browser and has not been tested.
 
+## Upstream OIDC provider
+
+Users sign in through the provider named by `OIDC_ISSUER` and are keyed on the
+provider's issuer plus one claim, `OIDC_SUBJECT_CLAIM` (default `sub`; for example
+`oid` for Microsoft Entra). The claim must be a non-empty string or the sign-in
+fails. **Changing `OIDC_SUBJECT_CLAIM` after users exist orphans them:** their
+stored identifiers no longer match, so they look like new users with no grants.
+
+Asterism asks for the `offline_access` scope and stores the provider's refresh token
+on the user (plaintext in the database, like the signing keys' private JWKs).
+Whenever a client refreshes its asterism token, asterism redeems that token at the
+provider, at most once every 5 minutes per user. This is how disabling a user, or
+changing their claims, upstream takes effect within the 15-minute access-token
+lifetime instead of waiting for their next upstream sign-in. Behaviour:
+
+- the provider rejects the token (user disabled, session revoked, token expired):
+  the refresh fails with `invalid_grant` and the client must sign in again;
+- the provider is unreachable: a user last confirmed within 24 hours is let
+  through, anyone else is refused;
+- the refreshed identity has a different subject than the stored user: refused.
+
+Local accounts are not affected.
+
+**Authentik setup.** On the OAuth2/OpenID provider used by asterism, allow the
+`refresh_token` grant (under Advanced protocol settings, or via the provider's
+authorization flow setup, depending on the Authentik version) and add the
+`offline_access` scope mapping to Selected Scopes. Without both, the provider issues
+no refresh token and every asterism refresh fails with `no_upstream_token`.
+
+**Upgrading.** Users who signed in before this version have no stored provider
+token, so each must sign in once more after the upgrade; until then their refreshes
+fail with `invalid_grant` ("sign in again"). Run the database migration
+(`prisma migrate deploy`) before starting the new version.
+
 ## Client metadata fetching
 
 `ALLOW_INSECURE_CLIENT_METADATA` is for development only. It permits `http:`
@@ -135,6 +169,33 @@ be listed under `environment:` in `docker-compose.yml` (it already is).
   is no global ceiling across IPs: with 31^8 possible codes, guessing a live one is
   negligible, and a global cap would only let an attacker lock everyone out.
 
+## Identity claims in access tokens
+
+By default an access token carries only `iss`, `sub`, `aud`, `client_id`, `scope`,
+`jti`, `iat` and `exp`. A resource server can ask for more, and a scope can be
+limited to certain groups, using the upstream claims stored at each OIDC sign-in.
+Local-account users have no upstream claims: they release nothing and belong to
+no group.
+
+- `OIDC_CLAIM_MAP` (optional): `released=upstream` pairs separated by commas, for
+  an identity provider that names a claim differently, for example
+  `groups=roles,email=mail`. The released claim `X` is read from the upstream claim
+  `OIDC_CLAIM_MAP[X]`, or from `X` when unmapped. Empty names and a released name
+  listed twice stop the proxy at startup.
+- `releaseClaims` (resource server, in `resource-servers.yaml`): claim names copied
+  to the top level of that server's access tokens when the user has them (absent
+  and null claims are skipped). Protocol claims (`iss sub aud exp nbf iat jti
+  client_id scope cnf act azp nonce auth_time`) and duplicates are rejected when
+  the registry loads. The consent page tells the user which details are released.
+- `requireGroups` (scope): a non-empty list; the scope is issued only to a user
+  whose `groups` claim (after `OIDC_CLAIM_MAP`) contains at least one entry. It is
+  checked when the consent page is opened and again on approval; otherwise the
+  client gets `error=invalid_scope` (device flow: the code is denied).
+
+`email_verified` may be false upstream (it is with the Authentik setup this was
+built for), so resource servers must not authorize by `email`. Use `sub`, or a
+group or username claim the identity provider controls.
+
 ## Published image
 
 CI pushes `mahasamuha/asterism-proxy` to Docker Hub (linux/amd64) after the tests
@@ -171,6 +232,8 @@ services:
       OIDC_ISSUER:
       OIDC_CLIENT_ID:
       OIDC_CLIENT_SECRET:
+      OIDC_SUBJECT_CLAIM:
+      OIDC_CLAIM_MAP:
       ENABLE_LOCAL_ACCOUNTS:
       RESOURCE_SERVERS_PATH: /app/site-config/resource-servers.yaml
     volumes:

@@ -17,6 +17,25 @@ export interface Principal {
   clientId: string;
   scopes: string[];
   expiresAt: Date;
+  /** Every payload claim except the registered/protocol ones (`iss`, `sub`, `aud`, `exp`, `nbf`,
+   * `iat`, `jti`, `client_id`, `scope`), e.g. `email` or `groups`. Values are passed through
+   * unvalidated: checking their shape is the resource server's job. Always present; a plain
+   * object that is fresh per call, and never carries `__proto__`, `constructor` or `prototype`. */
+  claims: Record<string, unknown>;
+}
+
+const PROTOCOL_CLAIMS = new Set(["iss", "sub", "aud", "exp", "nbf", "iat", "jti", "client_id", "scope"]);
+// A JSON payload can carry an own "__proto__" key; copying it by assignment would swap the
+// prototype of the result, so these keys are dropped rather than copied.
+const UNSAFE_KEYS = new Set(["__proto__", "constructor", "prototype"]);
+
+function extraClaims(payload: JWTPayload): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [name, value] of Object.entries(payload)) {
+    if (PROTOCOL_CLAIMS.has(name) || UNSAFE_KEYS.has(name)) continue;
+    out[name] = value;
+  }
+  return out;
 }
 
 export type TokenValidationReason =
@@ -128,6 +147,7 @@ export function createVerifier(config: VerifierConfig): Verifier {
         clientId: payload["client_id"],
         scopes: scopeClaim.split(" ").filter(Boolean),
         expiresAt: new Date(payload.exp * 1000),
+        claims: extraClaims(payload),
       };
     },
   };

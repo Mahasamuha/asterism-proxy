@@ -56,6 +56,9 @@
         <li><%= scope.description %></li>
       <% }) %>
     </ul>
+    <% if (releasedClaims && releasedClaims.length) { %>
+      <p class="resource"><%= resourceServerName %> will also receive these details from your account: <%= releasedClaims.join(", ") %></p>
+    <% } %>
     <form id="consent-form" method="POST" action="/oauth/consent">
       <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
       <input type="hidden" name="flow" value="<%= flow %>">

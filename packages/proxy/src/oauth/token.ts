@@ -3,12 +3,13 @@ import { Router, Request, Response, NextFunction } from "express";
 import { prisma } from "../db.js";
 import { createLogger } from "../logger.js";
 import { mintAccessToken } from "../crypto/access-token.js";
-import { issueRefreshToken, accessTokenScopes, refreshableScopes } from "../crypto/refresh-token.js";
+import { issueRefreshToken, accessTokenScopes, refreshableScopes, permittedScopes } from "../crypto/refresh-token.js";
 import { resolveClient } from "../clients/cimd.js";
 import { authenticateConfidentialClient } from "./client-assertion.js";
 import { incrementCounter } from "../metrics.js";
 import { bodyOf, stringField } from "../http-params.js";
 import { limitOauthEndpoint } from "../rate-limit.js";
+import { recheckUpstream } from "../identity/upstream-refresh.js";
 
 const log = createLogger("token");
 
@@ -299,9 +300,20 @@ async function handleRefreshTokenGrant(body: Record<string, unknown>, res: Respo
     return;
   }
 
+  // Re-check the user with the upstream identity provider before anything is minted
+  // or rotated, so a refused refresh leaves the refresh token usable (e.g. once the
+  // user has signed in again upstream).
+  const upstream = await recheckUpstream(entry.userId);
+  if (!upstream.ok) {
+    log.warn({ userId: entry.userId, clientId: entry.clientId, reason: upstream.reason }, "Refresh refused: upstream sign-in no longer valid");
+    res.status(400).json({ error: "invalid_grant", error_description: "Upstream sign-in is no longer valid; sign in again" });
+    return;
+  }
+
   // shortLived scopes (e.g. admin) are never refreshable; strip them even from
-  // rows created before they were stripped at issuance.
-  const scopes = refreshableScopes(entry.resource, entry.scopes);
+  // rows created before they were stripped at issuance. Group-gated scopes the
+  // user has since lost are dropped too, from this token and its successor.
+  const scopes = await permittedScopes(entry.resource, entry.userId, refreshableScopes(entry.resource, entry.scopes));
 
   // Mint first so a signing failure happens before anything is claimed; the
   // JWT is discarded if the claim below is lost.

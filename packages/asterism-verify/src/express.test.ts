@@ -8,6 +8,8 @@ import {
   protectedResourceMetadataHandler,
   protectedResourceMetadataPath,
   protectedResourceMetadataUrl,
+  requireScopes,
+  sendInsufficientScope,
   type AuthenticatedRequest,
   type VerifierConfig,
 } from "./index.js";
@@ -43,6 +45,11 @@ beforeAll(async () => {
   a.get(protectedResourceMetadataPath(AUD), protectedResourceMetadataHandler(cfg()));
   a.use("/mcp", createBearerAuthMiddleware(cfg()));
   a.get("/mcp", (req: Request, res) => res.json({ principal: (req as AuthenticatedRequest).principal }));
+  a.get(protectedResourceMetadataPath(AUD) + "-scoped", protectedResourceMetadataHandler(cfg(), { scopesSupported: ["read", "write"] }));
+  a.get("/step-up", createBearerAuthMiddleware(cfg()), requireScopes(cfg(), "admin"), (_req, res) => res.json({ ok: true }));
+  a.get("/step-up-two", createBearerAuthMiddleware(cfg()), requireScopes(cfg(), "read", "write"), (_req, res) => res.json({ ok: true }));
+  a.get("/no-principal", requireScopes(cfg(), "read"), (_req, res) => res.json({ ok: true }));
+  a.get("/send", (_req, res) => sendInsufficientScope(res, cfg(), ["a", "b"], "need more"));
   app = a.listen(0, "127.0.0.1");
   await new Promise<void>((r) => app.once("listening", r));
   base = `http://127.0.0.1:${(app.address() as AddressInfo).port}`;
@@ -128,7 +135,7 @@ describe("createBearerAuthMiddleware", () => {
     const res = await get({ authorization: `Bearer ${await token()}` });
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({
-      principal: { subject: "u1", clientId: "c1", scopes: ["read", "admin"], expiresAt: new Date((NOW + 600) * 1000).toISOString() },
+      principal: { subject: "u1", clientId: "c1", scopes: ["read", "admin"], claims: {}, expiresAt: new Date((NOW + 600) * 1000).toISOString() },
     });
   });
 
@@ -151,5 +158,75 @@ describe("protectedResourceMetadataHandler", () => {
     const res = await get({}, protectedResourceMetadataPath(AUD));
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ resource: AUD, authorization_servers: [ISS], bearer_methods_supported: ["header"] });
+  });
+});
+
+describe("protectedResourceMetadataHandler scopesSupported", () => {
+  it("P1 emits scopes_supported when provided", async () => {
+    const res = await get({}, protectedResourceMetadataPath(AUD) + "-scoped");
+    expect(await res.json()).toEqual({
+      resource: AUD,
+      authorization_servers: [ISS],
+      bearer_methods_supported: ["header"],
+      scopes_supported: ["read", "write"],
+    });
+  });
+
+  it("P1 omits scopes_supported by default", async () => {
+    const body = (await (await get({}, protectedResourceMetadataPath(AUD))).json()) as Record<string, unknown>;
+    expect(body).not.toHaveProperty("scopes_supported");
+  });
+
+  it("P1 rejects invalid scope strings at creation", () => {
+    expect(() => protectedResourceMetadataHandler(cfg(), { scopesSupported: ["a b"] })).toThrow(/Invalid scope/);
+  });
+});
+
+describe("sendInsufficientScope", () => {
+  it("P0 answers 403 with the exact challenge and JSON body", async () => {
+    const res = await get({}, "/send");
+    expect(res.status).toBe(403);
+    expect(res.headers.get("www-authenticate")).toBe(`${CHALLENGE}, error="insufficient_scope", scope="a b"`);
+    expect(await res.json()).toEqual({ error: "insufficient_scope", error_description: "need more" });
+  });
+
+  it("P0 throws on invalid scope strings", () => {
+    const res = { set: vi.fn(), status: vi.fn() } as never;
+    for (const bad of ['a"b', "a\\b", "a b", "", "a\tb", "a\nb"]) {
+      expect(() => sendInsufficientScope(res, cfg(), [bad])).toThrow(/Invalid scope/);
+    }
+  });
+});
+
+describe("requireScopes", () => {
+  const auth = async (scope: string) => ({ authorization: `Bearer ${await token({ scope })}` });
+
+  it("P0 passes when the principal has the scope", async () => {
+    const res = await get(await auth("read admin"), "/step-up");
+    expect(res.status).toBe(200);
+  });
+
+  it("P0 403s with insufficient_scope when a scope is missing", async () => {
+    const res = await get(await auth("read"), "/step-up");
+    expect(res.status).toBe(403);
+    expect(res.headers.get("www-authenticate")).toBe(`${CHALLENGE}, error="insufficient_scope", scope="admin"`);
+    expect(((await res.json()) as { error: string }).error).toBe("insufficient_scope");
+  });
+
+  it("P0 requires all listed scopes", async () => {
+    expect((await get(await auth("read"), "/step-up-two")).status).toBe(403);
+    expect((await get(await auth("read write"), "/step-up-two")).status).toBe(200);
+  });
+
+  it("P0 fails closed with the bearer 401 challenge when there is no principal", async () => {
+    const res = await get({}, "/no-principal");
+    expect(res.status).toBe(401);
+    expect(res.headers.get("www-authenticate")).toBe(CHALLENGE);
+  });
+
+  it("P0 throws at creation on invalid scope strings", () => {
+    for (const bad of ['a"b', "a\\b", "a b", ""]) {
+      expect(() => requireScopes(cfg(), bad)).toThrow(/Invalid scope/);
+    }
   });
 });

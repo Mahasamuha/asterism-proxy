@@ -79,6 +79,37 @@ const trustProxy = z
     return z.NEVER;
   });
 
+/** OIDC_CLAIM_MAP: comma-separated `released=upstream` pairs. A released claim
+ * `X` is read from the upstream claim `map[X] ?? X`. Malformed input is a
+ * startup error: a silently ignored mapping would release the wrong data. */
+const claimMap = z
+  .string()
+  .optional()
+  .transform((raw, ctx): Record<string, string> => {
+    const map: Record<string, string> = {};
+    if (raw === undefined || raw.trim() === "") return map;
+    for (const part of raw.split(",")) {
+      const pair = part.trim();
+      const eq = pair.indexOf("=");
+      const released = eq === -1 ? "" : pair.slice(0, eq).trim();
+      const upstream = eq === -1 ? "" : pair.slice(eq + 1).trim();
+      if (!released || !upstream || upstream.includes("=")) {
+        ctx.issues.push({
+          code: "custom",
+          message: `must be comma-separated released=upstream pairs with non-empty names (for example groups=roles,email=mail); got ${JSON.stringify(pair)}`,
+          input: raw,
+        });
+        return z.NEVER;
+      }
+      if (Object.hasOwn(map, released)) {
+        ctx.issues.push({ code: "custom", message: `maps released claim ${JSON.stringify(released)} more than once`, input: raw });
+        return z.NEVER;
+      }
+      Object.defineProperty(map, released, { value: upstream, enumerable: true, writable: true, configurable: true });
+    }
+    return map;
+  });
+
 const envSchema = z
   .object({
     DATABASE_URL: z.string().min(1, "DATABASE_URL is required"),
@@ -103,6 +134,11 @@ const envSchema = z
     OIDC_ISSUER: z.url().optional(),
     OIDC_CLIENT_ID: z.string().min(1).optional(),
     OIDC_CLIENT_SECRET: z.string().min(1).optional(),
+    OIDC_CLAIM_MAP: claimMap,
+    // Which ID token claim identifies the user (stored as User.oidcSub). `sub` for
+    // most providers; e.g. `oid` for Microsoft Entra. Changing it after users exist
+    // orphans them: they would look like new users.
+    OIDC_SUBJECT_CLAIM: z.string().trim().min(1, "OIDC_SUBJECT_CLAIM must not be empty").default("sub"),
 
     ENABLE_LOCAL_ACCOUNTS: boolFromEnv(false),
     ENABLE_DCR: boolFromEnv(false),
@@ -165,8 +201,11 @@ export const config = {
   // Non-null exactly when enableOidc is true — superRefine above rejects
   // ENABLE_OIDC=true without all three of these set.
   oidc: env.ENABLE_OIDC
-    ? { issuer: env.OIDC_ISSUER!, clientId: env.OIDC_CLIENT_ID!, clientSecret: env.OIDC_CLIENT_SECRET! }
+    ? { issuer: env.OIDC_ISSUER!, clientId: env.OIDC_CLIENT_ID!, clientSecret: env.OIDC_CLIENT_SECRET!, subjectClaim: env.OIDC_SUBJECT_CLAIM }
     : null,
+
+  // Released claim name -> upstream claim name (empty when unset).
+  claimMap: env.OIDC_CLAIM_MAP,
 
   enableLocalAccounts: env.ENABLE_LOCAL_ACCOUNTS,
   enableDcr: env.ENABLE_DCR,

@@ -19,10 +19,12 @@ export function fakeResourceRegistry() {
   const server = {
     identifier: RESOURCE,
     name: "Test MCP",
+    releaseClaims: [] as string[],
     scopes: [
       { name: "read", description: "Read things", shortLived: false },
       { name: "write", description: "Write things", shortLived: false },
       { name: "admin", description: "Administer", shortLived: true },
+      { name: "ops", description: "Operate", shortLived: false, requireGroups: ["ops", "sre"] },
     ],
   };
   return {

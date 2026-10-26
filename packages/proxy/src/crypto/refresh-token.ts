@@ -2,6 +2,7 @@ import { randomBytes, createHash } from "node:crypto";
 import { prisma } from "../db.js";
 import type { Prisma } from "../generated/prisma/client.js";
 import { lookupResourceServer } from "../resource-registry.js";
+import { groupsSatisfy, loadUserGroups } from "../identity/released-claims.js";
 
 // Not specified explicitly in §1 (unlike the access token's 15/5-minute
 // lifetimes) — 30 days, matching Constellation's own prior default
@@ -24,6 +25,20 @@ export function refreshableScopes(resource: string, scopes: string[]): string[] 
   if (!server) return scopes;
   const shortLived = new Set(server.scopes.filter((s) => s.shortLived).map((s) => s.name));
   return scopes.filter((s) => !shortLived.has(s));
+}
+
+/** Drops scopes gated by `requireGroups` that the user no longer qualifies for,
+ * judged on their current (upstream-refreshed) groups. A refresh token carries
+ * the scopes it was consented with, so without this a user removed from a group
+ * would keep a gated scope until the grant was revoked. */
+export async function permittedScopes(resource: string, userId: string, scopes: string[]): Promise<string[]> {
+  const server = lookupResourceServer(resource);
+  if (!server) return scopes;
+  const gated = server.scopes.filter((s) => s.requireGroups !== undefined && scopes.includes(s.name));
+  if (gated.length === 0) return scopes;
+  const groups = await loadUserGroups(userId);
+  const forbidden = new Set(gated.filter((s) => !groupsSatisfy(groups, s.requireGroups)).map((s) => s.name));
+  return scopes.filter((s) => !forbidden.has(s));
 }
 
 export interface IssueRefreshTokenParams {

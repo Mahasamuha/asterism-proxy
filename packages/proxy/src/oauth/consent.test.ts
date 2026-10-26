@@ -539,3 +539,99 @@ describe("form-action on the consent page that submits to the client's redirect_
     expect(csp(device)).toBeNull();
   });
 });
+
+describe("group-gated scopes and released claims", () => {
+  const inGroups = (groups: unknown) => m("user", "findUnique").mockResolvedValue({ lastKnownClaims: groups === null ? null : { groups } });
+
+  it("GET refuses a gated scope for a user outside the group: invalid_scope redirect, request consumed, no page", async () => {
+    m("authorizationRequest", "findUnique").mockResolvedValue(flowRow({ scopes: ["read", "ops"] }));
+    inGroups(["staff"]);
+    const r = await consentGet();
+    expect(r.status).toBe(302);
+    const url = new URL(r.headers.get("location")!);
+    expect(url.origin + url.pathname).toBe(REDIRECT_URI);
+    expect(url.searchParams.get("error")).toBe("invalid_scope");
+    expect(url.searchParams.get("state")).toBe("st");
+    expect(url.searchParams.get("iss")).toBe(config.issuerUrl);
+    expect(m("authorizationRequest", "deleteMany")).toHaveBeenCalled();
+    expect(m("authCode", "create")).not.toHaveBeenCalled();
+  });
+
+  it.each([["no stored claims (local account)", null], ["a non-array groups claim", "ops"]])("GET refuses a gated scope for %s", async (_n, groups) => {
+    m("authorizationRequest", "findUnique").mockResolvedValue(flowRow({ scopes: ["ops"] }));
+    inGroups(groups);
+    const r = await consentGet();
+    expect(new URL(r.headers.get("location")!).searchParams.get("error")).toBe("invalid_scope");
+  });
+
+  it("GET device flow marks the device code denied and shows the done page with the message", async () => {
+    m("authorizationRequest", "findUnique").mockResolvedValue(deviceFlow({ scopes: ["ops"] }));
+    inGroups(["staff"]);
+    const r = await consentGet();
+    expect(r.status).toBe(200);
+    expect(r.text).toContain("You are not permitted to grant ops");
+    expect(r.text).not.toContain("<form");
+    expect(m("deviceCode", "updateMany").mock.calls[0]![0].data).toEqual({ status: "denied" });
+    expect(m("grant", "upsert")).not.toHaveBeenCalled();
+  });
+
+  it("GET shows the consent page when the user is in any required group", async () => {
+    m("authorizationRequest", "findUnique").mockResolvedValue(flowRow({ scopes: ["read", "ops"] }));
+    inGroups(["x", "sre"]);
+    const r = await consentGet();
+    expect(r.status).toBe(200);
+    expect(r.text).toContain("Operate");
+    expect(m("authorizationRequest", "deleteMany")).not.toHaveBeenCalled();
+  });
+
+  it("ungated scopes never load the user's claims", async () => {
+    await consentGet();
+    expect(m("user", "findUnique")).not.toHaveBeenCalled();
+  });
+
+  it("POST approve re-checks: groups lost since the GET -> invalid_scope, nothing minted", async () => {
+    m("authorizationRequest", "findUnique").mockResolvedValue(flowRow({ scopes: ["ops"] }));
+    inGroups(["ops"]);
+    const client = await boundClient();
+    const page = await getPath(app.baseUrl, "/oauth/consent?flow=h1", client.fetch);
+    expect(page.status).toBe(200);
+    inGroups([]);
+    const r = await postForm(app.baseUrl, "/oauth/consent", { flow: "h1", action: "approve", csrf_token: csrfFrom(page.text)! }, client.fetch);
+    expect(r.status).toBe(302);
+    expect(new URL(r.headers.get("location")!).searchParams.get("error")).toBe("invalid_scope");
+    expect(m("authCode", "create")).not.toHaveBeenCalled();
+    expect(m("grant", "upsert")).not.toHaveBeenCalled();
+  });
+
+  it("POST approve for a device flow re-checks too", async () => {
+    m("authorizationRequest", "findUnique").mockResolvedValue(deviceFlow({ scopes: ["ops"] }));
+    inGroups(["ops"]);
+    const client = await boundClient();
+    const page = await getPath(app.baseUrl, "/oauth/consent?flow=h1", client.fetch);
+    inGroups([]);
+    const r = await postForm(app.baseUrl, "/oauth/consent", { flow: "h1", action: "approve", csrf_token: csrfFrom(page.text)! }, client.fetch);
+    expect(r.text).toContain("You are not permitted to grant ops");
+    expect(m("deviceCode", "updateMany").mock.calls[0]![0].data).toEqual({ status: "denied" });
+    expect(m("grant", "upsert")).not.toHaveBeenCalled();
+  });
+
+  it("POST approve succeeds for a user in the group", async () => {
+    m("authorizationRequest", "findUnique").mockResolvedValue(flowRow({ scopes: ["ops"] }));
+    inGroups(["ops"]);
+    const r = await submit();
+    expect(r.status).toBe(302);
+    expect(new URL(r.headers.get("location")!).searchParams.has("code")).toBe(true);
+  });
+
+  it("the consent page lists the claims the resource server will receive, escaped; none -> no line", async () => {
+    expect((await consentGet()).text).not.toContain("will also receive");
+    const server = (await import("../resource-registry.js")).lookupResourceServer(RESOURCE)!;
+    server.releaseClaims = ["email", "groups", "<b>x</b>"];
+    try {
+      const text = (await consentGet()).text;
+      expect(text).toContain("Test MCP will also receive these details from your account: email, groups, &lt;b&gt;x&lt;/b&gt;");
+    } finally {
+      server.releaseClaims = [];
+    }
+  });
+});

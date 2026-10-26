@@ -87,7 +87,8 @@ export async function startUpstreamAuth(handle: string): Promise<string> {
 
   const url = client.buildAuthorizationUrl(oidcConfig, {
     redirect_uri: callbackUrl(),
-    scope: "openid email profile",
+    // offline_access: asks for the upstream refresh token that identity/upstream-refresh.ts re-checks on.
+    scope: "openid email profile offline_access",
     state: upstreamState,
     nonce: upstreamNonce,
     code_challenge: codeChallenge,
@@ -98,6 +99,31 @@ export async function startUpstreamAuth(handle: string): Promise<string> {
 }
 
 const CLAIM_KEYS_TO_DROP = ["iat", "exp", "nbf", "nonce", "at_hash", "c_hash", "auth_time"];
+
+/** The claims kept in User.lastKnownClaims: everything but the volatile/one-time ones. */
+export function claimsToStore(claims: object): Prisma.InputJsonObject {
+  return Object.fromEntries(
+    Object.entries(claims as Record<string, unknown>).filter(([k]) => !CLAIM_KEYS_TO_DROP.includes(k))
+  ) as Prisma.InputJsonObject;
+}
+
+/** The email to write, or undefined when the claim is absent/empty; the caller then
+ * keeps any stored email (don't blank it). */
+export function emailFromClaims(claims: object): string | undefined {
+  const email = (claims as Record<string, unknown>).email;
+  return typeof email === "string" && email !== "" ? email : undefined;
+}
+
+/** The upstream user identifier: the configured OIDC_SUBJECT_CLAIM, which must be a
+ * non-empty string. */
+export function subjectFromClaims(claims: object): string {
+  const claim = config.oidc!.subjectClaim;
+  const value = (claims as Record<string, unknown>)[claim];
+  if (typeof value !== "string" || value === "") {
+    throw new Error(`OIDC claim "${claim}" (OIDC_SUBJECT_CLAIM) is missing or not a non-empty string`);
+  }
+  return value;
+}
 
 /**
  * Completes an upstream OIDC callback: finds the AuthorizationRequest by the
@@ -149,20 +175,23 @@ export async function handleUpstreamCallback(
   const claims = tokens.claims();
   if (!claims) throw new Error("OIDC token response contained no claims");
 
-  const sub = claims.sub;
+  const sub = subjectFromClaims(claims);
   const issuer = config.oidc!.issuer;
   // Absent claim: keep any stored email on update (don't blank it); "" on create
   // because User.email is non-null.
-  const email = typeof claims.email === "string" && claims.email !== "" ? claims.email : undefined;
+  const email = emailFromClaims(claims);
+  const storedClaims = claimsToStore(claims);
 
-  const claimsToStore = Object.fromEntries(
-    Object.entries(claims as Record<string, unknown>).filter(([k]) => !CLAIM_KEYS_TO_DROP.includes(k))
-  );
+  // Only overwrite the stored upstream refresh token when the provider issued one.
+  const upstream = {
+    ...(tokens.refresh_token ? { upstreamRefreshToken: tokens.refresh_token } : {}),
+    upstreamCheckedAt: new Date(),
+  };
 
   const user = await prisma.user.upsert({
     where: { oidcSub_oidcIssuer: { oidcSub: sub, oidcIssuer: issuer } },
-    create: { oidcSub: sub, oidcIssuer: issuer, email: email ?? "", lastKnownClaims: claimsToStore as Prisma.InputJsonObject },
-    update: { ...(email !== undefined && { email }), lastKnownClaims: claimsToStore as Prisma.InputJsonObject },
+    create: { oidcSub: sub, oidcIssuer: issuer, email: email ?? "", lastKnownClaims: storedClaims, ...upstream },
+    update: { ...(email !== undefined && { email }), lastKnownClaims: storedClaims, ...upstream },
     select: { id: true, deactivatedAt: true },
   });
 

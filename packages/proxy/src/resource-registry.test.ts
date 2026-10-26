@@ -79,6 +79,41 @@ describe("resource registry", () => {
     expect(r.isRegisteredResource("x")).toBe(false);
   });
 
+  it("defaults releaseClaims to [] and leaves requireGroups unset", async () => {
+    const r = await loadRegistry(VALID);
+    const s = r.lookupResourceServer("https://mcp.example.test")!;
+    expect(s.releaseClaims).toEqual([]);
+    expect(s.scopes[0]!.requireGroups).toBeUndefined();
+  });
+
+  const withClaims = (extra: string, scopeExtra = "") =>
+    `resourceServers:\n  - {identifier: a, name: A, ${extra} scopes: [{name: s, description: d${scopeExtra}}]}\n`;
+
+  it("accepts releaseClaims and requireGroups", async () => {
+    const r = await loadRegistry(withClaims("releaseClaims: [email, groups, constellation_username],", ", requireGroups: [ops, sre]"));
+    const s = r.lookupResourceServer("a")!;
+    expect(s.releaseClaims).toEqual(["email", "groups", "constellation_username"]);
+    expect(s.scopes[0]!.requireGroups).toEqual(["ops", "sre"]);
+  });
+
+  it.each(["iss", "sub", "aud", "exp", "nbf", "iat", "jti", "client_id", "scope", "cnf", "act", "azp", "nonce", "auth_time", "typ", "token_type", "may_act", "acr", "amr", "sid", "__proto__", "constructor", "prototype"])("rejects reserved released claim %s", async (name) => {
+    await expect(loadRegistry(withClaims(`releaseClaims: ["${name}"],`))).rejects.toThrow(/reserved claim name/);
+  });
+
+  it("rejects a scope name listed twice", async () => {
+    const dup = "resourceServers:\n  - {identifier: a, name: A, scopes: [{name: admin, description: d, requireGroups: [g]}, {name: admin, description: d}]}\n";
+    await expect(loadRegistry(dup)).rejects.toThrow(/"admin" is listed more than once/);
+  });
+
+  it("rejects duplicate and empty releaseClaims", async () => {
+    await expect(loadRegistry(withClaims("releaseClaims: [email, email],"))).rejects.toThrow(/more than once/);
+    await expect(loadRegistry(withClaims("releaseClaims: [''],"))).rejects.toThrow(/Invalid resource server registry/);
+  });
+
+  it("rejects an empty requireGroups", async () => {
+    await expect(loadRegistry(withClaims("", ", requireGroups: []"))).rejects.toThrow(/Invalid resource server registry/);
+  });
+
   it("fails when the file is missing", async () => {
     await expect(loadRegistry(null)).rejects.toThrow(/Failed to read resource server registry/);
   });

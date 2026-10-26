@@ -57,7 +57,7 @@ afterEach(() => {
 describe("verify: accepted token", () => {
   it("P0 returns the principal for a valid token", async () => {
     const principal = await createVerifier(config()).verify(await sign(key, claims()));
-    expect(principal).toEqual({ subject: "user-1", clientId: "client-1", scopes: ["read", "write"], expiresAt: new Date((NOW + 900) * 1000) });
+    expect(principal).toEqual({ subject: "user-1", clientId: "client-1", scopes: ["read", "write"], expiresAt: new Date((NOW + 900) * 1000), claims: {} });
   });
 
   it("P1 verifies RS256 keys too", async () => {
@@ -316,5 +316,36 @@ describe("verify: fetch timeouts", () => {
     await createVerifier({ issuer: server.url, audience: AUD }).verify(await sign(key, claims({ iss: server.url })));
     expect(seen).toHaveLength(2);
     expect(seen.every((s) => s instanceof AbortSignal)).toBe(true);
+  });
+});
+
+describe("verify: claims", () => {
+  it("P0 keeps unknown claims and excludes every registered/protocol claim", async () => {
+    const t = await sign(key, claims({ nbf: NOW - 10, jti: "j1", email: "a@b.test", groups: ["g1"], constellation_username: "ann", nested: { x: 1 } }));
+    const { claims: got } = await createVerifier(config()).verify(t);
+    expect(got).toEqual({ email: "a@b.test", groups: ["g1"], constellation_username: "ann", nested: { x: 1 } });
+  });
+
+  it("P0 yields an empty object when there are no extra claims, fresh per call", async () => {
+    const v = createVerifier(config());
+    const a = (await v.verify(await sign(key, claims()))).claims;
+    const b = (await v.verify(await sign(key, claims()))).claims;
+    expect(a).toEqual({});
+    expect(a).not.toBe(b);
+  });
+
+  it("P0 drops __proto__, constructor and prototype keys without touching the prototype", async () => {
+    // JSON.parse (not an object literal) makes "__proto__" an own key, as in a real payload.
+    const payload = JSON.parse(`{"__proto__":{"admin":true},"constructor":{"x":1},"prototype":{"y":1},"email":"a@b.test"}`);
+    const { claims: got } = await createVerifier(config()).verify(await sign(key, claims(payload)));
+    expect(Object.keys(got)).toEqual(["email"]);
+    expect(Object.getPrototypeOf(got)).toBe(Object.prototype);
+    expect((got as { admin?: unknown }).admin).toBeUndefined();
+    expect(({} as { admin?: unknown }).admin).toBeUndefined();
+  });
+
+  it("P1 does not validate claim value shapes", async () => {
+    const { claims: got } = await createVerifier(config()).verify(await sign(key, claims({ email: 42, groups: "not-an-array" })));
+    expect(got).toEqual({ email: 42, groups: "not-an-array" });
   });
 });

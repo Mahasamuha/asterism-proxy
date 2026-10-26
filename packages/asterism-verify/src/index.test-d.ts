@@ -1,7 +1,7 @@
 // Type-level tests for the public API. Not run by vitest: `pnpm typecheck`
 // (tsc -p tsconfig.test.json) compiles it, so a breaking change to an exported
 // type fails the build of this file.
-import type { RequestHandler, Request } from "express";
+import type { RequestHandler, Request, Response } from "express";
 import { expectTypeOf } from "vitest";
 import {
   createBearerAuthMiddleware,
@@ -9,16 +9,19 @@ import {
   protectedResourceMetadataHandler,
   protectedResourceMetadataPath,
   protectedResourceMetadataUrl,
+  requireScopes,
+  sendInsufficientScope,
   TokenValidationError,
   type AuthenticatedRequest,
   type Principal,
+  type ProtectedResourceMetadataOptions,
   type TokenValidationReason,
   type Verifier,
   type VerifierConfig,
 } from "./index.js";
 
 expectTypeOf<VerifierConfig>().toEqualTypeOf<{ issuer: string; audience: string; jwksUri?: string; maxStaleMs?: number }>();
-expectTypeOf<Principal>().toEqualTypeOf<{ subject: string; clientId: string; scopes: string[]; expiresAt: Date }>();
+expectTypeOf<Principal>().toEqualTypeOf<{ subject: string; clientId: string; scopes: string[]; expiresAt: Date; claims: Record<string, unknown> }>();
 
 // Adding a reason is allowed; removing or renaming one is a breaking change.
 expectTypeOf<
@@ -35,7 +38,12 @@ expectTypeOf<TokenValidationError["reason"]>().toEqualTypeOf<TokenValidationReas
 
 expectTypeOf(createBearerAuthMiddleware).parameters.toEqualTypeOf<[VerifierConfig]>();
 expectTypeOf(createBearerAuthMiddleware).returns.toEqualTypeOf<RequestHandler>();
-expectTypeOf(protectedResourceMetadataHandler).parameters.toEqualTypeOf<[VerifierConfig]>();
+expectTypeOf(protectedResourceMetadataHandler).parameters.toEqualTypeOf<[VerifierConfig, ProtectedResourceMetadataOptions?]>();
+expectTypeOf<ProtectedResourceMetadataOptions>().toEqualTypeOf<{ scopesSupported?: string[] }>();
+expectTypeOf(requireScopes).parameters.toEqualTypeOf<[VerifierConfig, ...string[]]>();
+expectTypeOf(requireScopes).returns.toEqualTypeOf<RequestHandler>();
+expectTypeOf(sendInsufficientScope).parameters.toEqualTypeOf<[Response, VerifierConfig, string[], string?]>();
+expectTypeOf(sendInsufficientScope).returns.toEqualTypeOf<void>();
 expectTypeOf(protectedResourceMetadataHandler).returns.toEqualTypeOf<RequestHandler>();
 expectTypeOf(protectedResourceMetadataPath).toEqualTypeOf<(audience: string) => string>();
 expectTypeOf(protectedResourceMetadataUrl).toEqualTypeOf<(audience: string) => string>();

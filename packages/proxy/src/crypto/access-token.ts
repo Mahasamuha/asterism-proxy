@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { signJwt } from "./signing-keys.js";
 import { lookupResourceServer } from "../resource-registry.js";
 import { config } from "../config.js";
+import { loadReleasedClaims } from "../identity/released-claims.js";
 
 // §1.9: 15 minutes, or 5 if the granted scopes include a shortLived scope
 // from the registry (currently just `admin`).
@@ -46,8 +47,14 @@ export async function mintAccessToken(params: MintAccessTokenParams): Promise<Mi
   );
   const expiresIn = isShortLived ? SHORT_LIVED_TTL_SECONDS : DEFAULT_TTL_SECONDS;
 
+  // Upstream identity claims this resource server asked for. Spread first, so
+  // the protocol claims below always win (reserved names are also rejected at
+  // registry load and in selectReleasedClaims).
+  const released = await loadReleasedClaims(params.userId, resourceServer.releaseClaims);
+
   const accessToken = await signJwt(
     {
+      ...released,
       iss: config.issuerUrl,
       sub: params.userId,
       aud: audience,

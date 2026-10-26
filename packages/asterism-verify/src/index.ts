@@ -5,5 +5,7 @@ export {
   protectedResourceMetadataHandler,
   protectedResourceMetadataPath,
   protectedResourceMetadataUrl,
+  requireScopes,
+  sendInsufficientScope,
 } from "./express.js";
-export type { AuthenticatedRequest } from "./express.js";
+export type { AuthenticatedRequest, ProtectedResourceMetadataOptions } from "./express.js";

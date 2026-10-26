@@ -2,15 +2,21 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const h = vi.hoisted(() => ({
   signJwt: vi.fn(async (payload: Record<string, unknown>, expiresIn: number) => JSON.stringify({ payload, expiresIn })),
-  servers: new Map<string, { scopes: Array<{ name: string; shortLived?: boolean }> }>(),
+  servers: new Map<string, { scopes: Array<{ name: string; shortLived?: boolean }>; releaseClaims?: string[] }>(),
+  findUnique: vi.fn(),
+  claimMap: {} as Record<string, string>,
 }));
+vi.mock("../db.js", () => ({ prisma: { user: { findUnique: h.findUnique } } }));
 
 vi.mock("./signing-keys.js", () => ({ signJwt: h.signJwt }));
 vi.mock("../resource-registry.js", () => ({
-  lookupResourceServer: (id: string) => h.servers.get(id),
+  lookupResourceServer: (id: string) => {
+    const s = h.servers.get(id);
+    return s && { releaseClaims: [], ...s };
+  },
   isRegisteredResource: (id: string) => h.servers.has(id),
 }));
-vi.mock("../config.js", () => ({ config: { issuerUrl: "https://as.example.test" } }));
+vi.mock("../config.js", () => ({ config: { issuerUrl: "https://as.example.test", get claimMap() { return h.claimMap; } } }));
 
 import { mintAccessToken } from "./access-token.js";
 
@@ -62,6 +68,49 @@ describe("mintAccessToken", () => {
   it.each([["", /non-empty string/], [undefined, /non-empty string/], [null, /non-empty string/], [42, /non-empty string/]])("throws for audience %j", async (resource, msg) => {
     await expect(mintAccessToken(params({ resource }))).rejects.toThrow(msg);
     expect(h.signJwt).not.toHaveBeenCalled();
+  });
+
+  describe("released claims", () => {
+    const RELEASE = "https://release.test";
+    beforeEach(() => {
+      h.servers.set(RELEASE, { scopes: [{ name: "read" }], releaseClaims: ["email", "groups", "constellation_username", "missing"] });
+      h.findUnique.mockReset();
+    });
+
+    it("adds present claims at the top level and keeps the protocol claims", async () => {
+      h.findUnique.mockResolvedValue({ lastKnownClaims: { sub: "upstream", email: "j@x", groups: ["g"], constellation_username: "jrybka" } });
+      await mintAccessToken(params({ resource: RELEASE }));
+      const [payload] = h.signJwt.mock.calls[0]!;
+      expect(payload).toMatchObject({ sub: "u1", aud: RELEASE, client_id: "c1", email: "j@x", groups: ["g"], constellation_username: "jrybka" });
+      expect(payload).not.toHaveProperty("missing");
+      expect(h.findUnique.mock.calls[0]![0].where).toEqual({ id: "u1" });
+    });
+
+    it("applies the claim map", async () => {
+      h.claimMap = { groups: "roles" };
+      h.findUnique.mockResolvedValue({ lastKnownClaims: { roles: ["r"], groups: ["wrong"] } });
+      await mintAccessToken(params({ resource: RELEASE }));
+      expect(h.signJwt.mock.calls[0]![0]["groups"]).toEqual(["r"]);
+      h.claimMap = {};
+    });
+
+    it("releases nothing for a local-account user", async () => {
+      h.findUnique.mockResolvedValue({ lastKnownClaims: null });
+      await mintAccessToken(params({ resource: RELEASE }));
+      expect(Object.keys(h.signJwt.mock.calls[0]![0]).sort()).toEqual(["aud", "client_id", "iss", "jti", "scope", "sub"]);
+    });
+
+    it("does not read the user when the resource releases nothing", async () => {
+      await mintAccessToken(params());
+      expect(h.findUnique).not.toHaveBeenCalled();
+    });
+
+    it("never lets a released value override a protocol claim", async () => {
+      h.servers.set(RELEASE, { scopes: [{ name: "read" }], releaseClaims: ["sub"] });
+      h.findUnique.mockResolvedValue({ lastKnownClaims: { sub: "evil" } });
+      await expect(mintAccessToken(params({ resource: RELEASE }))).rejects.toThrow(/reserved/);
+      expect(h.signJwt).not.toHaveBeenCalled();
+    });
   });
 
   it("refuses a resource that is not in the registry (defence in depth)", async () => {

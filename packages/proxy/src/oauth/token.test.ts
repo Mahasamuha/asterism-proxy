@@ -9,17 +9,20 @@ vi.mock("../resource-registry.js", async () => (await import("../test-helpers/oa
 vi.mock("../clients/cimd.js", () => ({ resolveClient: vi.fn() }));
 vi.mock("./client-assertion.js", () => ({ authenticateConfidentialClient: vi.fn() }));
 vi.mock("../crypto/access-token.js", () => ({ mintAccessToken: vi.fn() }));
+vi.mock("../identity/upstream-refresh.js", () => ({ recheckUpstream: vi.fn() }));
 
 import { prisma } from "../db.js";
 import { resolveClient } from "../clients/cimd.js";
 import { authenticateConfidentialClient } from "./client-assertion.js";
 import { mintAccessToken } from "../crypto/access-token.js";
+import { recheckUpstream } from "../identity/upstream-refresh.js";
 import { tokenRouter } from "./token.js";
 
 const db = prisma as unknown as ReturnType<typeof createPrismaMock>;
 const resolve = vi.mocked(resolveClient);
 const authenticate = vi.mocked(authenticateConfidentialClient);
 const mint = vi.mocked(mintAccessToken);
+const recheck = vi.mocked(recheckUpstream);
 const sha = (s: string) => createHash("sha256").update(s).digest("hex");
 const DAY = 86_400_000;
 
@@ -35,6 +38,7 @@ beforeEach(() => {
   authenticate.mockReset().mockResolvedValue({ ok: true });
   m("user", "findFirst").mockResolvedValue({ id: "u1" });
   mint.mockReset().mockResolvedValue({ accessToken: "access.jwt", expiresIn: 900 });
+  recheck.mockReset().mockResolvedValue({ ok: true });
 });
 
 const token = (fields: Record<string, string | string[]>) => postForm(app.baseUrl, "/oauth/token", fields);
@@ -379,6 +383,18 @@ describe("refresh_token grant", () => {
     expect(mint.mock.calls[0]![0].scopes).toEqual(["read"]);
   });
 
+  it.each([
+    [["dev"], ["read"]],
+    [["sre"], ["read", "ops"]],
+  ])("a group-gated scope is kept only while the user is in a required group (groups %j)", async (groups, expected) => {
+    arrangeRefresh(refreshEntry({ scopes: ["read", "ops", "offline_access"] }));
+    m("user", "findUnique").mockResolvedValue({ lastKnownClaims: { groups } });
+    const r = await token(refreshFields());
+    expect(r.status).toBe(200);
+    expect(mint.mock.calls[0]![0].scopes).toEqual(expected);
+    expect(m("refreshToken", "create").mock.calls[0]![0].data.scopes).toEqual([...expected, "offline_access"]);
+  });
+
   it("a different client does NOT revoke the chain, even for a rotated token", async () => {
     arrangeRefresh(refreshEntry({ rotatedTo: "x" }));
     const r = await token(refreshFields({ client_id: "https://other.example.test/c.json" }));
@@ -444,6 +460,32 @@ describe("refresh_token grant", () => {
     expect((await postJson(app.baseUrl, "/oauth/token", { ...refreshFields(), resource: { a: 1 } })).json["error"]).toBe("invalid_target");
     expect(mint).not.toHaveBeenCalled();
     expect((await token(refreshFields({ resource: RESOURCE }))).status).toBe(200);
+  });
+
+  it("checks the user upstream after the active check and before minting", async () => {
+    arrangeRefresh();
+    expect((await token(refreshFields())).status).toBe(200);
+    expect(recheck).toHaveBeenCalledWith("u1");
+    expect(recheck.mock.invocationCallOrder[0]).toBeLessThan(mint.mock.invocationCallOrder[0]!);
+  });
+
+  it("a failed upstream check -> invalid_grant, nothing minted or rotated", async () => {
+    arrangeRefresh();
+    recheck.mockResolvedValue({ ok: false, reason: "upstream_rejected" });
+    const r = await token(refreshFields());
+    expect(r.status).toBe(400);
+    expect(r.json).toEqual({ error: "invalid_grant", error_description: "Upstream sign-in is no longer valid; sign in again" });
+    expect(mint).not.toHaveBeenCalled();
+    expect(m("refreshToken", "updateMany")).not.toHaveBeenCalled();
+    expect(m("refreshToken", "create")).not.toHaveBeenCalled();
+    expect(db.$transaction).not.toHaveBeenCalled();
+  });
+
+  it("a deactivated user is refused before the upstream is contacted", async () => {
+    arrangeRefresh();
+    m("user", "findFirst").mockResolvedValue(null);
+    await token(refreshFields());
+    expect(recheck).not.toHaveBeenCalled();
   });
 
   it("losing the rotation race is treated as reuse and revokes the chain", async () => {

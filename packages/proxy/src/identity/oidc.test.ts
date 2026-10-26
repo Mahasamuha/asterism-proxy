@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const cfg = vi.hoisted(() => ({
   issuerUrl: "https://proxy.example.test",
   logLevel: "silent",
-  oidc: { issuer: "https://idp.example.test", clientId: "cid", clientSecret: "secret" } as { issuer: string; clientId: string; clientSecret: string } | null,
+  oidc: { issuer: "https://idp.example.test", clientId: "cid", clientSecret: "secret", subjectClaim: "sub" } as { issuer: string; clientId: string; clientSecret: string; subjectClaim: string } | null,
 }));
 const db = vi.hoisted(() => ({
   prisma: {
@@ -28,8 +28,8 @@ const configuration = () =>
 function authRequest(over: Record<string, unknown> = {}) {
   return { handle: "h1", upstreamState: "st", upstreamNonce: "nonce", upstreamVerifier: "verifier", expiresAt: FUTURE, ...over };
 }
-function grantResult(claims: Record<string, unknown> | undefined) {
-  oc.authorizationCodeGrant.mockResolvedValue({ claims: () => claims });
+function grantResult(claims: Record<string, unknown> | undefined, refreshToken?: string) {
+  oc.authorizationCodeGrant.mockResolvedValue({ claims: () => claims, refresh_token: refreshToken });
 }
 const callbackUrl = (state: string | null = "st") => `https://proxy.example.test/oauth/callback?code=c${state ? `&state=${state}` : ""}`;
 
@@ -38,7 +38,7 @@ beforeEach(async () => {
   vi.setSystemTime(NOW);
   vi.resetModules();
   vi.resetAllMocks();
-  cfg.oidc = { issuer: "https://idp.example.test", clientId: "cid", clientSecret: "secret" };
+  cfg.oidc = { issuer: "https://idp.example.test", clientId: "cid", clientSecret: "secret", subjectClaim: "sub" };
   oc.discovery.mockResolvedValue(configuration());
   db.prisma.authorizationRequest.findFirst.mockResolvedValue(authRequest());
   db.prisma.authorizationRequest.updateMany.mockResolvedValue({ count: 1 });
@@ -79,20 +79,20 @@ describe("getOidcConfig", () => {
   });
 
   it("P0 plain HTTP is only allowed for a loopback issuer", async () => {
-    cfg.oidc = { issuer: "https://idp.example.test", clientId: "cid", clientSecret: "s" };
+    cfg.oidc = { issuer: "https://idp.example.test", clientId: "cid", clientSecret: "s", subjectClaim: "sub" };
     await oidc.getOidcConfig();
     expect(oc.discovery.mock.calls[0]?.[4]).toBeUndefined();
 
     for (const issuer of ["http://localhost:9000", "http://127.0.0.1:9000"]) {
       vi.resetModules();
-      cfg.oidc = { issuer, clientId: "cid", clientSecret: "s" };
+      cfg.oidc = { issuer, clientId: "cid", clientSecret: "s", subjectClaim: "sub" };
       oc.discovery.mockClear();
       await (await import("./oidc.js")).getOidcConfig();
       expect(oc.discovery.mock.calls[0]?.[4], issuer).toEqual({ execute: [realClient.allowInsecureRequests] });
     }
 
     vi.resetModules();
-    cfg.oidc = { issuer: "http://idp.example.test", clientId: "cid", clientSecret: "s" };
+    cfg.oidc = { issuer: "http://idp.example.test", clientId: "cid", clientSecret: "s", subjectClaim: "sub" };
     oc.discovery.mockClear();
     await (await import("./oidc.js")).getOidcConfig();
     expect(oc.discovery.mock.calls[0]?.[4]).toBeUndefined();
@@ -111,7 +111,7 @@ describe("startUpstreamAuth", () => {
     expect(url.searchParams.get("code_challenge_method")).toBe("S256");
     expect(url.searchParams.get("code_challenge")).toBe(await realClient.calculatePKCECodeChallenge(upstreamVerifier!));
     expect(url.searchParams.get("redirect_uri")).toBe("https://proxy.example.test/oauth/callback");
-    expect(url.searchParams.get("scope")).toBe("openid email profile");
+    expect(url.searchParams.get("scope")).toBe("openid email profile offline_access");
     expect(url.searchParams.get("client_id")).toBe("cid");
   });
 
@@ -223,5 +223,61 @@ describe("handleUpstreamCallback: user resolution", () => {
     const arg = db.prisma.user.upsert.mock.calls[0]?.[0] as { create: { lastKnownClaims: object }; update: { lastKnownClaims: object } };
     expect(arg.create.lastKnownClaims).toEqual({ sub: "s", iss: "x", aud: "cid", name: "N" });
     expect(arg.update.lastKnownClaims).toEqual(arg.create.lastKnownClaims);
+  });
+});
+
+describe("startUpstreamAuth: scopes", () => {
+  it("P0 requests offline_access so the provider issues a refresh token", async () => {
+    const url = new URL(await oidc.startUpstreamAuth("h1"));
+    expect(url.searchParams.get("scope")?.split(" ")).toContain("offline_access");
+  });
+});
+
+describe("handleUpstreamCallback: subject claim", () => {
+  it("P0 keys the user on the configured OIDC_SUBJECT_CLAIM instead of sub", async () => {
+    cfg.oidc!.subjectClaim = "oid";
+    grantResult({ sub: "sub-1", oid: "oid-1" });
+    await oidc.handleUpstreamCallback(callbackUrl(), () => true);
+    const arg = db.prisma.user.upsert.mock.calls[0]?.[0] as { where: unknown; create: Record<string, unknown> };
+    expect(arg.where).toEqual({ oidcSub_oidcIssuer: { oidcSub: "oid-1", oidcIssuer: "https://idp.example.test" } });
+    expect(arg.create).toMatchObject({ oidcSub: "oid-1" });
+  });
+
+  it.each([
+    ["absent", { sub: "s" }],
+    ["empty", { sub: "s", oid: "" }],
+    ["not a string", { sub: "s", oid: 42 }],
+  ])("P0 fails the sign-in when the subject claim is %s", async (_n, claims) => {
+    cfg.oidc!.subjectClaim = "oid";
+    grantResult(claims);
+    await expect(oidc.handleUpstreamCallback(callbackUrl(), () => true)).rejects.toThrow(/"oid".*non-empty string/);
+    expect(db.prisma.user.upsert).not.toHaveBeenCalled();
+  });
+
+  it("P0 rejects an empty sub with the default claim", async () => {
+    grantResult({ sub: "" });
+    await expect(oidc.handleUpstreamCallback(callbackUrl(), () => true)).rejects.toThrow(/"sub"/);
+  });
+});
+
+describe("handleUpstreamCallback: upstream refresh token", () => {
+  it("P0 stores the upstream refresh token and check time on create and update", async () => {
+    grantResult({ sub: "s" }, "upstream-rt");
+    await oidc.handleUpstreamCallback(callbackUrl(), () => true);
+    const arg = db.prisma.user.upsert.mock.calls[0]?.[0] as { create: Record<string, unknown>; update: Record<string, unknown> };
+    for (const data of [arg.create, arg.update]) {
+      expect(data["upstreamRefreshToken"]).toBe("upstream-rt");
+      expect(data["upstreamCheckedAt"]).toEqual(new Date(NOW));
+    }
+  });
+
+  it("P1 leaves a stored token alone when the provider issued none, but still stamps the check time", async () => {
+    grantResult({ sub: "s" });
+    await oidc.handleUpstreamCallback(callbackUrl(), () => true);
+    const arg = db.prisma.user.upsert.mock.calls[0]?.[0] as { create: Record<string, unknown>; update: Record<string, unknown> };
+    for (const data of [arg.create, arg.update]) {
+      expect("upstreamRefreshToken" in data).toBe(false);
+      expect(data["upstreamCheckedAt"]).toEqual(new Date(NOW));
+    }
   });
 });
