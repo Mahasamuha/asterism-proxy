@@ -158,7 +158,7 @@ describe("GET/POST /oauth/device (user-code entry)", () => {
       const page = await getPath(app.baseUrl, "/oauth/device");
       expect(page.status).toBe(200);
       expect(page.headers.get("content-security-policy")).toBe(
-        `default-src 'none'; script-src ${CONSENT_SCRIPT_SOURCE}; style-src 'self' 'unsafe-inline'; img-src https:; form-action 'self' https://idp.example.test; frame-ancestors 'none'; base-uri 'none'`
+        `default-src 'none'; script-src ${CONSENT_SCRIPT_SOURCE}; style-src 'self'; img-src 'self' https:; font-src 'self'; form-action 'self' https://idp.example.test; frame-ancestors 'none'; base-uri 'none'`
       );
       const r = await enterCode(freshIp(), "ABCD-2345");
       expect(r.status).toBe(302);

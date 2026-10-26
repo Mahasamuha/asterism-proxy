@@ -1,6 +1,5 @@
 import { createHash } from "node:crypto";
 import { Router, Request, Response } from "express";
-import escHtml from "escape-html";
 import { prisma } from "../db.js";
 import { config } from "../config.js";
 import { createLogger } from "../logger.js";
@@ -13,21 +12,22 @@ import { createSelfLoginRequest } from "../identity/self-login.js";
 import { startUpstreamAuth } from "../identity/oidc.js";
 import { bodyOf, stringField } from "../http-params.js";
 import { isAdmin } from "../admin/auth.js";
+import { renderMessage } from "../pages.js";
 import { limitOauthEndpoint, rowCreationRetryAfter } from "../rate-limit.js";
 
 const log = createLogger("grants");
 
 export const grantsRouter: Router = Router();
 
+const ERROR_HEADINGS: Record<number, string> = {
+  401: "Not signed in",
+  403: "Request refused",
+  404: "Not found",
+  429: "Too many requests",
+};
+
 function renderErrorPage(res: Response, status: number, message: string): void {
-  res.status(status).send(`<!DOCTYPE html>
-<html lang="en">
-<head><meta charset="utf-8"><title>Error</title></head>
-<body>
-  <h1>Error</h1>
-  <p>${escHtml(message)}</p>
-</body>
-</html>`);
+  renderMessage(res, status, { status: "error", heading: ERROR_HEADINGS[status] ?? "Request failed", text: message });
 }
 
 async function requireSession(req: Request, res: Response, returnTo: string): Promise<string | null> {
@@ -72,14 +72,12 @@ grantsRouter.post("/auth/logout", async (req: Request, res: Response) => {
   if (userId) await revokeSessions(userId);
   clearSession(res);
   res.clearCookie("csrf_logout");
-  res.send(`<!DOCTYPE html>
-<html lang="en">
-<head><meta charset="utf-8"><title>Signed out</title></head>
-<body>
-  <h1>Signed out</h1>
-  <p><a href="/grants">Sign in again</a></p>
-</body>
-</html>`);
+  renderMessage(res, 200, {
+    status: "success",
+    heading: "Signed out",
+    text: "Your session has ended.",
+    link: { href: "/grants", text: "sign in again →" },
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -119,56 +117,23 @@ grantsRouter.get("/grants", async (req: Request, res: Response) => {
     })
   );
 
-  const adminLink = (await isAdmin(userId)) ? `<p><a href="/admin">Admin</a></p>\n  ` : "";
+  const admin = await isAdmin(userId);
   const csrfToken = issueCsrfToken(res, "csrf_grants");
   const logoutToken = issueCsrfToken(res, "csrf_logout");
 
-  const rowsHtml = rows.length
-    ? rows
-        .map(
-          (r) => `<tr>
-        <td>${escHtml(r.clientName)}${r.clientDomain ? ` <span class="domain">(${escHtml(r.clientDomain)})</span>` : ""}</td>
-        <td>${escHtml(r.resourceServerName)}</td>
-        <td>${escHtml(r.scopes.join(", "))}</td>
-        <td>${escHtml(r.grantedAt.toISOString())}</td>
-        <td>
-          <form method="POST" action="/grants/${escHtml(r.id)}/revoke">
-            <input type="hidden" name="csrf_token" value="${escHtml(csrfToken)}">
-            <button type="submit">Revoke</button>
-          </form>
-        </td>
-      </tr>`
-        )
-        .join("\n")
-    : `<tr><td colspan="5">No active grants.</td></tr>`;
+  const links: Array<Record<string, unknown>> = [{ href: "/grants", label: "your grants", current: true }];
+  if (config.enableLocalAccounts) links.push({ href: "/auth/account", label: "account" });
+  if (admin) links.push({ href: "/admin", label: "admin" });
+  links.push({ form: { action: "/auth/logout", csrfToken: logoutToken }, label: "sign out" });
 
-  res.send(`<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <title>Your grants</title>
-  <style>
-    body { font-family: system-ui, sans-serif; padding: 2rem; }
-    table { border-collapse: collapse; width: 100%; max-width: 900px; }
-    th, td { text-align: left; padding: .5rem .75rem; border-bottom: 1px solid #eee; font-size: .9rem; }
-    .domain { color: #666; }
-    .notice { background: #f0f4ff; border: 1px solid #c7d7fe; padding: .6rem .8rem; border-radius: 4px; max-width: 900px; font-size: .85rem; margin-bottom: 1rem; }
-    button { padding: .3rem .7rem; cursor: pointer; }
-    form { margin: 0; display: inline; }
-  </style>
-</head>
-<body>
-  <h1>Your grants</h1>
-  ${adminLink}<p class="notice">Revoking a grant ends its ability to refresh. Access tokens already issued
-  remain valid until they expire (at most 15 minutes) — this proxy issues short-lived,
-  self-contained tokens rather than tracking each one for immediate revocation.</p>
-  <table>
-    <thead><tr><th>Client</th><th>Server</th><th>Scopes</th><th>Granted</th><th></th></tr></thead>
-    <tbody>${rowsHtml}</tbody>
-  </table>
-  <form method="POST" action="/auth/logout" style="margin-top:1.5rem"><input type="hidden" name="csrf_token" value="${escHtml(logoutToken)}"><button type="submit">Sign out</button></form>
-</body>
-</html>`);
+  res.render("grants", {
+    title: "Your grants",
+    width: "wide",
+    home: "/grants",
+    links,
+    rows: rows.map((r) => ({ ...r, grantedAt: r.grantedAt.toISOString() })),
+    csrfToken,
+  });
 });
 
 // ---------------------------------------------------------------------------

@@ -69,7 +69,7 @@ function message(res: Response, status: number, title: string, text: string, lin
   res.status(status).render("admin/message", { title, text, link: link ?? null });
 }
 
-const notFound = (res: Response): void => message(res, 404, "Not found", "There is nothing at this address.", { href: "/admin", text: "Back to the admin overview" });
+const notFound = (res: Response): void => message(res, 404, "Not found", "There is nothing at this address.", { href: "/admin", text: "back to the admin overview →" });
 
 function formatAge(seconds: number | null): string {
   if (seconds === null) return "never";
@@ -142,7 +142,7 @@ async function requireAdminPage(req: Request, res: Response): Promise<Admin | nu
   }
   if (!(await isAdmin(session.userId))) {
     log.warn({ userId: session.userId, path: req.path }, "Admin page refused: not an admin");
-    message(res, 403, "Forbidden", "Your account is not allowed to use the admin pages.", { href: "/grants", text: "Back to your grants" });
+    message(res, 403, "Forbidden", "Your account is not allowed to use the admin pages.", { href: "/grants", text: "back to your grants →" });
     return null;
   }
   res.locals["adminUserId"] = session.userId;
@@ -166,13 +166,13 @@ async function requireAdminWrite(req: Request, res: Response, back: string): Pro
   const session = await getSession(req);
   if (!session) {
     if (rejected()) return null;
-    message(res, 401, "Not signed in", "You are not signed in.", { href: reauthHref(back), text: "Sign in" });
+    message(res, 401, "Not signed in", "You are not signed in.", { href: reauthHref(back), text: "sign in →" });
     return null;
   }
   if (!(await isAdmin(session.userId))) {
     if (rejected()) return null;
     log.warn({ userId: session.userId, path: req.path }, "Admin change refused: not an admin");
-    message(res, 403, "Forbidden", "Your account is not allowed to use the admin pages.", { href: "/grants", text: "Back to your grants" });
+    message(res, 403, "Forbidden", "Your account is not allowed to use the admin pages.", { href: "/grants", text: "back to your grants →" });
     return null;
   }
   const retryAfter = writeLimiter.hit(session.userId);
@@ -183,13 +183,13 @@ async function requireAdminWrite(req: Request, res: Response, back: string): Pro
   }
   res.locals["adminUserId"] = session.userId;
   if (!verifyBoundCsrfToken(req, CSRF_COOKIE, CSRF_PURPOSE, session.userId)) {
-    message(res, 403, "Invalid request", "Invalid or missing CSRF token. Please reload the page and try again.", { href: back, text: "Reload the page" });
+    message(res, 403, "Invalid request", "Invalid or missing CSRF token. Please reload the page and try again.", { href: back, text: "reload the page →" });
     return null;
   }
   if (!isRecentReauth(reauthenticatedAt(req, session.userId))) {
     message(res, 401, "Sign in again", "Changes need a sign-in within the last 10 minutes. Sign in again, then repeat the change; nothing was saved.", {
       href: reauthHref(back),
-      text: "Sign in again",
+      text: "sign in again →",
     });
     return null;
   }

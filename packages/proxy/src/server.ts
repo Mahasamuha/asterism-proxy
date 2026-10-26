@@ -72,6 +72,10 @@ if (config.trustProxy !== undefined) {
 // cookies. There is deliberately no ephemeral fallback.
 app.use(cookieParser(config.cookieSecret));
 
+// The admin UI's stylesheet and fonts (src/public, copied into dist by the
+// build). Static files only: no directory index, no trailing-slash redirect.
+app.use("/assets", express.static(path.join(__dirname, "public"), { index: false, redirect: false, maxAge: "1d" }));
+
 app.get("/health", (_req: Request, res: Response) => {
   res.status(200).json({ status: "ok" });
 });

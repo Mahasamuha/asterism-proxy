@@ -1,5 +1,5 @@
-<%- include('_head', { title: 'Confirm denial' }) %>
-    <% if (p.note) { %><p class="warn"><%= p.note %></p><% } %>
+<%- include('_head', { title: 'Confirm denial', nav: 'clients' }) %>
+    <% if (p.note) { %><%- include('../partials/banner', { status: 'warning', text: p.note }) %><% } %>
     <div class="card">
       <p>Deny <%= p.kind === 'domain' ? 'the domain' : 'the client id' %> <code><%= p.value %></code><% if (p.kind === 'domain') { %> and its subdomains<% } %>?</p>
       <% if (p.existing) { %><p class="muted">This entry already exists; confirming updates its reason.</p><% } %>
@@ -9,8 +9,10 @@
         <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
         <input type="hidden" name="value" value="<%= value %>">
         <input type="hidden" name="reason" value="<%= reason %>">
-        <button type="submit" class="danger">Yes, deny it</button>
-        <a href="/admin/clients">Cancel</a>
+        <div class="actions">
+          <button type="submit" class="danger">yes, deny it</button>
+          <a class="ghost" href="/admin/clients">cancel</a>
+        </div>
       </form>
     </div>
 <%- include('_foot') %>

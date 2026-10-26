@@ -334,9 +334,9 @@ describe("pages", () => {
     const expectations: Array<[string, string]> = [
       ["/admin", "Resource servers"],
       ["/admin/resource-servers", "https://mcp.example.test/mcp"],
-      ["/admin/resource-servers/new", "Fetch metadata"],
-      ["/admin/resource-servers/rs1", "Refresh metadata now"],
-      ["/admin/resource-servers/rs1/remove", "Yes, remove it"],
+      ["/admin/resource-servers/new", "fetch metadata"],
+      ["/admin/resource-servers/rs1", "refresh metadata now"],
+      ["/admin/resource-servers/rs1/remove", "yes, remove it"],
     ];
     for (const [p, text] of expectations) {
       const r = await open(p);
@@ -344,8 +344,8 @@ describe("pages", () => {
       expect(r.text, p).toContain(text);
     }
     m("adminAuditLog", "findMany").mockResolvedValue([]);
-    expect((await open("/admin/audit")).text).toContain("Nothing recorded.");
-    expect((await open("/admin/clients")).text).toContain("No denied clients.");
+    expect((await open("/admin/audit")).text).toContain("The audit log starts with your first change");
+    expect((await open("/admin/clients")).text).toContain("No clients are denied");
   });
 
   it("the server list shows gated scopes, released claims and the policy flags", async () => {
@@ -396,18 +396,18 @@ describe("pages", () => {
     s.listResourceServers.mockResolvedValue([stale]);
     s.findResourceServerById.mockResolvedValue(stale);
     const list = (await open("/admin/resource-servers")).text;
-    expect(list).toContain("STALE: expired 3h ago");
+    expect(list).toContain("stale · expired 3h ago");
     expect(list).toContain("HTTP 503");
     const page = (await open("/admin/resource-servers/rs1")).text;
-    expect(page).toContain("STALE metadata:");
+    expect(page).toContain("Metadata is stale");
     expect(page).toContain("expired 3h ago");
     expect(page).toContain("fetched 2h ago");
     expect(page).toContain("Last fetch error: HTTP 503");
   });
 
   it("a server whose metadata has not expired is not marked stale", async () => {
-    expect((await open("/admin/resource-servers")).text).not.toContain("STALE");
-    expect((await open("/admin/resource-servers/rs1")).text).not.toContain("STALE");
+    expect((await open("/admin/resource-servers")).text).not.toContain("stale");
+    expect((await open("/admin/resource-servers/rs1")).text).not.toContain("stale");
   });
 
   it.each(["../x", "a b", "a".repeat(65), "%00"])("P0 a malformed id %j is a 404 without a lookup", async (id) => {
@@ -524,7 +524,7 @@ describe("resource server changes", () => {
     const r = await post("/admin/resource-servers/rs1/update", { display_name: "" }, "/admin/resource-servers/rs1");
     expect(r.res.status).toBe(400);
     expect(r.text).toContain("The display name must not be empty");
-    expect(r.text).toContain("Refresh metadata now");
+    expect(r.text).toContain("refresh metadata now");
   });
 
   it("policy sets groups, short-lived and the description override for a declared scope", async () => {
@@ -601,7 +601,7 @@ describe("resource server changes", () => {
       expect(text).toContain("Read everything");
       expect(text).toContain('action="/admin/resource-servers/rs1/accept-metadata"');
       expect(text).toContain('name="fingerprint" value="0123456789abcdef"');
-      expect(text).toContain("Accept these changes");
+      expect(text).toContain("accept these changes");
     });
 
     it("nothing pending shows no card and no mark", async () => {
@@ -623,7 +623,7 @@ describe("resource server changes", () => {
       const r = await post("/admin/resource-servers/rs1/accept-metadata", { fingerprint: "stale" }, "/admin/resource-servers/rs1");
       expect(r.res.status).toBe(400);
       expect(r.text).toContain("have changed since you reviewed them");
-      expect(r.text).toContain("Accept these changes");
+      expect(r.text).toContain("accept these changes");
     });
 
     it("P0 accept needs a CSRF token, a recent sign-in and an admin", async () => {

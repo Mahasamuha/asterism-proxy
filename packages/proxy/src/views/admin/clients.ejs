@@ -1,4 +1,4 @@
-<%- include('_head', { title: 'Client denylist' }) %>
+<%- include('_head', { title: 'Client denylist', nav: 'clients' }) %>
     <p class="muted">A denied client cannot start or refresh a grant. Adding an entry revokes the grants and refresh tokens it matches. Access tokens already issued stay valid until they expire (at most 15 minutes).</p>
     <form method="POST" action="/admin/clients/confirm" class="card">
       <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
@@ -6,13 +6,16 @@
       <input id="value" name="value" type="text" value="<%= value %>" required>
       <label for="reason">Reason (optional)</label>
       <input id="reason" name="reason" type="text" value="<%= reason %>" maxlength="500">
-      <div><button type="submit" class="danger">Review...</button></div>
+      <div class="actions"><button type="submit">review →</button></div>
     </form>
+    <% if (denied.length === 0) { %>
+    <%- include('../partials/empty', { title: 'No clients are denied', text: 'Add a client id or domain above to block it.' }) %>
+    <% } else { %>
+    <div class="table-wrap">
     <table>
       <thead><tr><th>Added</th><th>Kind</th><th>Value</th><th>Reason</th><th></th></tr></thead>
       <tbody>
-      <% if (denied.length === 0) { %><tr><td colspan="5">No denied clients.</td></tr><% } %>
-      <% denied.forEach(function (d) { %>
+            <% denied.forEach(function (d) { %>
         <tr>
           <td><%= d.createdAt.toISOString() %></td>
           <td><%= d.kind %></td>
@@ -22,11 +25,13 @@
             <form method="POST" action="/admin/clients/remove">
               <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
               <input type="hidden" name="value" value="<%= d.value %>">
-              <button type="submit" class="plain">Remove</button>
+              <button type="submit" class="ghost">remove</button>
             </form>
           </td>
         </tr>
       <% }); %>
       </tbody>
     </table>
+    </div>
+    <% } %>
 <%- include('_foot') %>

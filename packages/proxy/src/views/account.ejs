@@ -1,0 +1,25 @@
+<%
+  var _links = [
+    { href: '/grants', label: 'your grants' },
+    { href: '/auth/account', label: 'account', current: true },
+    { form: { action: '/auth/logout', csrfToken: logoutToken }, label: 'sign out' }
+  ];
+-%>
+<%- include('partials/top', { title: 'Your account', home: '/grants', links: _links, notice: notice }) %>
+    <% if (errors.length) { %><%- include('partials/banner', { status: 'error', title: 'Password not changed', items: errors }) %><% } %>
+    <p>Signed in as <%= username %>.</p>
+    <div class="card">
+      <h2>Change password</h2>
+      <form method="POST" action="/auth/password">
+        <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
+        <label for="current_password">Current password</label>
+        <input id="current_password" name="current_password" type="password" autocomplete="current-password" required>
+        <label for="new_password">New password</label>
+        <input id="new_password" name="new_password" type="password" autocomplete="new-password" required minlength="<%= minPasswordLength %>">
+        <p class="help">At least <%= minPasswordLength %> characters.</p>
+        <label for="confirm_new_password">Confirm new password</label>
+        <input id="confirm_new_password" name="confirm_new_password" type="password" autocomplete="new-password" required>
+        <p class="actions"><button type="submit">change password</button></p>
+      </form>
+    </div>
+<%- include('partials/bottom') %>

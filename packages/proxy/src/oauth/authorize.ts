@@ -1,6 +1,6 @@
+import { renderMessage } from "../pages.js";
 import { randomBytes } from "node:crypto";
 import { Router, Request, Response } from "express";
-import escHtml from "escape-html";
 import { prisma } from "../db.js";
 import { config } from "../config.js";
 import { createLogger } from "../logger.js";
@@ -20,14 +20,7 @@ const MAX_STATE_LENGTH = 512;
 const CODE_CHALLENGE_PATTERN = /^[A-Za-z0-9_-]{43,128}$/;
 
 function renderErrorPage(res: Response, message: string, status = 400): void {
-  res.status(status).send(`<!DOCTYPE html>
-<html lang="en">
-<head><meta charset="utf-8"><title>Authorization Error</title></head>
-<body>
-  <h1>Authorization Error</h1>
-  <p>${escHtml(message)}</p>
-</body>
-</html>`);
+  renderMessage(res, status, { status: "error", heading: "Authorization failed", text: message });
 }
 
 /** Forms a requested redirect_uri must not take, judged on the raw string

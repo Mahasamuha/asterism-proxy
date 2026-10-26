@@ -1,0 +1,49 @@
+<%#
+  Opens every page: document head, the Mahasamuha header, <main>.
+  title    page title (also the h1 unless heading is given; heading: null skips it)
+  product  the mono label beside the wordmark (default "asterism")
+  home     href for the lockup, or omit for a plain lockup (mid-flow pages)
+  links    [{ href, label, current }] or [{ form: { action, csrfToken }, label }]
+  width    "wide" (lists, admin) or "narrow" (single-task pages, the default)
+  back     { href, text } shown above the heading
+  error, notice  one-line banners under the heading
+-%>
+<% var _product = typeof product !== "undefined" && product ? product : "asterism";
+   var _links = typeof links !== "undefined" && links ? links : [];
+   var _width = typeof width !== "undefined" && width === "wide" ? "wide" : "narrow";
+   var _heading = typeof heading === "undefined" ? title : heading;
+   var _home = typeof home !== "undefined" ? home : null; -%>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title><%= title %> · <%= _product %></title>
+  <link rel="icon" href="/assets/brand/mahasamuha-mark.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/assets/mahasamuha.css">
+</head>
+<body>
+  <header class="site-nav">
+    <<%= _home ? "a" : "div" %> class="lockup"<% if (_home) { %> href="<%= _home %>"<% } %>>
+      <picture>
+        <source srcset="/assets/brand/mahasamuha-mark-dark.svg" media="(prefers-color-scheme: dark)">
+        <img src="/assets/brand/mahasamuha-mark.svg" width="32" height="32" alt="">
+      </picture>
+      <span class="wordmark">mahasamuha</span>
+      <span class="eyebrow product"><%= _product %></span>
+    </<%= _home ? "a" : "div" %>>
+    <% if (_links.length) { %>
+    <nav class="links" aria-label="<%= _product %>">
+      <% _links.forEach(function (l) { %>
+        <% if (l.form) { %><form method="POST" action="<%= l.form.action %>"><input type="hidden" name="csrf_token" value="<%= l.form.csrfToken %>"><button type="submit"><%= l.label %></button></form>
+        <% } else { %><a href="<%= l.href %>"<%- l.current ? ' aria-current="page"' : '' %>><%= l.label %></a><% } %>
+      <% }); %>
+    </nav>
+    <% } %>
+  </header>
+  <main class="<%= _width %>">
+    <% if (typeof back !== "undefined" && back) { %><p class="eyebrow back"><a href="<%= back.href %>">← <%= back.text %></a></p><% } %>
+    <% if (_heading) { %><h1><%= _heading %></h1><% } %>
+    <% if (typeof error !== "undefined" && error) { %><%- include('banner', { status: 'error', title: error, text: null }) %><% } %>
+    <% if (typeof notice !== "undefined" && notice) { %><%- include('banner', { status: 'success', title: notice, text: null }) %><% } %>

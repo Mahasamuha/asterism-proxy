@@ -73,7 +73,7 @@ function formPoster(jar: ReturnType<typeof cookieClient>, url: string, first: st
   return async (fields: Record<string, string>): Promise<{ res: Response; html: string }> => {
     const res = await jar.fetch(url, { method: "POST", ...form({ ...fields, csrf_token: csrf }) });
     const html = await res.text();
-    const next = /name="csrf_token"\s+value="([^"]*)"/.exec(html)?.[1];
+    const next = /name="csrf_token"\s+value="([^"]*)"/.exec(html.replace(/<form[^>]*action="\/auth\/logout"[\s\S]*?<\/form>/g, ""))?.[1];
     if (next) csrf = next;
     return { res, html };
   };

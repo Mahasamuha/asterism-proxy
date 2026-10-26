@@ -1,0 +1,28 @@
+<%- include('partials/top', { title: 'Your grants', width: 'wide', home: '/grants', links: links }) %>
+    <%- include('partials/banner', { status: 'info', title: 'Revoking stops refreshes', text: 'Revoking a grant ends its ability to refresh. Access tokens already issued remain valid until they expire (at most 15 minutes) — this proxy issues short-lived, self-contained tokens rather than tracking each one for immediate revocation.' }) %>
+    <% if (rows.length) { %>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Client</th><th>Server</th><th>Scopes</th><th>Granted</th><th></th></tr></thead>
+        <tbody>
+          <% rows.forEach(function (r) { %>
+          <tr>
+            <td><%= r.clientName %><% if (r.clientDomain) { %> <span class="muted">(<%= r.clientDomain %>)</span><% } %></td>
+            <td><%= r.resourceServerName %></td>
+            <td><% r.scopes.forEach(function (s, i) { %><% if (i) { %>, <% } %><code><%= s %></code><% }); %></td>
+            <td class="nowrap"><%= r.grantedAt %></td>
+            <td>
+              <form method="POST" action="/grants/<%= r.id %>/revoke">
+                <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
+                <button type="submit" class="ghost">revoke</button>
+              </form>
+            </td>
+          </tr>
+          <% }); %>
+        </tbody>
+      </table>
+    </div>
+    <% } else { %>
+    <%- include('partials/empty', { title: 'No active grants', text: 'Apps you approve appear here, and you can revoke them at any time.' }) %>
+    <% } %>
+<%- include('partials/bottom') %>

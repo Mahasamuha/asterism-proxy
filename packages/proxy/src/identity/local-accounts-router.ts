@@ -1,6 +1,6 @@
 import { Router, Request, Response, NextFunction } from "express";
 import { createHash, timingSafeEqual } from "node:crypto";
-import escHtml from "escape-html";
+import { renderMessage } from "../pages.js";
 import { config } from "../config.js";
 import { prisma } from "../db.js";
 import { bodyOf, stringField } from "../http-params.js";
@@ -41,7 +41,7 @@ localAccountsRouter.get("/setup", async (_req: Request, res: Response, next: Nex
     return;
   }
   const csrfToken = issueCsrfToken(res, "csrf_setup");
-  res.send(setupFormPage([], csrfToken));
+  renderSetup(res, 200, [], csrfToken);
 });
 
 localAccountsRouter.post("/setup", async (req: Request, res: Response, next: NextFunction) => {
@@ -51,7 +51,7 @@ localAccountsRouter.post("/setup", async (req: Request, res: Response, next: Nex
   }
 
   if (!verifyCsrfToken(req, "csrf_setup")) {
-    res.status(403).send(setupFormPage(["Invalid or missing CSRF token. Please reload and try again."]));
+    renderSetup(res, 403, ["Invalid or missing CSRF token. Please reload and try again."]);
     return;
   }
 
@@ -62,13 +62,13 @@ localAccountsRouter.post("/setup", async (req: Request, res: Response, next: Nex
   if (config.setupToken !== undefined) {
     const slot = await beginIpAttempt(req.ip ?? "unknown");
     if (!slot) {
-      res.status(429).send(setupFormPage(["Too many failed attempts. Please wait 15 minutes."], issueCsrfToken(res, "csrf_setup")));
+      renderSetup(res, 429, ["Too many failed attempts. Please wait 15 minutes."], issueCsrfToken(res, "csrf_setup"));
       return;
     }
     const ok = setupTokenMatches(stringField(body, "setup_token") ?? "", config.setupToken);
     await endAttempt(slot, ok);
     if (!ok) {
-      res.status(403).send(setupFormPage(["Invalid setup token."], issueCsrfToken(res, "csrf_setup")));
+      renderSetup(res, 403, ["Invalid setup token."], issueCsrfToken(res, "csrf_setup"));
       return;
     }
   }
@@ -83,7 +83,7 @@ localAccountsRouter.post("/setup", async (req: Request, res: Response, next: Nex
   if (passwordIssue) errors.push(`Password ${passwordIssue}.`);
   if (password !== confirm) errors.push("Passwords do not match.");
   if (errors.length > 0) {
-    res.send(setupFormPage(errors, issueCsrfToken(res, "csrf_setup")));
+    renderSetup(res, 200, errors, issueCsrfToken(res, "csrf_setup"));
     return;
   }
 
@@ -95,10 +95,10 @@ localAccountsRouter.post("/setup", async (req: Request, res: Response, next: Nex
   } catch (err) {
     const msg = err instanceof Error ? err.message : "";
     if (msg.toLowerCase().includes("unique")) {
-      res.send(setupFormPage(["Username already taken."], issueCsrfToken(res, "csrf_setup")));
+      renderSetup(res, 200, ["Username already taken."], issueCsrfToken(res, "csrf_setup"));
     } else {
       log.error({ err, username }, "Failed to create first user via setup");
-      res.send(setupFormPage(["Setup failed. Please try again."], issueCsrfToken(res, "csrf_setup")));
+      renderSetup(res, 200, ["Setup failed. Please try again."], issueCsrfToken(res, "csrf_setup"));
     }
     return;
   }
@@ -149,7 +149,11 @@ localAccountsRouter.post("/auth/login", async (req: Request, res: Response) => {
   // Checked before credentials are tried, so nothing is written to the flow or
   // the session otherwise (login CSRF / attacker-supplied flow links).
   if (flow && !isFlowBound(req, flow)) {
-    res.status(400).send(flowErrorPage());
+    renderMessage(res, 400, {
+      status: "error",
+      heading: "Sign-in failed",
+      text: "This sign-in must be completed in the browser that started it. Please return to the application and try again.",
+    });
     return;
   }
 
@@ -236,7 +240,7 @@ localAccountsRouter.get("/auth/account", async (req: Request, res: Response) => 
     return;
   }
 
-  res.send(accountPage(res, localUser.username, []));
+  renderAccount(res, 200, localUser.username, []);
 });
 
 localAccountsRouter.post("/auth/password", async (req: Request, res: Response) => {
@@ -251,7 +255,7 @@ localAccountsRouter.post("/auth/password", async (req: Request, res: Response) =
   }
 
   if (!verifyCsrfToken(req, "csrf_password")) {
-    res.status(403).send(accountPage(res, localUser.username, ["Invalid or missing CSRF token. Please reload and try again."]));
+    renderAccount(res, 403, localUser.username, ["Invalid or missing CSRF token. Please reload and try again."]);
     return;
   }
 
@@ -265,7 +269,7 @@ localAccountsRouter.post("/auth/password", async (req: Request, res: Response) =
   if (newPasswordIssue) errors.push(`New password ${newPasswordIssue}.`);
   if (newPassword !== confirm) errors.push("New passwords do not match.");
   if (errors.length > 0) {
-    res.send(accountPage(res, localUser.username, errors));
+    renderAccount(res, 200, localUser.username, errors);
     return;
   }
 
@@ -273,7 +277,7 @@ localAccountsRouter.post("/auth/password", async (req: Request, res: Response) =
   // session cookie, so it is throttled per user like login.
   const slot = await beginPasswordChangeAttempt(userId);
   if (!slot) {
-    res.status(429).send(accountPage(res, localUser.username, ["Too many failed attempts. Please wait 15 minutes."]));
+    renderAccount(res, 429, localUser.username, ["Too many failed attempts. Please wait 15 minutes."]);
     return;
   }
   let newEpoch: number;
@@ -281,27 +285,19 @@ localAccountsRouter.post("/auth/password", async (req: Request, res: Response) =
     newEpoch = await changePassword(userId, currentPassword, newPassword);
   } catch {
     await endAttempt(slot, false);
-    res.send(accountPage(res, localUser.username, ["Current password is incorrect."]));
+    renderAccount(res, 200, localUser.username, ["Current password is incorrect."]);
     return;
   }
 
   await endAttempt(slot, true);
   // Every other session ended with the epoch bump; keep this browser signed in.
   setSession(res, userId, newEpoch);
-  res.send(accountPage(res, localUser.username, [], "Password changed."));
+  renderAccount(res, 200, localUser.username, [], "Password changed.");
 });
 
 // ---------------------------------------------------------------------------
-// HTML helpers — deliberately plain (not EJS): §2 reserves the three EJS views
-// for consent, login, and device entry. /setup and /auth/account are one-off
-// bootstrap/account-management pages outside that set.
+// Page helpers
 // ---------------------------------------------------------------------------
-
-function flowErrorPage(): string {
-  return `<!DOCTYPE html>
-<html lang="en"><head><meta charset="utf-8"><title>Sign-in failed</title></head>
-<body><h1>Sign-in failed</h1><p>${escHtml("This sign-in must be completed in the browser that started it. Please return to the application and try again.")}</p></body></html>`;
-}
 
 /** Constant-time comparison; hashing first makes the lengths equal so neither
  * the content nor the length of the real token leaks through timing. */
@@ -311,49 +307,25 @@ function setupTokenMatches(given: string, expected: string): boolean {
   return timingSafeEqual(a, b);
 }
 
-function setupFormPage(errors: string[], csrfToken?: string): string {
-  const errorHtml = errors.length > 0
-    ? `<ul class="error">${errors.map((e) => `<li>${escHtml(e)}</li>`).join("")}</ul>`
-    : "";
-  return `<!DOCTYPE html>
-<html lang="en"><head><meta charset="utf-8"><title>Set up your account</title></head>
-<body>
-  <h1>Create your admin account</h1>
-  ${errorHtml}
-  <form method="POST" action="/setup">
-    <input type="hidden" name="csrf_token" value="${escHtml(csrfToken ?? "")}">
-    ${config.setupToken !== undefined ? '<label>Setup token <input name="setup_token" type="password" autocomplete="off" required></label>' : ""}
-    <label>Username <input name="username" type="text" autocomplete="username" required></label>
-    <label>Password (min ${MIN_PASSWORD_LENGTH} chars) <input name="password" type="password" autocomplete="new-password" required minlength="${MIN_PASSWORD_LENGTH}"></label>
-    <label>Confirm password <input name="confirm_password" type="password" autocomplete="new-password" required></label>
-    <button type="submit">Create account</button>
-  </form>
-</body></html>`;
+function renderSetup(res: Response, status: number, errors: string[], csrfToken?: string): void {
+  res.status(status).render("setup", {
+    errors,
+    csrfToken: csrfToken ?? "",
+    needsSetupToken: config.setupToken !== undefined,
+    minPasswordLength: MIN_PASSWORD_LENGTH,
+  });
 }
 
-function accountPage(res: Response, username: string, errors: string[], notice?: string): string {
+function renderAccount(res: Response, status: number, username: string, errors: string[], notice?: string): void {
   // Each form has its own signed CSRF cookie, so neither token works for the other.
   const csrfToken = issueCsrfToken(res, "csrf_password");
   const logoutToken = issueCsrfToken(res, "csrf_logout");
-  const errorHtml = errors.length > 0
-    ? `<ul class="error">${errors.map((e) => `<li>${escHtml(e)}</li>`).join("")}</ul>`
-    : "";
-  const noticeHtml = notice ? `<p class="notice">${escHtml(notice)}</p>` : "";
-  return `<!DOCTYPE html>
-<html lang="en"><head><meta charset="utf-8"><title>Your account</title></head>
-<body>
-  <h1>Signed in as ${escHtml(username)}</h1>
-  ${noticeHtml}
-  ${errorHtml}
-  <h2>Change password</h2>
-  <form method="POST" action="/auth/password">
-    <input type="hidden" name="csrf_token" value="${escHtml(csrfToken)}">
-    <label>Current password <input name="current_password" type="password" autocomplete="current-password" required></label>
-    <label>New password (min ${MIN_PASSWORD_LENGTH} chars) <input name="new_password" type="password" autocomplete="new-password" required minlength="${MIN_PASSWORD_LENGTH}"></label>
-    <label>Confirm new password <input name="confirm_new_password" type="password" autocomplete="new-password" required></label>
-    <button type="submit">Change password</button>
-  </form>
-  <h2>Sign out</h2>
-  <form method="POST" action="/auth/logout"><input type="hidden" name="csrf_token" value="${escHtml(logoutToken)}"><button type="submit">Sign out</button></form>
-</body></html>`;
+  res.status(status).render("account", {
+    username,
+    errors,
+    notice: notice ?? null,
+    csrfToken,
+    logoutToken,
+    minPasswordLength: MIN_PASSWORD_LENGTH,
+  });
 }

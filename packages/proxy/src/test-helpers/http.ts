@@ -1,6 +1,9 @@
-/** Extracts the hidden `csrf_token` field from a rendered form. */
+/** Extracts the hidden `csrf_token` field from a rendered form. Pages carry a
+ * sign-out form in the header, ahead of the page's own form, so complete
+ * `/auth/logout` forms are skipped; pass just that form's HTML to read its token. */
 export function csrfFrom(html: string): string {
-  const match = /name="csrf_token"\s+value="([^"]*)"/.exec(html);
+  const own = html.replace(/<form[^>]*action="\/auth\/logout"[^>]*>[\s\S]*?<\/form>/g, "");
+  const match = /name="csrf_token"\s+value="([^"]*)"/.exec(own);
   if (!match?.[1]) throw new Error("No csrf_token field in HTML");
   return match[1];
 }

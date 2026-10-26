@@ -1,0 +1,7 @@
+<%# EmptyState: an invitation, not an apology. title names the space; text is one line; action { href, text } is optional. -%>
+<div class="empty">
+  <img src="/assets/brand/mahasamuha-mark-network.svg" width="48" height="48" alt="">
+  <p class="title"><%= title %></p>
+  <% if (typeof text !== "undefined" && text) { %><p class="text"><%= text %></p><% } %>
+  <% if (typeof action !== "undefined" && action) { %><p class="actions"><a class="button" href="<%= action.href %>"><%= action.text %></a></p><% } %>
+</div>

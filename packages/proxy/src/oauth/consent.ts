@@ -1,7 +1,7 @@
 import { randomBytes, createHash } from "node:crypto";
 import { Router, Request, Response } from "express";
-import escHtml from "escape-html";
 import { prisma } from "../db.js";
+import { renderMessage } from "../pages.js";
 import { createLogger } from "../logger.js";
 import { resolveClient } from "../clients/cimd.js";
 import { lookupResourceServer, type ResourceServer } from "../resource-registry.js";
@@ -24,14 +24,7 @@ export const consentRouter: Router = Router();
 const AUTH_CODE_TTL_MS = 10 * 60 * 1000;
 
 function renderErrorPage(res: Response, message: string): void {
-  res.status(400).send(`<!DOCTYPE html>
-<html lang="en">
-<head><meta charset="utf-8"><title>Authorization Error</title></head>
-<body>
-  <h1>Authorization Error</h1>
-  <p>${escHtml(message)}</p>
-</body>
-</html>`);
+  renderMessage(res, 400, { status: "error", heading: "Authorization failed", text: message });
 }
 
 const WRONG_BROWSER_MESSAGE = "This authorization request must be completed in the browser that started it. Please start again from the application.";
@@ -95,15 +88,8 @@ function isShortLivedScope(resource: string, scope: string): boolean {
   return lookupResourceServer(resource)?.scopes.find((s) => s.name === scope)?.shortLived === true;
 }
 
-function renderDeviceDonePage(res: Response, message: string): void {
-  res.send(`<!DOCTYPE html>
-<html lang="en">
-<head><meta charset="utf-8"><title>Device authorization</title></head>
-<body>
-  <h1>${escHtml(message)}</h1>
-  <p>You can close this tab.</p>
-</body>
-</html>`);
+function renderDeviceDonePage(res: Response, message: string, granted: boolean): void {
+  renderMessage(res, 200, { status: granted ? "success" : "info", heading: message, text: "You can close this tab." });
 }
 
 function httpsUrlOrNull(value: unknown): string | null {
@@ -174,7 +160,7 @@ async function completeDeviceFlow(
   }
 
   log.info({ userId: authRequest.subject, clientId: authRequest.clientId, resource: authRequest.resource, approved }, "Device consent completed");
-  renderDeviceDonePage(res, approved ? "Access granted." : deniedMessage);
+  renderDeviceDonePage(res, approved ? "Access granted." : deniedMessage, approved);
 }
 
 /** Consumes the request and mints the code atomically. `resolveGrantId` runs

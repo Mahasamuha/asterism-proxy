@@ -33,11 +33,11 @@ export const CONSENT_FORM_SCRIPT = `(function () {
 
 const CONSENT_FORM_SCRIPT_SOURCE = `'sha256-${createHash("sha256").update(CONSENT_FORM_SCRIPT).digest("base64")}'`;
 
-// The EJS views use inline <style> blocks, so 'unsafe-inline' is allowed for
-// styles only. Scripts are limited to CONSENT_FORM_SCRIPT by its hash, with no
-// event handler attributes. img-src is https-only for a client logo; forms post
-// to this origin only.
-const POLICY_PREFIX = `default-src 'none'; script-src ${CONSENT_FORM_SCRIPT_SOURCE}; style-src 'self' 'unsafe-inline'; img-src https:; form-action`;
+// Every page takes its styles, fonts and brand marks from this origin's
+// /assets, with no inline styles. Scripts are limited to CONSENT_FORM_SCRIPT by
+// its hash, with no event handler attributes. img-src also allows https for a
+// client's logo on the consent page; forms post to this origin only.
+const POLICY_PREFIX = `default-src 'none'; script-src ${CONSENT_FORM_SCRIPT_SOURCE}; style-src 'self'; img-src 'self' https:; font-src 'self'; form-action`;
 const POLICY_SUFFIX = "frame-ancestors 'none'; base-uri 'none'";
 
 /** The app-wide policy, set on every response by server.ts. */

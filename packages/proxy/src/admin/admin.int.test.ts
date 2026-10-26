@@ -82,7 +82,11 @@ describe("admin UI", () => {
     expect((await jar.fetch(url("/admin"))).status).toBe(403);
     expect((await jar.fetch(url("/grants"))).status).toBe(200);
     expect(await (await jar.fetch(url("/grants"))).text()).not.toContain('href="/admin"');
-    expect((await post(jar, "/grants", "/admin/clients/add", { value: "evil.example.com" })).status).toBe(403);
+    // The admin check runs before the CSRF check, so any token will do; the
+    // body pins the refusal to the admin check rather than a CSRF failure.
+    const refused = await jar.fetch(url("/admin/clients/add"), { method: "POST", ...form({ csrf_token: "x", value: "evil.example.com" }) });
+    expect(refused.status).toBe(403);
+    expect(await refused.text()).toContain("not allowed to use the admin pages");
     expect(await prisma.deniedClient.count()).toBe(0);
   });
 

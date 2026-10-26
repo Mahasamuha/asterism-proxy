@@ -1,0 +1,435 @@
+/* Every page asterism serves, styled to the Mahasamuha design system (v0).
+   Token names and values are the system's (tokens.json); component rules
+   follow its components (Button, Banner, StatusBadge, StatusGlyph, TextField,
+   Checkbox, SiteNav, EmptyState). Fonts are served from this origin (fonts/,
+   OFL) rather than Google Fonts, so the CSP needs only font-src 'self' and no
+   page makes a third-party request. */
+
+@font-face {
+  font-family: "Geist";
+  src: url("fonts/Geist-Variable.woff2") format("woff2");
+  font-weight: 100 900;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Geist Mono";
+  src: url("fonts/GeistMono-Variable.woff2") format("woff2");
+  font-weight: 100 900;
+  font-display: swap;
+}
+
+:root {
+  color-scheme: light;
+
+  /* Brand colors. */
+  --ms-ink: oklch(0.22 0.015 60);
+  --ms-paper: oklch(0.97 0.008 80);
+  --ms-field-light: oklch(0.93 0.005 80);
+  --ms-text-body: rgba(0, 0, 0, 0.7);
+  --ms-text-muted: rgba(0, 0, 0, 0.55);
+  --ms-text-faint: rgba(0, 0, 0, 0.35);
+  --ms-divider: rgba(0, 0, 0, 0.08);
+  --ms-divider-strong: rgba(0, 0, 0, 0.12);
+
+  /* Status: -solid for dots, glyphs and borders; -text for text on paper;
+     -tint for loud banner grounds. */
+  --info-solid: oklch(0.62 0.09 240);
+  --info-text: oklch(0.525 0.09 240);
+  --success-solid: oklch(0.61 0.106 185);
+  --success-text: oklch(0.515 0.09 185);
+  --warning-solid: oklch(0.62 0.126 95);
+  --warning-text: oklch(0.525 0.106 95);
+  --warning-tint: oklch(0.95 0.03 95);
+  --error-solid: oklch(0.64 0.17 12);
+  --error-text: oklch(0.545 0.17 12);
+  --error-tint: oklch(0.95 0.024 12);
+
+  /* Semantic roles. The dark variant below swaps these, never the brand
+     colors above. */
+  --surface-page: var(--ms-paper);
+  --surface-inset: var(--ms-field-light);
+  --surface-raised: var(--ms-paper);
+  --surface-feedback-quiet: var(--ms-field-light);
+  --surface-feedback-warning: var(--warning-tint);
+  --surface-feedback-error: var(--error-tint);
+  --feedback-edge: transparent;
+  --text-heading: var(--ms-ink);
+  --text-body: var(--ms-text-body);
+  --text-muted: var(--ms-text-muted);
+  --text-disabled: var(--ms-text-faint);
+  --border-hairline: var(--ms-divider);
+  --border-strong: var(--ms-divider-strong);
+  --border-control: rgba(0, 0, 0, 0.45);
+  --control-bg: var(--ms-paper);
+  --fill-disabled: rgba(0, 0, 0, 0.05);
+  --focus-ring: oklch(0.5 0.16 265);
+  --action-primary-bg: var(--ms-ink);
+  --action-primary-fg: var(--ms-paper);
+  --action-danger-bg: var(--error-text);
+  --warning-title: var(--warning-text);
+  --error-title: var(--error-text);
+  --shadow-hairline: 0 0 0 1px rgba(0, 0, 0, 0.05) inset;
+  --shadow-panel: 0 24px 60px rgba(0, 0, 0, 0.08), 0 0 0 1px rgba(0, 0, 0, 0.05) inset;
+
+  --ms-font: "Geist", system-ui, -apple-system, sans-serif;
+  --ms-font-mono: "Geist Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  --ms-tracking-tight: -0.01em;
+  --ms-tracking-wordmark: 0.005em;
+  --ms-tracking-mono: 0.08em;
+  --dur-fast: 150ms;
+  --gutter: 56px;
+}
+
+/* The dark variant: flat ink with paper text, white at 4-8% for raised
+   surfaces, status -solid colors as text on ink. */
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --surface-page: var(--ms-ink);
+    --surface-inset: rgba(255, 255, 255, 0.06);
+    --surface-raised: rgba(255, 255, 255, 0.04);
+    --surface-feedback-quiet: rgba(255, 255, 255, 0.06);
+    --surface-feedback-warning: rgba(255, 255, 255, 0.06);
+    --surface-feedback-error: rgba(255, 255, 255, 0.06);
+    --feedback-edge: rgba(255, 255, 255, 0.08);
+    --text-heading: var(--ms-paper);
+    --text-body: rgba(255, 255, 255, 0.7);
+    --text-muted: rgba(255, 255, 255, 0.55);
+    --text-disabled: rgba(255, 255, 255, 0.35);
+    --border-hairline: rgba(255, 255, 255, 0.1);
+    --border-strong: rgba(255, 255, 255, 0.12);
+    --border-control: rgba(255, 255, 255, 0.4);
+    --control-bg: rgba(255, 255, 255, 0.04);
+    --fill-disabled: rgba(255, 255, 255, 0.08);
+    --focus-ring: oklch(0.66 0.13 265);
+    --action-primary-bg: var(--ms-paper);
+    --action-primary-fg: var(--ms-ink);
+    --warning-title: var(--warning-solid);
+    --error-title: var(--error-solid);
+    --shadow-hairline: 0 0 0 1px rgba(255, 255, 255, 0.08) inset;
+    --shadow-panel: 0 0 0 1px rgba(255, 255, 255, 0.08) inset;
+  }
+}
+
+@media (max-width: 720px) {
+  :root { --gutter: 16px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { transition: none !important; }
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--surface-page);
+  color: var(--text-body);
+  font-family: var(--ms-font);
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Focus: a 2px focus-ring outline at 2px offset on keyboard focus. */
+:focus { outline: none; }
+:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+
+/* ---- Header (SiteNav): lockup left, lowercase links right (active = full
+   opacity and a 1.5px underline), full-bleed with a bottom hairline. ---- */
+.site-nav {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px 32px;
+  padding: 20px var(--gutter);
+  border-bottom: 1px solid var(--border-hairline);
+}
+.lockup { display: flex; align-items: center; gap: 14px; color: var(--text-heading); text-decoration: none; }
+.lockup picture, .lockup img { display: block; flex-shrink: 0; }
+.wordmark { font-size: 17px; font-weight: 500; letter-spacing: var(--ms-tracking-wordmark); line-height: 1; white-space: nowrap; color: var(--text-heading); }
+.lockup .product { margin: 0; padding-left: 14px; border-left: 1px solid var(--border-strong); line-height: 1; }
+.site-nav .links { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 32px; margin-left: auto; }
+.site-nav .links a, .site-nav .links button {
+  color: var(--text-heading);
+  background: none;
+  text-decoration: none;
+  font-size: 14px;
+  font-weight: 500;
+  opacity: 0.75;
+  padding: 6px 0;
+  border: 0;
+  border-bottom: 1.5px solid transparent;
+  border-radius: 0;
+  transition: opacity var(--dur-fast);
+}
+.site-nav .links a:hover, .site-nav .links button:hover { opacity: 1; }
+.site-nav .links a[aria-current="page"] { opacity: 1; border-bottom-color: currentColor; }
+.site-nav .links form { display: contents; }
+@media (max-width: 720px) {
+  .site-nav .links { margin-left: 0; width: 100%; gap: 8px 20px; }
+}
+
+/* ---- Page bodies. wide: admin and lists. narrow: a centered panel for
+   sign-in, consent and other single-task pages. ---- */
+main { padding: 48px var(--gutter) 96px; }
+main.wide { max-width: 1100px; }
+main.narrow { max-width: calc(480px + 2 * var(--gutter)); margin: 0 auto; padding-top: 64px; }
+@media (max-width: 720px) { main { padding-top: 32px; } main.narrow { padding-top: 32px; } }
+
+/* A floating panel (ms-radius-panel, ms-shadow-panel). */
+.panel {
+  background: var(--surface-raised);
+  border-radius: 14px;
+  box-shadow: var(--shadow-panel);
+  padding: 32px;
+}
+.panel > :last-child { margin-bottom: 0; }
+@media (max-width: 720px) { .panel { padding: 24px 20px; } }
+
+/* A tile: an inset hairline instead of a border. */
+.card {
+  background: var(--surface-raised);
+  box-shadow: var(--shadow-hairline);
+  border-radius: 8px;
+  padding: 24px;
+  margin-bottom: 16px;
+}
+.card > :last-child { margin-bottom: 0; }
+@media (max-width: 720px) { .card { padding: 16px; } }
+
+/* ---- Type. ---- */
+.eyebrow, th, .tag {
+  font-family: var(--ms-font-mono);
+  font-size: 11px;
+  font-weight: 400;
+  letter-spacing: var(--ms-tracking-mono);
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.eyebrow { margin: 0 0 12px; }
+
+h1, h2, h3 { color: var(--text-heading); font-weight: 500; }
+h1 { font-size: 36px; line-height: 1.15; letter-spacing: var(--ms-tracking-tight); margin: 0 0 32px; overflow-wrap: anywhere; }
+.narrow h1 { font-size: 24px; line-height: 1.25; letter-spacing: 0; margin-bottom: 16px; }
+h2 { font-size: 24px; line-height: 1.25; margin: 48px 0 16px; }
+.card h2:first-child, .panel h2:first-child { margin-top: 0; }
+.panel h2 { font-size: 17px; margin: 32px 0 12px; }
+@media (max-width: 720px) { h1 { font-size: 28px; } }
+
+p { margin: 0 0 12px; }
+a { color: var(--text-heading); text-underline-offset: 3px; text-decoration-thickness: 1px; }
+a:hover { text-decoration-thickness: 1.5px; }
+strong { color: var(--text-heading); font-weight: 500; }
+.muted, .caption { color: var(--text-muted); }
+.caption { font-size: 13px; }
+ul { padding-left: 20px; margin: 0 0 16px; }
+li { margin-bottom: 6px; }
+
+code, pre { font-family: var(--ms-font-mono); font-size: 13px; }
+code { overflow-wrap: anywhere; color: var(--text-heading); }
+pre { margin: 0; white-space: pre-wrap; word-break: break-word; background: var(--surface-inset); padding: 12px; border-radius: 4px; }
+
+/* ---- Forms (TextField, Checkbox). Control edges use border-control, never
+   the decorative hairline. ---- */
+form { margin: 0; }
+label { display: block; margin: 16px 0 6px; font-size: 13px; font-weight: 500; color: var(--text-heading); }
+label:first-of-type { margin-top: 0; }
+input[type="text"], input[type="password"] {
+  width: 100%;
+  max-width: 560px;
+  padding: 9px 12px;
+  font: inherit;
+  font-size: 14px;
+  line-height: 1.45;
+  color: var(--text-heading);
+  background: var(--control-bg);
+  border: 1px solid var(--border-control);
+  border-radius: 8px;
+}
+input::placeholder { color: var(--text-muted); }
+input[aria-invalid="true"] { border-color: var(--error-solid); box-shadow: 0 0 0 1px var(--error-solid) inset; }
+.help { margin: 6px 0 0; font-size: 12px; line-height: 1.45; color: var(--text-muted); }
+
+label.inline { display: flex; align-items: flex-start; gap: 10px; margin: 12px 0 0; font-weight: 400; color: var(--text-heading); font-size: 14px; line-height: 1.45; cursor: pointer; }
+input[type="checkbox"] {
+  appearance: none;
+  position: relative;
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  margin: 2px 0 0;
+  border: 1px solid var(--border-control);
+  border-radius: 4px;
+  background: transparent;
+  cursor: pointer;
+  display: inline-grid;
+  place-items: center;
+}
+input[type="checkbox"]:checked { background: var(--action-primary-bg); border-color: var(--action-primary-bg); }
+input[type="checkbox"]:checked::after { content: "✓"; color: var(--action-primary-fg); font-size: 11px; line-height: 1; }
+
+.actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 20px; margin-top: 24px; }
+.actions.end { justify-content: flex-end; }
+
+/* ---- Buttons: ink primary, ghost text at 0.75, crimson danger (replaces
+   the primary in a destructive confirmation). Labels are lowercase copy. ---- */
+button, .button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 10px 18px;
+  font: inherit;
+  font-size: 14px;
+  font-weight: 500;
+  letter-spacing: var(--ms-tracking-wordmark);
+  line-height: 1.2;
+  border: 0;
+  border-radius: 6px;
+  cursor: pointer;
+  text-decoration: none;
+  background: var(--action-primary-bg);
+  color: var(--action-primary-fg);
+  transition: opacity var(--dur-fast);
+}
+button:hover, .button:hover { opacity: 0.88; }
+button.danger, .button.danger { background: var(--action-danger-bg); color: var(--ms-paper); }
+button.ghost, a.ghost {
+  background: transparent;
+  color: var(--text-heading);
+  padding: 6px 0;
+  opacity: 0.75;
+  font-weight: 500;
+  text-decoration: none;
+}
+button.ghost:hover, a.ghost:hover { opacity: 1; }
+button.wide { width: 100%; }
+button[aria-disabled="true"] { opacity: 0.45; cursor: default; }
+td button.ghost { padding: 0; }
+
+/* ---- Feedback. ---- */
+
+/* StatusGlyph: a disc in the status solid with a paper glyph (i ✓ ! ×).
+   Decorative: always next to words. */
+.glyph {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  color: var(--ms-paper);
+  background: var(--info-solid);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+}
+.glyph.success { background: var(--success-solid); }
+.glyph.warning { background: var(--warning-solid); }
+.glyph.error { background: var(--error-solid); }
+.glyph.lg { width: 32px; height: 32px; font-size: 20px; margin-bottom: 20px; }
+
+/* Banner: info and success are quiet (field ground, ink title, color only
+   in the glyph); warning and error take their tint and a colored title. */
+.banner {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 12px 14px;
+  margin: 0 0 16px;
+  border-radius: 8px;
+  border: 1px solid var(--feedback-edge);
+  background: var(--surface-feedback-quiet);
+}
+.banner .glyph { margin-top: 1px; }
+.banner > div { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.banner .title { margin: 0; font-size: 14px; font-weight: 500; line-height: 1.4; color: var(--text-heading); }
+.banner .text { margin: 0; font-size: 13px; line-height: 1.5; color: var(--text-body); }
+.banner .title + .text { margin-top: 2px; }
+.banner .text ul { margin: 0; padding-left: 18px; }
+.banner .text li { margin: 0; }
+.banner.warning { background: var(--surface-feedback-warning); }
+.banner.warning .title { color: var(--warning-title); }
+.banner.error { background: var(--surface-feedback-error); }
+.banner.error .title { color: var(--error-title); }
+
+/* StatusBadge: an 8px dot in the status solid plus a lowercase label. The
+   label carries the meaning. */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 2px 12px 2px 0;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--text-heading);
+  white-space: nowrap;
+}
+.badge::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--info-solid); flex-shrink: 0; }
+.badge.success::before { background: var(--success-solid); }
+.badge.warning::before { background: var(--warning-solid); }
+.badge.error::before { background: var(--error-solid); }
+
+/* Tag: neutral metadata (a scope's flags) as a mono label on a hairline. */
+.tag {
+  display: inline-flex;
+  align-items: center;
+  font-size: 10px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  box-shadow: var(--shadow-hairline);
+  margin: 2px 4px 2px 0;
+  white-space: nowrap;
+}
+
+/* EmptyState: the network mark, a headline naming the space, one line, one
+   action. */
+.empty { display: flex; flex-direction: column; align-items: center; text-align: center; gap: 12px; padding: 40px 24px; }
+.empty img { display: block; margin-bottom: 4px; }
+.empty .title { margin: 0; font-size: 18px; font-weight: 500; line-height: 1.3; letter-spacing: -0.005em; color: var(--text-heading); }
+.empty .text { margin: 0; max-width: 360px; color: var(--text-body); }
+.empty .actions { margin-top: 8px; }
+
+/* ---- Tables: mono heads, hairline rows. Wrapped so a narrow screen scrolls
+   the table, not the page. ---- */
+.table-wrap { overflow-x: auto; margin-bottom: 16px; }
+table { border-collapse: collapse; width: 100%; }
+th, td { text-align: left; padding: 12px 16px 12px 0; border-bottom: 1px solid var(--border-hairline); vertical-align: top; }
+th { border-bottom-color: var(--border-strong); padding-top: 0; white-space: nowrap; }
+td { font-size: 14px; }
+td:last-child, th:last-child { padding-right: 0; }
+td.nowrap, td code { white-space: nowrap; }
+td code { overflow-wrap: normal; }
+td.col-server { min-width: 240px; }
+td.col-server code { white-space: normal; overflow-wrap: normal; word-break: break-all; }
+details summary { cursor: pointer; color: var(--text-heading); }
+details[open] summary { margin-bottom: 8px; }
+details .muted { margin: 8px 0 4px; }
+
+/* ---- Page-specific pieces. ---- */
+.eyebrow.back { margin-bottom: 16px; }
+.eyebrow.back a { color: inherit; text-decoration: none; }
+.eyebrow.back a:hover { color: var(--text-heading); }
+.lead-action { margin-bottom: 32px; }
+.pager { display: flex; align-items: center; gap: 24px; margin-top: 16px; }
+
+/* Overview tiles. */
+.nav-list { list-style: none; padding: 0; margin: 0 0 24px; display: grid; gap: 12px; }
+.nav-list li { margin: 0; }
+.nav-list a { display: block; padding: 20px 24px; border-radius: 8px; background: var(--surface-raised); box-shadow: var(--shadow-hairline); text-decoration: none; transition: box-shadow var(--dur-fast); }
+.nav-list a:hover { box-shadow: 0 0 0 1.5px var(--text-muted) inset; }
+.nav-list .title { display: block; font-size: 17px; font-weight: 500; color: var(--text-heading); margin-bottom: 4px; }
+.nav-list .sub { display: block; font-size: 13px; color: var(--text-muted); }
+
+/* Consent: who is asking, then a hairline list of what they get. */
+.client-logo { display: block; max-height: 40px; max-width: 160px; margin-bottom: 20px; }
+.facts { margin: 0 0 20px; }
+.facts p { margin: 0 0 4px; font-size: 13px; color: var(--text-muted); }
+.scope-list { list-style: none; padding: 0; margin: 0 0 20px; border-top: 1px solid var(--border-hairline); }
+.scope-list li { margin: 0; padding: 12px 0; border-bottom: 1px solid var(--border-hairline); color: var(--text-heading); }
+
+/* Device codes, set in mono so similar characters stay distinct. */
+.user-code { margin: 0 0 20px; font-family: var(--ms-font-mono); font-size: 32px; font-weight: 500; letter-spacing: 0.15em; color: var(--text-heading); }
+input.code-entry { font-family: var(--ms-font-mono); font-size: 22px; letter-spacing: 0.15em; text-align: center; text-transform: uppercase; max-width: none; }

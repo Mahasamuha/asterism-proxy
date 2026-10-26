@@ -311,7 +311,7 @@ describe("consent page display", () => {
     expect((await consentGet()).text).toContain('src="https://client.example.test/logo.png"');
     for (const logo of ["http://client.example.test/logo.png", "javascript:alert(1)", "data:image/png;base64,AAAA"]) {
       resolve.mockResolvedValue(clientRow({ metadata: { logo_uri: logo } }) as never);
-      expect((await consentGet()).text).not.toContain("<img");
+      expect((await consentGet()).text).not.toContain("client-logo");
     }
   });
 

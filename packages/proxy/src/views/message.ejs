@@ -1,0 +1,14 @@
+<%#
+  A single message on its own page: errors, "access granted", "signed out".
+  status: info | success | warning | error; heading; text; link { href, text }.
+-%>
+<% var _glyphs = { info: "i", success: "✓", warning: "!", error: "×" };
+   var _status = _glyphs[status] ? status : "info"; -%>
+<%- include('partials/top', { title: heading, heading: null }) %>
+    <div class="panel">
+      <span class="glyph lg <%= _status %>" aria-hidden="true"><%= _glyphs[_status] %></span>
+      <h1><%= heading %></h1>
+      <p><%= text %></p>
+      <% if (typeof link !== "undefined" && link) { %><p class="actions"><a class="button" href="<%= link.href %>"><%= link.text %></a></p><% } %>
+    </div>
+<%- include('partials/bottom') %>

@@ -1,0 +1,19 @@
+<%#
+  Banner. status: info | success | warning | error. title: what happened (one
+  line); text: what to do (string); items: a list of messages instead of text.
+  Warnings and errors announce as alerts.
+-%>
+<% var _glyphs = { info: "i", success: "✓", warning: "!", error: "×" };
+   var _status = _glyphs[status] ? status : "info";
+   var _loud = _status === "warning" || _status === "error";
+   var _items = typeof items !== "undefined" && items ? items : null;
+   var _text = typeof text !== "undefined" ? text : null;
+   var _title = typeof title !== "undefined" ? title : null; -%>
+<div class="banner <%= _status %>" role="<%= _loud ? 'alert' : 'status' %>">
+  <span class="glyph <%= _status %>" aria-hidden="true"><%= _glyphs[_status] %></span>
+  <div>
+    <% if (_title) { %><p class="title"><%= _title %></p><% } %>
+    <% if (_items) { %><div class="text"><ul><% _items.forEach(function (i) { %><li><%= i %></li><% }); %></ul></div><% } %>
+    <% if (_text) { %><p class="text"><%= _text %></p><% } %>
+  </div>
+</div>

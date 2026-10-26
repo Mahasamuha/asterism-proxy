@@ -5,6 +5,7 @@ import { prisma } from "../db.js";
 import { handleUpstreamCallback } from "./oidc.js";
 import { isSelfLogin, selfLoginReturnPath } from "./self-login.js";
 import { isFlowBound } from "./flow-binding.js";
+import { renderMessage } from "../pages.js";
 import { markReauthenticated, startSession } from "./session.js";
 
 const log = createLogger("oidc-router");
@@ -23,7 +24,11 @@ oidcRouter.get("/oauth/callback", async (req: Request, res: Response) => {
     // This is a browser redirect target, so show a page rather than the JSON
     // error body. Details are logged only; the page is deliberately generic.
     log.warn({ err }, "OIDC callback failed");
-    res.status(400).send(callbackErrorPage());
+    renderMessage(res, 400, {
+      status: "error",
+      heading: "Sign-in failed",
+      text: "The sign-in could not be completed. Please return to the application and try again.",
+    });
     return;
   }
   const { authRequestHandle, userId } = result;
@@ -44,9 +49,3 @@ oidcRouter.get("/oauth/callback", async (req: Request, res: Response) => {
 
   res.redirect(`/oauth/consent?flow=${encodeURIComponent(authRequestHandle)}`);
 });
-
-function callbackErrorPage(): string {
-  return `<!DOCTYPE html>
-<html lang="en"><head><meta charset="utf-8"><title>Sign-in failed</title></head>
-<body><h1>Sign-in failed</h1><p>The sign-in could not be completed. Please return to the application and try again.</p></body></html>`;
-}

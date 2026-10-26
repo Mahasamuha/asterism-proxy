@@ -211,7 +211,7 @@ describe("GET /grants and /auth/logout", () => {
     expect(r.text).toContain("Test client");
     expect(r.text).toContain("client.example.test");
     expect(r.text).toContain("Test MCP");
-    expect(r.text).toContain("read, write");
+    expect(r.text).toContain("<code>read</code>, <code>write</code>");
     expect(r.text).toContain('action="/grants/g1/revoke"');
     expect(r.headers.getSetCookie().join(";")).toContain("csrf_grants=");
   });
@@ -219,7 +219,7 @@ describe("GET /grants and /auth/logout", () => {
   it("links to /admin for an admin and only for an admin", async () => {
     m("grant", "findMany").mockResolvedValue([]);
     m("localUser", "findUnique").mockResolvedValue({ isAdmin: true, isActive: true });
-    expect((await getPath(app.baseUrl, "/grants")).text).toContain('<a href="/admin">Admin</a>');
+    expect((await getPath(app.baseUrl, "/grants")).text).toContain('href="/admin"');
     m("localUser", "findUnique").mockResolvedValue({ isAdmin: false, isActive: true });
     expect((await getPath(app.baseUrl, "/grants")).text).not.toContain('href="/admin"');
   });
@@ -235,7 +235,7 @@ describe("GET /grants and /auth/logout", () => {
 
   it("shows an empty state, and falls back to the client id when the client no longer resolves (P1)", async () => {
     m("grant", "findMany").mockResolvedValue([]);
-    expect((await getPath(app.baseUrl, "/grants")).text).toContain("No active grants.");
+    expect((await getPath(app.baseUrl, "/grants")).text).toContain("No active grants");
     resolve.mockResolvedValue(null);
     m("grant", "findMany").mockResolvedValue([{ id: "g1", clientId: CLIENT_ID, resource: "https://gone.example.test", scopes: [], grantedAt: new Date() }]);
     const r = await getPath(app.baseUrl, "/grants");
