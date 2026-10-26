@@ -129,12 +129,22 @@ function declaredScopeName(value: unknown, where: string): string {
   return name;
 }
 
+/** The server's own scopes listed in scopes_supported. offline_access may be
+ * listed too: it tells clients that request exactly what is listed there
+ * (Claude.ai) to ask for refresh tokens. It is this issuer's scope, so it is
+ * accepted as that hint and left out of the result, never declared. */
 function parseScopesSupported(raw: unknown): string[] {
   if (raw === undefined) return [];
   if (!Array.isArray(raw)) throw new ResourceMetadataError("scopes_supported must be an array");
   if (raw.length > MAX_SCOPES) throw new ResourceMetadataError(`scopes_supported has more than ${MAX_SCOPES} entries`);
   const seen = new Set<string>();
+  let offlineAccessListed = false;
   for (const entry of raw) {
+    if (entry === "offline_access") {
+      if (offlineAccessListed) throw new ResourceMetadataError(`scopes_supported lists "offline_access" more than once`);
+      offlineAccessListed = true;
+      continue;
+    }
     const name = declaredScopeName(entry, "scopes_supported entry");
     if (seen.has(name)) throw new ResourceMetadataError(`scopes_supported lists "${name}" more than once`);
     seen.add(name);

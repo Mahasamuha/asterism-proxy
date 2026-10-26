@@ -201,7 +201,18 @@ describe("validateResourceMetadata", () => {
     );
     it.each([["offline_access"], ["openid"]])("rejects the reserved scope name %s", (name) => {
       bad(one({ name }), /reserved/);
-      bad({ asterism_scopes: undefined, scopes_supported: [name] }, /reserved/);
+    });
+    it("rejects openid in scopes_supported", () => {
+      bad({ asterism_scopes: undefined, scopes_supported: ["relay", "openid"] }, /reserved/);
+    });
+    it("accepts offline_access in scopes_supported as a hint to clients, never as a declared scope", () => {
+      const withDeclared = validateResourceMetadata(ID, ISSUER, doc({ scopes_supported: ["relay", "offline_access"] }));
+      expect(withDeclared.scopesSupported).toEqual(["relay"]);
+      expect(withDeclared.scopes.map((s) => s.name)).not.toContain("offline_access");
+      const derived = validateResourceMetadata(ID, ISSUER, doc({ asterism_scopes: undefined, scopes_supported: ["offline_access", "relay"] }));
+      expect(derived.scopes.map((s) => s.name)).toEqual(["relay"]);
+      bad({ scopes_supported: ["relay", "offline_access", "offline_access"] }, /more than once/);
+      bad({ asterism_scopes: undefined, scopes_supported: ["offline_access"] });
     });
     it("rejects duplicate names, non-object entries, a non-array, an empty list and more than 50", () => {
       bad({ asterism_scopes: [{ name: "a", description: "d" }, { name: "a", description: "d" }], scopes_supported: [] }, /more than once/);
