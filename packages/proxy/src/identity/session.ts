@@ -1,9 +1,12 @@
 import { Request, Response } from "express";
 import { config } from "../config.js";
 import { prisma } from "../db.js";
+import { FRESH_LOGIN_MAX_AGE_S } from "./self-login.js";
 
 const SESSION_COOKIE = "session";
 const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const REAUTH_COOKIE = "reauth";
+const REAUTH_MAX_AGE_MS = FRESH_LOGIN_MAX_AGE_S * 1000;
 
 // No Session table exists in §4's schema — deliberately, per §6's "deliberately
 // minimal" local-account scope. The signed cookie carries
@@ -43,12 +46,52 @@ export async function revokeSessions(userId: string): Promise<number> {
 
 export function clearSession(res: Response): void {
   res.clearCookie(SESSION_COOKIE);
+  res.clearCookie(REAUTH_COOKIE, { path: "/admin" });
+}
+
+// Re-authentication marker. Any sign-in issues a new session cookie, including a
+// silent upstream SSO one the user never typed anything for, so the session's
+// age says nothing about whether the user just proved presence. This separate
+// cookie is set only where they did (a password entered, or an upstream sign-in
+// that enforced max_age), and the admin UI asks for it before a change. It is
+// signed, bound to the user id, only sent under /admin, and expires with the
+// freshness window.
+export function markReauthenticated(res: Response, userId: string): void {
+  res.cookie(REAUTH_COOKIE, `${userId}.${Date.now()}`, {
+    httpOnly: true,
+    secure: config.issuerUrl.startsWith("https:"),
+    sameSite: "lax",
+    maxAge: REAUTH_MAX_AGE_MS,
+    path: "/admin",
+    signed: true,
+  });
+}
+
+/** When `userId` last re-authenticated, per the signed marker cookie; null when
+ * it is absent, unsigned, malformed, for another user, or in the future. The
+ * caller decides how recent is recent enough. */
+export function reauthenticatedAt(req: Request, userId: string): number | null {
+  const value = (req.signedCookies as Record<string, string | false | undefined> | undefined)?.[REAUTH_COOKIE];
+  if (typeof value !== "string") return null;
+  const dot = value.lastIndexOf(".");
+  if (dot <= 0 || value.slice(0, dot) !== userId) return null;
+  const atStr = value.slice(dot + 1);
+  if (!/^\d{1,15}$/.test(atStr)) return null;
+  const at = Number(atStr);
+  return at > Date.now() ? null : at;
 }
 
 /** Returns the user id for a valid, unexpired session whose account is still
  * active and whose epoch still matches, else null. Cookies in an older format
  * (bare id, or id.issuedAt without an epoch) fail the parse and are rejected. */
 export async function getSessionUserId(req: Request): Promise<string | null> {
+  return (await getSession(req))?.userId ?? null;
+}
+
+/** As getSessionUserId, plus when the cookie was issued (the last sign-in of
+ * any kind, possibly silent SSO: not proof of re-authentication, for which see
+ * reauthenticatedAt). */
+export async function getSession(req: Request): Promise<{ userId: string; issuedAtMs: number } | null> {
   const value = (req.signedCookies as Record<string, string | false | undefined>)[SESSION_COOKIE];
   if (typeof value !== "string") return null;
 
@@ -73,5 +116,5 @@ export async function getSessionUserId(req: Request): Promise<string | null> {
     where: { id: userId, sessionEpoch: Number(epochStr), deactivatedAt: null, OR: [{ localUser: null }, { localUser: { isActive: true } }] },
     select: { id: true },
   });
-  return user ? user.id : null;
+  return user ? { userId: user.id, issuedAtMs: Number(issuedAtStr) } : null;
 }

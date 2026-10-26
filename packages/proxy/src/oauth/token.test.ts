@@ -8,13 +8,13 @@ vi.mock("../db.js", async () => ({ prisma: (await import("../test-helpers/oauth-
 vi.mock("../resource-registry.js", async () => (await import("../test-helpers/oauth-harness.js")).fakeResourceRegistry());
 vi.mock("../clients/cimd.js", () => ({ resolveClient: vi.fn() }));
 vi.mock("./client-assertion.js", () => ({ authenticateConfidentialClient: vi.fn() }));
-vi.mock("../crypto/access-token.js", () => ({ mintAccessToken: vi.fn() }));
+vi.mock("../crypto/access-token.js", () => ({ mintAccessToken: vi.fn(), UnregisteredResourceError: class UnregisteredResourceError extends Error {} }));
 vi.mock("../identity/upstream-refresh.js", () => ({ recheckUpstream: vi.fn() }));
 
 import { prisma } from "../db.js";
 import { resolveClient } from "../clients/cimd.js";
 import { authenticateConfidentialClient } from "./client-assertion.js";
-import { mintAccessToken } from "../crypto/access-token.js";
+import { mintAccessToken, UnregisteredResourceError } from "../crypto/access-token.js";
 import { recheckUpstream } from "../identity/upstream-refresh.js";
 import { tokenRouter } from "./token.js";
 
@@ -288,6 +288,24 @@ describe("authorization_code: revoked grant (agent-reported)", () => {
   });
 });
 
+describe("authorization_code: resource removed since consent", () => {
+  it("answers invalid_grant (not 500) and consumes nothing", async () => {
+    arrange();
+    mint.mockRejectedValue(new UnregisteredResourceError("gone"));
+    const r = await token(codeFields());
+    expect(r.status).toBe(400);
+    expect(r.json).toMatchObject({ error: "invalid_grant", error_description: "Resource is no longer registered" });
+    expect(m("authCode", "updateMany")).not.toHaveBeenCalled();
+    expect(m("refreshToken", "create")).not.toHaveBeenCalled();
+  });
+
+  it("still lets an unrelated mint failure through as a server error", async () => {
+    arrange();
+    mint.mockRejectedValue(new Error("signing failed"));
+    expect((await token(codeFields())).status).toBe(500);
+  });
+});
+
 describe("authorization_code: response and offline_access (P0/P1)", () => {
   it("with offline_access: returns a refresh token stored only as its hash", async () => {
     arrange();
@@ -359,6 +377,26 @@ describe("refresh_token grant", () => {
   it("an unknown token -> invalid_grant", async () => {
     m("refreshToken", "findUnique").mockResolvedValue(null);
     expect((await token(refreshFields())).json["error"]).toBe("invalid_grant");
+  });
+
+  it("a refresh token for a resource that is no longer registered -> invalid_grant, nothing claimed", async () => {
+    arrangeRefresh(refreshEntry({ resource: "https://removed.example.test" }));
+    const r = await token(refreshFields());
+    expect(r.status).toBe(400);
+    expect(r.json["error"]).toBe("invalid_grant");
+    expect(m("refreshToken", "updateMany")).not.toHaveBeenCalled();
+    expect(m("refreshToken", "create")).not.toHaveBeenCalled();
+  });
+
+  it("a resource removed during the upstream re-check -> invalid_grant (not 500), nothing claimed", async () => {
+    arrangeRefresh();
+    // still registered at the early check, gone by the time the token is minted
+    mint.mockRejectedValue(new UnregisteredResourceError("gone"));
+    const r = await token(refreshFields());
+    expect(r.status).toBe(400);
+    expect(r.json).toMatchObject({ error: "invalid_grant", error_description: "Resource is no longer registered" });
+    expect(m("refreshToken", "updateMany")).not.toHaveBeenCalled();
+    expect(m("refreshToken", "create")).not.toHaveBeenCalled();
   });
 
   it("looks the token up by hash", async () => {
@@ -623,6 +661,16 @@ describe("device_code grant", () => {
     const r2 = await token(deviceFields());
     expect(r2.status).toBe(200);
     expect(r2.json).not.toHaveProperty("refresh_token");
+  });
+
+  it("a resource removed since approval -> invalid_grant (not 500), code left unconsumed", async () => {
+    arrangeDevice();
+    mint.mockRejectedValue(new UnregisteredResourceError("gone"));
+    const r = await token(deviceFields());
+    expect(r.status).toBe(400);
+    expect(r.json).toMatchObject({ error: "invalid_grant", error_description: "Resource is no longer registered" });
+    expect(m("deviceCode", "updateMany")).not.toHaveBeenCalled();
+    expect(m("refreshToken", "create")).not.toHaveBeenCalled();
   });
 
   it("losing the claim -> invalid_grant and nothing is issued", async () => {

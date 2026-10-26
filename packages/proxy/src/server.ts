@@ -6,9 +6,7 @@ import { fileURLToPath } from "node:url";
 import cookieParser from "cookie-parser";
 import { createLogger } from "./logger.js";
 import { config } from "./config.js";
-// Imported for its startup-time validation side effect: an invalid or missing
-// resource server registry should fail the process the same way bad env does.
-import "./resource-registry.js";
+import { loadRegistry } from "./resource-registry.js";
 import { jwksRouter } from "./crypto/jwks-router.js";
 import { ensureActiveSigningKey } from "./crypto/signing-keys.js";
 import { discoveryRouter } from "./oauth/discovery.js";
@@ -17,12 +15,15 @@ import { tokenRouter } from "./oauth/token.js";
 import { deviceRouter } from "./oauth/device.js";
 import { consentRouter } from "./oauth/consent.js";
 import { grantsRouter } from "./oauth/grants.js";
+import { adminRouter } from "./admin/router.js";
 import { getOidcConfig } from "./identity/oidc.js";
 import { oidcRouter } from "./identity/oidc-router.js";
 import { localAccountsRouter } from "./identity/local-accounts-router.js";
 import { warnIfSetupUnprotected } from "./identity/local-accounts.js";
 import { opsRouter } from "./ops.js";
 import { pruneExpiredRows } from "./cleanup.js";
+import { startRegistryListener, stopRegistryListener } from "./resource-servers/registry-listener.js";
+import { REFRESH_JOB_INTERVAL_MS, refreshDueResourceServers } from "./resource-servers/refresh-job.js";
 import { CONTENT_SECURITY_POLICY } from "./security-headers.js";
 
 const log = createLogger("server");
@@ -83,6 +84,7 @@ app.use(tokenRouter);
 app.use(deviceRouter);
 app.use(consentRouter);
 app.use(grantsRouter);
+app.use(adminRouter);
 // Mounted only when OIDC is actually enabled — otherwise /oauth/callback should
 // 404 rather than confirm the feature exists, matching T7's local-account routes.
 if (config.enableOidc) {
@@ -142,6 +144,14 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   const signingKey = await ensureActiveSigningKey();
   log.info({ kid: signingKey.kid }, "Active signing key ready");
 
+  // The resource server registry is held in memory and built from the database,
+  // so it must be loaded before the first request can ask for a resource.
+  await loadRegistry();
+  // Before listen(): the listener's own LISTEN + reload closes the gap between
+  // the load above and the subscription, so no CLI change is missed, and a failed
+  // first connection only logs and retries.
+  await startRegistryListener();
+
   if (config.enableLocalAccounts) {
     await warnIfSetupUnprotected().catch((err) => log.warn({ err }, "Could not check whether /setup is exposed"));
   }
@@ -158,8 +168,16 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   }, 5 * 60 * 1000);
   cleanupInterval.unref();
 
+  // Keeps resource server metadata snapshots fresh (they are never fetched on
+  // the request path).
+  const metadataInterval = setInterval(() => {
+    refreshDueResourceServers().catch((err) => log.warn({ err }, "refreshDueResourceServers failed"));
+  }, REFRESH_JOB_INTERVAL_MS);
+  metadataInterval.unref();
+
   async function shutdown(): Promise<void> {
     log.info("Shutting down");
+    await stopRegistryListener();
     server.closeIdleConnections();
     await new Promise<void>((resolve) => server.close(() => resolve()));
     log.info("Shutdown complete");

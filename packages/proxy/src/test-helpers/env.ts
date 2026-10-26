@@ -45,7 +45,6 @@ export function testEnv(): Record<string, string> {
     ALLOW_INSECURE_CLIENT_METADATA: "false",
     LOG_LEVEL: "silent",
     // Absolute: config.ts otherwise resolves these against process.cwd().
-    RESOURCE_SERVERS_PATH: path.join(PROXY_DIR, "config/resource-servers.yaml"),
     TRUST_POLICY_PATH: path.join(PROXY_DIR, "config/trust-policy.yaml"),
   };
 }

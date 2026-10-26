@@ -244,6 +244,26 @@ describe("GET/POST /oauth/device (user-code entry)", () => {
     expect(r.headers.get("location")).toBe(`/auth/login?flow=${data.handle}`);
   });
 
+  it.each([
+    [["read"], false],
+    [["read", "root"], true],
+  ])("scopes %j: the flow's requireFreshLogin is %s and the upstream sign-in is told", async (scopes, fresh) => {
+    const { startUpstreamAuth } = await import("../identity/oidc.js");
+    vi.mocked(startUpstreamAuth).mockResolvedValue("https://idp.example.test/authorize?state=y");
+    m("deviceCode", "findFirst").mockResolvedValue(pending({ scopes }));
+    const saved = config.enableOidc;
+    config.enableOidc = true;
+    try {
+      const r = await enterCode(freshIp(), "ABCD-2345");
+      expect(r.status).toBe(302);
+      const data = m("authorizationRequest", "create").mock.calls[0]![0].data;
+      expect(data.requireFreshLogin).toBe(fresh);
+      expect(startUpstreamAuth).toHaveBeenLastCalledWith(data.handle, { fresh });
+    } finally {
+      config.enableOidc = saved;
+    }
+  });
+
   it("GET never starts a flow or looks up the code: it shows the entry page pre-filled (H1)", async () => {
     m("deviceCode", "findFirst").mockResolvedValue(pending());
     const r = await getPath(app.baseUrl, "/oauth/device?user_code=abcd2345", from(freshIp()));

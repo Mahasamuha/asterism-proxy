@@ -1,0 +1,11 @@
+<%- include('_head', { title: 'Remove ' + s.displayName }) %>
+    <div class="card">
+      <p>Remove <strong><%= s.displayName %></strong> (<code><%= s.identifier %></code>) and all of its scope policy?</p>
+      <p>Every grant and refresh token for it is revoked, and approving it again does not bring them back: users must consent again. To stop it temporarily instead, disable it, which is reversible.</p>
+      <form method="POST" action="/admin/resource-servers/<%= s.id %>/remove">
+        <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
+        <button type="submit" class="danger">Yes, remove it</button>
+        <a href="/admin/resource-servers/<%= s.id %>">Cancel</a>
+      </form>
+    </div>
+<%- include('_foot') %>

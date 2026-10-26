@@ -47,7 +47,7 @@ Integration files run one at a time (`fileParallelism: false`), because they sha
 - jose key builders;
 - per-area harnesses (`core-*`, `oauth-*`, `identity-*`, `e2e-*`).
 
-`config.ts` and `resource-registry.ts` read env and files at import time. Tests that need a different config stub the env, then call `vi.resetModules()`, then import dynamically. The alternative is `vi.mock("./config.js")` with `vi.hoisted`.
+`config.ts` reads env at import time (the resource registry is loaded from the database by `loadRegistry()`; integration tests seed it with `seedResourceServer`). Tests that need a different config stub the env, then call `vi.resetModules()`, then import dynamically. The alternative is `vi.mock("./config.js")` with `vi.hoisted`.
 
 Do not run `vitest list --json <file>`. Vitest treats `<file>` as the output path for its JSON and overwrites it.
 

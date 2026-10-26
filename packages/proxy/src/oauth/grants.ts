@@ -12,6 +12,7 @@ import { issueCsrfToken, verifyCsrfToken } from "../identity/csrf.js";
 import { createSelfLoginRequest } from "../identity/self-login.js";
 import { startUpstreamAuth } from "../identity/oidc.js";
 import { bodyOf, stringField } from "../http-params.js";
+import { isAdmin } from "../admin/auth.js";
 import { limitOauthEndpoint, rowCreationRetryAfter } from "../rate-limit.js";
 
 const log = createLogger("grants");
@@ -118,6 +119,7 @@ grantsRouter.get("/grants", async (req: Request, res: Response) => {
     })
   );
 
+  const adminLink = (await isAdmin(userId)) ? `<p><a href="/admin">Admin</a></p>\n  ` : "";
   const csrfToken = issueCsrfToken(res, "csrf_grants");
   const logoutToken = issueCsrfToken(res, "csrf_logout");
 
@@ -157,7 +159,7 @@ grantsRouter.get("/grants", async (req: Request, res: Response) => {
 </head>
 <body>
   <h1>Your grants</h1>
-  <p class="notice">Revoking a grant ends its ability to refresh. Access tokens already issued
+  ${adminLink}<p class="notice">Revoking a grant ends its ability to refresh. Access tokens already issued
   remain valid until they expire (at most 15 minutes) — this proxy issues short-lived,
   self-contained tokens rather than tracking each one for immediate revocation.</p>
   <table>

@@ -126,6 +126,49 @@ describe("safeFetchJson", () => {
     });
   });
 
+  describe("allowPrivateNetwork", () => {
+    // The route server speaks plain HTTP, so an https: request to it gets past the address
+    // check and then fails the TLS handshake (connection_error), which is how these tests
+    // tell "passed the address check" from "blocked_address".
+    const httpsUrl = (name: string) => `https://${name}:${new URL(srv.url).port}/x`;
+
+    it("blocks a private https target by default", async () => {
+      stubDns({ [hostname]: [{ address: "10.0.0.1", family: 4 }] });
+      expect(await reasonOf(safeFetchJson(httpsUrl(hostname)))).toBe("blocked_address");
+      expect(await reasonOf(safeFetchJson(httpsUrl(hostname), { allowPrivateNetwork: false }))).toBe("blocked_address");
+    });
+
+    it.each([["10.0.0.1"], ["127.0.0.1"], ["169.254.169.254"]])("lets an https target resolving to %s through when set", async (address) => {
+      stubDns({ [hostname]: [{ address, family: 4 }] });
+      expect(await reasonOf(safeFetchJson(httpsUrl(hostname), { allowPrivateNetwork: true, timeoutMs: 500 }))).not.toBe("blocked_address");
+    });
+
+    it("does not relax the scheme rules", async () => {
+      expect(await reasonOf(safeFetchJson("ftp://example.com/x", { allowPrivateNetwork: true }))).toBe("invalid_scheme");
+      h.cfg.allowInsecureClientMetadata = false;
+      expect(await reasonOf(safeFetchJson(base("/x"), { allowPrivateNetwork: true }))).toBe("invalid_scheme");
+    });
+
+    it("still restricts http to loopback", async () => {
+      stubDns({ [hostname]: [{ address: "10.0.0.1", family: 4 }] });
+      expect(await reasonOf(safeFetchJson(base("/x"), { allowPrivateNetwork: true }))).toBe("insecure_http_not_loopback");
+    });
+
+    it("still enforces the redirect limit and revalidates each hop", async () => {
+      srv.routes["/a"] = { status: 302, headers: { location: "/b" } };
+      expect(await reasonOf(safeFetchJson(base("/a"), { allowPrivateNetwork: true, maxRedirects: 0 }))).toBe("too_many_redirects");
+      const evil = host();
+      stubDns({ [hostname]: LOOP, [evil]: [{ address: "10.0.0.1", family: 4 }] });
+      srv.routes["/c"] = { status: 302, headers: { location: `http://${evil}:${new URL(srv.url).port}/s` } };
+      expect(await reasonOf(safeFetchJson(base("/c"), { allowPrivateNetwork: true }))).toBe("insecure_http_not_loopback");
+    });
+
+    it("still enforces the size cap", async () => {
+      srv.routes["/big"] = { body: { pad: "x".repeat(200) } };
+      expect(await reasonOf(safeFetchJson(base("/big"), { allowPrivateNetwork: true, maxBytes: 50 }))).toBe("response_too_large");
+    });
+  });
+
   describe("DNS validation (https)", () => {
     const https = (name: string) => `https://${name}/client.json`;
 
@@ -460,6 +503,28 @@ describe("safeFetchJson", () => {
       srv.routes["/b"] = { body: {} };
       for (let i = 0; i < 5; i++) await safeFetchJson(base("/a"));
       expect(await reasonOf(safeFetchJson(base("/a")))).toBe("rate_limited");
+    });
+  });
+
+  describe("fetch pools", () => {
+    it("keeps a separate per-host rate limit for resource-metadata fetches", async () => {
+      srv.routes["/x"] = { body: {} };
+      for (let i = 0; i < 10; i++) expect(await reasonOf(safeFetchJson(base("/x")))).toBe("ok");
+      expect(await reasonOf(safeFetchJson(base("/x")))).toBe("rate_limited");
+      // the cimd pool is exhausted for this host; the metadata pool is untouched
+      for (let i = 0; i < 10; i++) expect(await reasonOf(safeFetchJson(base("/x"), { pool: "resource-metadata" }))).toBe("ok");
+      expect(await reasonOf(safeFetchJson(base("/x"), { pool: "resource-metadata" }))).toBe("rate_limited");
+    });
+
+    it("keeps a separate in-flight cap per pool", async () => {
+      lookup.mockImplementation((() => new Promise(() => {})) as never);
+      const cimd = Array.from({ length: MAX_CONCURRENT_FETCHES }, (_, i) =>
+        reasonOf(safeFetchJson(`https://pool-c${i}-${n++}.test/x`, { timeoutMs: 150 })),
+      );
+      expect(await reasonOf(safeFetchJson("https://pool-over.test/x", { timeoutMs: 150 }))).toBe("busy");
+      // the cimd pool is full; a metadata fetch still gets a slot (and then times out in DNS)
+      expect(await reasonOf(safeFetchJson("https://pool-meta.test/x", { timeoutMs: 150, pool: "resource-metadata" }))).toBe("timeout");
+      await Promise.all(cimd);
     });
   });
 

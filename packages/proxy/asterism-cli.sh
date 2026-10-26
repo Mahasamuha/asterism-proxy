@@ -17,12 +17,21 @@ Commands:
   local-user add <username>          (prompts for the password; pipe it in with docker compose exec -T)
   local-user deactivate <username>
   local-user list
+  local-user set-admin <username> on|off
+  resource-server list
+  resource-server show <identifier>
+  resource-server approve <identifier> [--name X] [--internal] [--release-claims a,b]
+  resource-server set <identifier> [--name X] [--release-claims a,b] [--enable|--disable] [--internal|--no-internal]
+  resource-server policy <identifier> <scope> [--short-lived|--no-short-lived]
+                         [--require-groups a,b|--no-require-groups] [--description X|--no-description]
+  resource-server refresh <identifier>
+  resource-server remove <identifier>   (revokes every grant and refresh token; set --disable is reversible)
   rotate-signing-key
 EOF
 }
 
 case "$1" in
-  deny-client | local-user | rotate-signing-key)
+  deny-client | local-user | resource-server | rotate-signing-key)
     cmd="$1"
     shift
     # Absolute path: exec -w can change the working directory.

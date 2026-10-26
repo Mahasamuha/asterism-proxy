@@ -5,7 +5,7 @@ import { prisma } from "../db.js";
 import { handleUpstreamCallback } from "./oidc.js";
 import { isSelfLogin, selfLoginReturnPath } from "./self-login.js";
 import { isFlowBound } from "./flow-binding.js";
-import { startSession } from "./session.js";
+import { markReauthenticated, startSession } from "./session.js";
 
 const log = createLogger("oidc-router");
 
@@ -32,6 +32,11 @@ oidcRouter.get("/oauth/callback", async (req: Request, res: Response) => {
   // A session is set for every flow type: /grants needs one for self-login, and
   // consent requires a session for flow.subject (same browser that logged in).
   await startSession(res, userId);
+  // Only a flow that asked for a fresh login passed max_age to the provider,
+  // which checked auth_time; any other upstream sign-in may have been silent SSO.
+  // That holds for any flow with requireFreshLogin set, an OAuth flow forced by a
+  // scope included, so it also counts as the re-authentication /admin asks for.
+  if (authRequest.requireFreshLogin) markReauthenticated(res, userId);
   if (isSelfLogin(authRequest)) {
     res.redirect(selfLoginReturnPath(authRequest.state));
     return;

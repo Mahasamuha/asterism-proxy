@@ -28,6 +28,17 @@ describe("ISSUER_URL", () => {
   });
 });
 
+describe("ADMIN_GROUPS", () => {
+  it("is empty when unset or blank", async () => {
+    expect((await loadConfigWith({ ADMIN_GROUPS: undefined })).adminGroups).toEqual([]);
+    expect((await loadConfigWith({ ADMIN_GROUPS: " , " })).adminGroups).toEqual([]);
+  });
+
+  it("parses a comma-separated list, trimming whitespace and dropping blanks", async () => {
+    expect((await loadConfigWith({ ADMIN_GROUPS: "asterism-admins, ops ,,sre" })).adminGroups).toEqual(["asterism-admins", "ops", "sre"]);
+  });
+});
+
 describe("OIDC_CLAIM_MAP", () => {
   it("is empty when unset or blank", async () => {
     expect((await loadConfigWith({ OIDC_CLAIM_MAP: undefined })).claimMap).toEqual({});
@@ -210,11 +221,17 @@ describe("other settings", () => {
   });
 
   it("applies defaults for PORT, LOG_LEVEL and the config paths", async () => {
-    const c = await loadConfigWith({ PORT: undefined, LOG_LEVEL: undefined, RESOURCE_SERVERS_PATH: undefined, TRUST_POLICY_PATH: undefined });
+    const c = await loadConfigWith({ PORT: undefined, LOG_LEVEL: undefined, TRUST_POLICY_PATH: undefined });
     expect(c.port).toBe(3000);
     expect(c.logLevel).toBe("warn");
-    expect(c.resourceServersPath).toBe(`${process.cwd()}/config/resource-servers.yaml`);
     expect(c.trustPolicyPath).toBe(`${process.cwd()}/config/trust-policy.yaml`);
+  });
+
+  it("refuses to start while the retired RESOURCE_SERVERS_PATH is set", async () => {
+    await expect(loadConfigWith({ RESOURCE_SERVERS_PATH: "/app/config/resource-servers.yaml" })).rejects.toThrow(
+      /RESOURCE_SERVERS_PATH is no longer supported.*asterism-cli resource-server approve/s
+    );
+    await expect(loadConfigWith({ RESOURCE_SERVERS_PATH: undefined })).resolves.toBeDefined();
   });
 
   it("coerces PORT and rejects nonsense", async () => {

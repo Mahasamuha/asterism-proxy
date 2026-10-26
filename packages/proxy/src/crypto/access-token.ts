@@ -9,6 +9,15 @@ import { loadReleasedClaims } from "../identity/released-claims.js";
 const DEFAULT_TTL_SECONDS = 15 * 60;
 const SHORT_LIVED_TTL_SECONDS = 5 * 60;
 
+/** The resource is not (or no longer) in the registry. The token endpoint turns
+ * this into invalid_grant; nothing has been consumed when it is thrown. */
+export class UnregisteredResourceError extends Error {
+  constructor(resource: string) {
+    super(`mintAccessToken: ${resource} is not a registered resource`);
+    this.name = "UnregisteredResourceError";
+  }
+}
+
 export interface MintAccessTokenParams {
   userId: string;
   clientId: string;
@@ -43,9 +52,14 @@ export async function mintAccessToken(params: MintAccessTokenParams): Promise<Mi
   // but never sign a token for an audience this proxy doesn't know.
   const resourceServer = lookupResourceServer(params.resource);
   if (!resourceServer) {
-    throw new Error("mintAccessToken: resource is not a registered resource");
+    throw new UnregisteredResourceError(params.resource);
   }
-  const isShortLived = params.scopes.some(
+  // Only what the server still declares: a scope dropped since consent is not
+  // minted. (offline_access is not a server scope; callers strip it before
+  // minting, and it would be dropped here too.)
+  const declared = new Set(resourceServer.scopes.map((s) => s.name));
+  const scopes = params.scopes.filter((scope) => declared.has(scope));
+  const isShortLived = scopes.some(
     (scope) => resourceServer.scopes.find((s) => s.name === scope)?.shortLived === true
   );
   const expiresIn = isShortLived ? SHORT_LIVED_TTL_SECONDS : DEFAULT_TTL_SECONDS;
@@ -62,7 +76,7 @@ export async function mintAccessToken(params: MintAccessTokenParams): Promise<Mi
       sub: params.userId,
       aud: audience,
       client_id: params.clientId,
-      scope: params.scopes.join(" "),
+      scope: scopes.join(" "),
       jti: randomUUID(),
     },
     expiresIn

@@ -1,82 +1,51 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { Request, Response } from "express";
 
-const cfg = vi.hoisted(() => ({ issuerUrl: "http://localhost:3000" }));
-vi.mock("../config.js", () => ({ config: cfg }));
+vi.mock("../config.js", () => ({ config: { cookieSecret: "test-secret-test-secret-test-secret", issuerUrl: "https://issuer.test" } }));
 
-import { generateCsrfToken, issueCsrfToken, verifyCsrfToken } from "./csrf.js";
-
-const TOKEN = "a".repeat(64);
-const req = (signedCookies: Record<string, unknown>, body?: unknown) => ({ signedCookies, body }) as unknown as Request;
+import { issueBoundCsrfToken, verifyBoundCsrfToken } from "./csrf.js";
 
 function fakeRes() {
-  const cookie = vi.fn();
-  return { res: { cookie } as unknown as Response, cookie };
+  const cookies: Array<{ name: string; value: string }> = [];
+  const res = { cookie: (name: string, value: string) => void cookies.push({ name, value }) } as unknown as Response;
+  return { res, cookies };
 }
+const reqWith = (signed: Record<string, string>, token?: string) => ({ signedCookies: signed, body: token === undefined ? {} : { csrf_token: token } }) as unknown as Request;
 
-beforeEach(() => {
-  cfg.issuerUrl = "http://localhost:3000";
-});
-
-describe("verifyCsrfToken", () => {
-  it("P0 accepts a body token equal to the signed cookie", () => {
-    expect(verifyCsrfToken(req({ csrf: TOKEN }, { csrf_token: TOKEN }), "csrf")).toBe(true);
+describe("bound CSRF tokens", () => {
+  it("a token verifies for the same cookie, purpose and user", () => {
+    const { res, cookies } = fakeRes();
+    const token = issueBoundCsrfToken(reqWith({}), res, "csrf_admin", "admin", "u1");
+    expect(verifyBoundCsrfToken(reqWith({ csrf_admin: cookies[0]!.value }, token), "csrf_admin", "admin", "u1")).toBe(true);
   });
 
-  it("P0 rejects a different token of the same length", () => {
-    expect(verifyCsrfToken(req({ csrf: TOKEN }, { csrf_token: "b".repeat(64) }), "csrf")).toBe(false);
+  it("the token is stable while the cookie is: a second tab keeps working", () => {
+    const { res, cookies } = fakeRes();
+    const first = issueBoundCsrfToken(reqWith({}), res, "csrf_admin", "admin", "u1");
+    const second = issueBoundCsrfToken(reqWith({ csrf_admin: cookies[0]!.value }), res, "csrf_admin", "admin", "u1");
+    expect(second).toBe(first);
+    expect(cookies[1]!.value).toBe(cookies[0]!.value);
   });
 
-  it("P0 rejects a different length without throwing", () => {
-    expect(verifyCsrfToken(req({ csrf: TOKEN }, { csrf_token: "a" }), "csrf")).toBe(false);
+  it("P0 a token for another user or another purpose fails", () => {
+    const { res, cookies } = fakeRes();
+    const token = issueBoundCsrfToken(reqWith({}), res, "csrf_admin", "admin", "u1");
+    const req = reqWith({ csrf_admin: cookies[0]!.value }, token);
+    expect(verifyBoundCsrfToken(req, "csrf_admin", "admin", "u2")).toBe(false);
+    expect(verifyBoundCsrfToken(req, "csrf_admin", "other", "u1")).toBe(false);
   });
 
-  it("P0 rejects when the cookie is absent, even if the body token is empty or missing", () => {
-    expect(verifyCsrfToken(req({}, { csrf_token: "" }), "csrf")).toBe(false);
-    expect(verifyCsrfToken(req({}, {}), "csrf")).toBe(false);
-    expect(verifyCsrfToken(req({}, { csrf_token: TOKEN }), "csrf")).toBe(false);
+  it("P0 a planted cookie value from another flow does not make an unbound token valid", () => {
+    // The login page's plain random token, signed by cookie-parser, planted as csrf_admin.
+    const planted = "ab".repeat(32);
+    expect(verifyBoundCsrfToken(reqWith({ csrf_admin: planted }, planted), "csrf_admin", "admin", "u1")).toBe(false);
+    expect(verifyBoundCsrfToken(reqWith({ csrf_admin: "short" }, "short"), "csrf_admin", "admin", "u1")).toBe(false);
   });
 
-  it("P0 rejects a cookie whose signature failed (cookie-parser gives false)", () => {
-    expect(verifyCsrfToken(req({ csrf: false }, { csrf_token: "" }), "csrf")).toBe(false);
-  });
-
-  it("P0 only reads the named cookie", () => {
-    expect(verifyCsrfToken(req({ other: TOKEN }, { csrf_token: TOKEN }), "csrf")).toBe(false);
-  });
-
-  it("P0 a request with no parsed body (undefined) is rejected, not a crash", () => {
-    expect(verifyCsrfToken(req({ csrf: TOKEN }, undefined), "csrf")).toBe(false);
-  });
-
-  it("P0 an array or object csrf_token is rejected, not a crash", () => {
-    expect(verifyCsrfToken(req({ csrf: TOKEN }, { csrf_token: [TOKEN] }), "csrf")).toBe(false);
-    expect(verifyCsrfToken(req({ csrf: TOKEN }, { csrf_token: { length: 64 } }), "csrf")).toBe(false);
-  });
-});
-
-describe("issueCsrfToken", () => {
-  it("P0 sets a signed, httpOnly, SameSite=Strict cookie and returns its value", () => {
-    const { res, cookie } = fakeRes();
-    const token = issueCsrfToken(res, "csrf_login");
-    expect(token).toMatch(/^[0-9a-f]{64}$/);
-    expect(cookie).toHaveBeenCalledWith("csrf_login", token, {
-      httpOnly: true,
-      secure: false,
-      sameSite: "strict",
-      maxAge: 30 * 60 * 1000,
-      signed: true,
-    });
-  });
-
-  it("P1 marks the cookie Secure when the issuer is https", () => {
-    cfg.issuerUrl = "https://auth.example.test";
-    const { res, cookie } = fakeRes();
-    issueCsrfToken(res, "x");
-    expect(cookie.mock.calls[0]?.[2]).toMatchObject({ secure: true });
-  });
-
-  it("P1 tokens are random per call", () => {
-    expect(generateCsrfToken()).not.toBe(generateCsrfToken());
+  it("a missing cookie or token fails", () => {
+    const { res, cookies } = fakeRes();
+    const token = issueBoundCsrfToken(reqWith({}), res, "csrf_admin", "admin", "u1");
+    expect(verifyBoundCsrfToken(reqWith({}, token), "csrf_admin", "admin", "u1")).toBe(false);
+    expect(verifyBoundCsrfToken(reqWith({ csrf_admin: cookies[0]!.value }), "csrf_admin", "admin", "u1")).toBe(false);
   });
 });

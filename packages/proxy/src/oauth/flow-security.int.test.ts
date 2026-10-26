@@ -1,20 +1,17 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { cookieClient, csrfFrom, form, type CookieClient } from "../test-helpers/http.js";
-import { pkce, seedClient, seedGrant, seedLocalUser } from "../test-helpers/seed.js";
+import { pkce, seedClient, seedGrant, seedLocalUser, seedResourceServer } from "../test-helpers/seed.js";
 import { E2E_REDIRECT_URI, E2E_RESOURCE, locationOf } from "../test-helpers/e2e-flow.js";
 
 // Regression tests for the flow-binding / flowType / device-phishing / shortLived
 // findings, driven through the real app (real Postgres, real cookies).
 
-const FIXTURE_REGISTRY = new URL("../test-helpers/fixtures/e2e-resource-servers.yaml", import.meta.url).pathname;
 const CLIENT_ID = "https://client.example.test/flow-sec.json";
 
 let app: { baseUrl: string; close: () => Promise<void> };
 let db: typeof import("../db.js");
 
 beforeAll(async () => {
-  vi.stubEnv("RESOURCE_SERVERS_PATH", FIXTURE_REGISTRY);
-  vi.resetModules();
   db = await import("../db.js");
   const { startApp } = await import("../test-helpers/app.js");
   app = await startApp();
@@ -22,11 +19,15 @@ beforeAll(async () => {
 afterAll(async () => {
   await app?.close();
   await db?.prisma.$disconnect();
-  vi.unstubAllEnvs();
 });
 beforeEach(async () => {
   const { truncateAll } = await import("../test-helpers/db.js");
   await truncateAll();
+  await seedResourceServer({
+    identifier: E2E_RESOURCE,
+    displayName: "E2E MCP",
+    scopes: [{ name: "files:read", description: "Read files" }, { name: "admin", description: "Administer", shortLived: true }],
+  });
   await seedClient({
     clientId: CLIENT_ID,
     metadata: {

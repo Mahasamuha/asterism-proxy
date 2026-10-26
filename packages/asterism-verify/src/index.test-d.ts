@@ -4,6 +4,7 @@
 import type { RequestHandler, Request, Response } from "express";
 import { expectTypeOf } from "vitest";
 import {
+  buildProtectedResourceMetadata,
   createBearerAuthMiddleware,
   createVerifier,
   protectedResourceMetadataHandler,
@@ -15,6 +16,7 @@ import {
   type AuthenticatedRequest,
   type Principal,
   type ProtectedResourceMetadataOptions,
+  type ResourceScope,
   type TokenValidationReason,
   type Verifier,
   type VerifierConfig,
@@ -39,7 +41,10 @@ expectTypeOf<TokenValidationError["reason"]>().toEqualTypeOf<TokenValidationReas
 expectTypeOf(createBearerAuthMiddleware).parameters.toEqualTypeOf<[VerifierConfig]>();
 expectTypeOf(createBearerAuthMiddleware).returns.toEqualTypeOf<RequestHandler>();
 expectTypeOf(protectedResourceMetadataHandler).parameters.toEqualTypeOf<[VerifierConfig, ProtectedResourceMetadataOptions?]>();
-expectTypeOf<ProtectedResourceMetadataOptions>().toEqualTypeOf<{ scopesSupported?: string[] }>();
+expectTypeOf<ProtectedResourceMetadataOptions>().toEqualTypeOf<{ resourceName?: string; scopes?: ResourceScope[]; scopesSupported?: string[] }>();
+expectTypeOf<ResourceScope>().toEqualTypeOf<{ name: string; description: string; stepUp?: boolean; shortLived?: boolean; freshSignIn?: boolean }>();
+expectTypeOf(buildProtectedResourceMetadata).parameters.toEqualTypeOf<[VerifierConfig, ProtectedResourceMetadataOptions?]>();
+expectTypeOf(buildProtectedResourceMetadata).returns.toEqualTypeOf<Record<string, unknown>>();
 expectTypeOf(requireScopes).parameters.toEqualTypeOf<[VerifierConfig, ...string[]]>();
 expectTypeOf(requireScopes).returns.toEqualTypeOf<RequestHandler>();
 expectTypeOf(sendInsufficientScope).parameters.toEqualTypeOf<[Response, VerifierConfig, string[], string?]>();

@@ -1,0 +1,47 @@
+<%- include('_head', { title: 'Approve a resource server' }) %>
+    <% if (!preview) { %>
+    <p class="muted">Enter the server's identifier (its <code>resource</code> URL). Its metadata is fetched and shown here; nothing is saved until you approve it.</p>
+    <% } %>
+    <form method="POST" action="/admin/resource-servers/preview" class="card">
+      <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
+      <label for="identifier">Identifier</label>
+      <input id="identifier" name="identifier" type="text" value="<%= identifier %>" placeholder="https://mcp.example.com/mcp" required>
+      <label class="inline"><input type="checkbox" name="internal"<%= internal ? ' checked' : '' %>> Internal: allow private-network addresses for this server</label>
+      <div><button type="submit">Fetch metadata</button></div>
+    </form>
+    <% if (preview) { %>
+    <div class="card">
+      <h2 style="margin-top:0">Metadata</h2>
+      <p>Name published by the server: <strong><%= preview.resourceName || '(none)' %></strong></p>
+      <% if (!preview.hasScopeDescriptions) { %>
+        <p class="warn">This server does not publish scope descriptions. Scope names are shown to users as they are; you can write descriptions after approving.</p>
+      <% } %>
+      <table>
+        <thead><tr><th>Scope</th><th>Description</th><th>Flags</th></tr></thead>
+        <tbody>
+        <% preview.scopes.forEach(function (sc) { %>
+          <tr>
+            <td><code><%= sc.name %></code></td>
+            <td><%= sc.description %></td>
+            <td>
+              <% if (sc.stepUp) { %><span class="tag">step-up</span><% } %>
+              <% if (sc.shortLived) { %><span class="tag">short-lived</span><% } %>
+            </td>
+          </tr>
+        <% }); %>
+        </tbody>
+      </table>
+    </div>
+    <form method="POST" action="/admin/resource-servers/approve" class="card">
+      <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
+      <input type="hidden" name="identifier" value="<%= identifier %>">
+      <% if (internal) { %><input type="hidden" name="internal" value="on"><% } %>
+      <label for="display_name">Display name (shown on consent pages)</label>
+      <input id="display_name" name="display_name" type="text" value="<%= preview.resourceName || '' %>">
+      <label for="release_claims">Release claims (comma-separated; leave empty to release none)</label>
+      <input id="release_claims" name="release_claims" type="text" placeholder="groups, preferred_username">
+      <p class="muted">Approving <code><%= identifier %></code><%= internal ? ' as an internal server' : '' %>.</p>
+      <div><button type="submit">Approve</button></div>
+    </form>
+    <% } %>
+<%- include('_foot') %>

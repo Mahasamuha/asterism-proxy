@@ -1,6 +1,7 @@
 export { createVerifier, TokenValidationError } from "./verify.js";
 export type { VerifierConfig, Principal, TokenValidationReason, Verifier } from "./verify.js";
 export {
+  buildProtectedResourceMetadata,
   createBearerAuthMiddleware,
   protectedResourceMetadataHandler,
   protectedResourceMetadataPath,
@@ -8,4 +9,4 @@ export {
   requireScopes,
   sendInsufficientScope,
 } from "./express.js";
-export type { AuthenticatedRequest, ProtectedResourceMetadataOptions } from "./express.js";
+export type { AuthenticatedRequest, ProtectedResourceMetadataOptions, ResourceScope } from "./express.js";

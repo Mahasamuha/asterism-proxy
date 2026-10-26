@@ -1,0 +1,90 @@
+<%- include('_head', { title: s.displayName }) %>
+    <p><a href="/admin/resource-servers">All servers</a></p>
+    <% if (s.pending) { %>
+    <div class="card">
+      <h2>Changes waiting for approval</h2>
+      <p class="warn">The server's metadata changed on <%= s.pending.since.toISOString() %> in ways that give clients more access. Until you accept them, asterism keeps issuing against the version you approved. Any parts of the change that only narrow access (a scope removed, a flag added) are already applied.</p>
+      <ul>
+      <% s.pending.changes.forEach(function (c) { %>
+        <% if (c.kind === 'new-scope') { %>
+        <li>New scope <code><%= c.scope %></code>: <%= c.description %>
+          <% if (c.freshSignIn) { %><span class="tag">fresh sign-in</span><% } else if (c.stepUp) { %><span class="tag">step-up</span><% } else if (c.shortLived) { %><span class="tag">short-lived</span><% } %></li>
+        <% } else if (c.kind === 'flag-removed') { %>
+        <li>Scope <code><%= c.scope %></code> is no longer <%= c.flag === 'step_up' ? 'step-up' : c.flag === 'short_lived' ? 'short-lived' : 'fresh sign-in' %> (it was before).</li>
+        <% } else { %>
+        <li>Scope <code><%= c.scope %></code> has a new description. Consent shows the declared text unless you override it below.<br>
+          <span class="muted">Was:</span> <%= c.from %><br><span class="muted">Now:</span> <%= c.to %></li>
+        <% } %>
+      <% }); %>
+      </ul>
+      <form method="POST" action="/admin/resource-servers/<%= s.id %>/accept-metadata">
+        <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
+        <input type="hidden" name="fingerprint" value="<%= s.pending.fingerprint %>">
+        <button type="submit">Accept these changes</button>
+      </form>
+    </div>
+    <% } %>
+    <div class="card">
+      <p><code><%= s.identifier %></code></p>
+      <p class="muted">Approved <%= s.approvedAt.toISOString() %> by <%= s.approvedBy %>.
+        Metadata: <% if (!s.hasSnapshot) { %>no snapshot<% } else { %>fetched <%= s.age %><% } %><% if (s.metadataExpiresAt) { %>, refreshes after <%= s.metadataExpiresAt.toISOString() %><% } %>.</p>
+      <% if (s.stale) { %><p class="warn"><strong>STALE metadata:</strong> it expired <%= s.staleFor %> ago and has not been refreshed. The last snapshot (fetched <%= s.age %>) is still in use.<% if (s.lastFetchError) { %> Last fetch error: <%= s.lastFetchError %><% } %></p><% } %>
+      <% if (s.lastFetchError && !s.stale) { %><p class="error">Last fetch failed (the previous snapshot is still in use): <%= s.lastFetchError %></p><% } %>
+      <form method="POST" action="/admin/resource-servers/<%= s.id %>/refresh">
+        <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
+        <button type="submit" class="plain">Refresh metadata now</button>
+      </form>
+    </div>
+
+    <form method="POST" action="/admin/resource-servers/<%= s.id %>/update" class="card">
+      <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
+      <label for="display_name">Display name</label>
+      <input id="display_name" name="display_name" type="text" value="<%= s.displayName %>" required>
+      <label for="release_claims">Release claims (comma-separated)</label>
+      <input id="release_claims" name="release_claims" type="text" value="<%= s.releaseClaims.join(', ') %>">
+      <div>
+        <label class="inline"><input type="checkbox" name="enabled"<%= s.enabled ? ' checked' : '' %>> Enabled</label>
+        <label class="inline"><input type="checkbox" name="internal"<%= s.internal ? ' checked' : '' %>> Internal (private-network addresses allowed)</label>
+      </div>
+      <div><button type="submit">Save</button></div>
+    </form>
+
+    <h2>Scopes</h2>
+    <% if (!s.hasSnapshot) { %><p class="warn">No metadata snapshot yet, so no scopes are known.</p><% } %>
+    <% s.scopes.forEach(function (sc) { %>
+    <form method="POST" action="/admin/resource-servers/<%= s.id %>/policy" class="card">
+      <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
+      <input type="hidden" name="scope" value="<%= sc.name %>">
+      <p><code><strong><%= sc.name %></strong></code>
+        <% if (sc.stepUp) { %><span class="tag">step-up (declared by the server)</span><% } %>
+        <% if (sc.declaredFreshSignIn) { %><span class="tag">fresh sign-in (declared by the server)</span><% } %>
+        <% if (sc.declaredShortLived) { %><span class="tag">short-lived (declared by the server)</span><% } %>
+      </p>
+      <p class="muted">Declared: <%= sc.declaredDescription %></p>
+      <label class="inline"><input type="checkbox" name="short_lived"<%= (sc.policyShortLived || sc.declaredShortLived) ? ' checked' : '' %>> Short-lived tokens (5 minutes, no refresh)</label>
+      <% if (sc.declaredShortLived) { %><p class="muted">The server declares this scope short-lived<%= sc.stepUp ? ' (a step-up scope always is)' : '' %>. Keeping this checked also pins it here, so it stays short-lived if the server stops declaring it.</p><% } %>
+      <label class="inline"><input type="checkbox" name="fresh_sign_in"<%= (sc.policyFreshSignIn || sc.declaredFreshSignIn) ? ' checked' : '' %>> Require a fresh sign-in (the user must authenticate again; implies short-lived)</label>
+      <% if (sc.declaredFreshSignIn) { %><p class="muted">The server declares this scope as needing a fresh sign-in. Keeping this checked also pins it here, so it still does if the server stops declaring it.</p><% } %>
+      <label for="groups-<%= sc.name %>">Require groups (comma-separated; empty means any user)</label>
+      <input id="groups-<%= sc.name %>" name="require_groups" type="text" value="<%= sc.requireGroups.join(', ') %>">
+      <label for="desc-<%= sc.name %>">Description override (shown on consent; empty uses the declared text)</label>
+      <input id="desc-<%= sc.name %>" name="description" type="text" value="<%= sc.descriptionOverride || '' %>" maxlength="500">
+      <div><button type="submit">Save scope</button></div>
+    </form>
+    <% }); %>
+    <% if (s.undeclaredPolicies.length > 0) { %>
+    <h2>Policy for scopes the server no longer declares</h2>
+    <p class="warn">These have no effect. They apply again if the server declares the scope.</p>
+    <table>
+      <thead><tr><th>Scope</th><th>Short-lived</th><th>Fresh sign-in</th><th>Require groups</th><th>Description override</th></tr></thead>
+      <tbody>
+      <% s.undeclaredPolicies.forEach(function (p) { %>
+        <tr><td><code><%= p.scopeName %></code></td><td><%= p.shortLived ? 'yes' : 'no' %></td><td><%= p.freshSignIn ? 'yes' : 'no' %></td><td><%= p.requireGroups.join(', ') %></td><td><%= p.descriptionOverride || '' %></td></tr>
+      <% }); %>
+      </tbody>
+    </table>
+    <% } %>
+
+    <h2>Remove</h2>
+    <p><a href="/admin/resource-servers/<%= s.id %>/remove">Remove this server...</a></p>
+<%- include('_foot') %>

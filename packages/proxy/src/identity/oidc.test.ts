@@ -125,6 +125,31 @@ describe("startUpstreamAuth", () => {
     const [a, b] = db.prisma.authorizationRequest.update.mock.calls.map((c) => (c[0] as { data: { upstreamState: string } }).data.upstreamState);
     expect(a).not.toBe(b);
   });
+
+  it("P0 a normal sign-in sends no prompt or max_age; a fresh one forces re-authentication with max_age=600", async () => {
+    const plain = new URL(await oidc.startUpstreamAuth("h1"));
+    expect(plain.searchParams.has("prompt")).toBe(false);
+    expect(plain.searchParams.has("max_age")).toBe(false);
+
+    const fresh = new URL(await oidc.startUpstreamAuth("h1", { fresh: true }));
+    expect(fresh.searchParams.get("prompt")).toBe("login");
+    expect(fresh.searchParams.get("max_age")).toBe("600");
+  });
+});
+
+describe("handleUpstreamCallback: fresh sign-in", () => {
+  it("P0 a fresh self-login holds the ID token to max_age (openid-client then requires and checks auth_time)", async () => {
+    db.prisma.authorizationRequest.findFirst.mockResolvedValue(authRequest({ requireFreshLogin: true }));
+    await oidc.handleUpstreamCallback(callbackUrl(), () => true);
+    expect(oc.authorizationCodeGrant.mock.calls[0]?.[2]).toEqual({ expectedState: "st", expectedNonce: "nonce", pkceCodeVerifier: "verifier", maxAge: 600 });
+  });
+
+  it("P0 a too-old auth_time makes the callback fail", async () => {
+    db.prisma.authorizationRequest.findFirst.mockResolvedValue(authRequest({ requireFreshLogin: true }));
+    oc.authorizationCodeGrant.mockRejectedValue(new Error("too much time has elapsed since the last End-User authentication"));
+    await expect(oidc.handleUpstreamCallback(callbackUrl(), () => true)).rejects.toThrow(/too much time/);
+    expect(db.prisma.user.upsert).not.toHaveBeenCalled();
+  });
 });
 
 describe("handleUpstreamCallback: rejection paths", () => {

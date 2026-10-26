@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title><%= title %> - Asterism admin</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 0; background: #f5f5f5; color: #111; }
+    nav { background: #1e293b; padding: .6rem 1.5rem; display: flex; flex-wrap: wrap; gap: 1.25rem; }
+    nav a { color: #e2e8f0; text-decoration: none; font-size: .95rem; }
+    nav a:hover { text-decoration: underline; }
+    main { padding: 1.5rem; max-width: 1100px; }
+    h1 { font-size: 1.4rem; margin-top: 0; }
+    h2 { font-size: 1.1rem; margin-top: 2rem; }
+    table { border-collapse: collapse; width: 100%; background: #fff; }
+    th, td { text-align: left; padding: .45rem .6rem; border-bottom: 1px solid #eee; font-size: .88rem; vertical-align: top; }
+    code, pre { font-family: ui-monospace, monospace; font-size: .85rem; }
+    pre { margin: 0; white-space: pre-wrap; word-break: break-word; }
+    form { margin: 0; }
+    label { display: block; margin: .75rem 0 .25rem; font-weight: 500; font-size: .9rem; }
+    label.inline { display: inline-flex; align-items: center; gap: .4rem; margin: .5rem 1rem .5rem 0; font-weight: normal; }
+    input[type=text] { width: 100%; max-width: 520px; box-sizing: border-box; padding: .4rem; font-size: .95rem; border: 1px solid #ccc; border-radius: 4px; }
+    button { padding: .4rem .9rem; font-size: .9rem; border: none; border-radius: 4px; cursor: pointer; background: #2563eb; color: #fff; }
+    button.danger { background: #b91c1c; }
+    button.plain { background: #e5e7eb; color: #111; }
+    .card { background: #fff; border: 1px solid #e5e7eb; border-radius: 6px; padding: 1rem 1.25rem; margin-bottom: 1rem; }
+    .error { color: #991b1b; background: #fee2e2; padding: .6rem .8rem; border-radius: 4px; margin-bottom: 1rem; }
+    .notice { color: #14532d; background: #dcfce7; padding: .6rem .8rem; border-radius: 4px; margin-bottom: 1rem; }
+    .warn { color: #92400e; background: #fef3c7; padding: .6rem .8rem; border-radius: 4px; margin-bottom: 1rem; }
+    .muted { color: #666; }
+    .tag { display: inline-block; font-size: .75rem; padding: .05rem .4rem; border-radius: 3px; background: #e5e7eb; margin-right: .25rem; }
+    .tag.bad { background: #fee2e2; color: #991b1b; }
+    .pager { margin-top: 1rem; display: flex; gap: 1rem; }
+  </style>
+</head>
+<body>
+  <nav>
+    <a href="/admin">Overview</a>
+    <a href="/admin/resource-servers">Resource servers</a>
+    <a href="/admin/clients">Client denylist</a>
+    <a href="/admin/audit">Audit log</a>
+    <a href="/grants">Your grants</a>
+  </nav>
+  <main>
+    <h1><%= title %></h1>
+    <% if (typeof error !== "undefined" && error) { %><p class="error"><%= error %></p><% } %>
+    <% if (typeof notice !== "undefined" && notice) { %><p class="notice"><%= notice %></p><% } %>

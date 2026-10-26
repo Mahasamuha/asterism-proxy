@@ -1,0 +1,8 @@
+<%- include('_head', { title: 'Admin' }) %>
+    <ul>
+      <li><a href="/admin/resource-servers">Resource servers</a>: approve MCP servers and set policy on their scopes</li>
+      <li><a href="/admin/clients">Client denylist</a>: block OAuth clients</li>
+      <li><a href="/admin/audit">Audit log</a>: every change made here or with <code>asterism-cli</code></li>
+    </ul>
+    <p class="muted">Changes need a sign-in within the last 10 minutes. If yours is older you will be asked to sign in again.</p>
+<%- include('_foot') %>

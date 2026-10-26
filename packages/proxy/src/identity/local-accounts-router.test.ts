@@ -130,6 +130,7 @@ describe("/setup", () => {
     expect(res.status).toBe(302);
     expect(la.createFirstLocalUser).toHaveBeenCalledWith("bob", GOOD_PW);
     expect(jar.cookies.has("session")).toBe(true);
+    expect(jar.cookies.has("reauth")).toBe(false);
     expect(jar.cookies.has("csrf_setup")).toBe(false);
   });
 
@@ -229,6 +230,7 @@ describe("POST /auth/login", () => {
     expect(html).not.toContain("deactivated");
     expect(la.endAttempt).toHaveBeenCalledWith({ id: 1, key: "k" }, false);
     expect(jar.cookies.has("session")).toBe(false);
+    expect(jar.cookies.has("reauth")).toBe(false);
   });
 
   it("P0 array-valued username/password/flow are treated as missing, not a 500", async () => {
@@ -250,6 +252,7 @@ describe("POST /auth/login", () => {
     expect(res.headers.get("location")).toBe("/auth/account");
     expect(la.validateLocalUser).toHaveBeenCalledWith("alice", "pw");
     expect(jar.cookies.has("session")).toBe(true);
+    expect(jar.cookies.has("reauth")).toBe(true); // a password was just entered
     expect(db.prisma.authorizationRequest.findUnique).not.toHaveBeenCalled();
   });
 

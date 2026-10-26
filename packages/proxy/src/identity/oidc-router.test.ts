@@ -48,6 +48,20 @@ describe("GET /oauth/callback", () => {
     expect(res.headers.getSetCookie().join()).toMatch(/session=s%3Au1\.2\./);
   });
 
+  it("P0 the re-authentication marker is set only for a flow that required a fresh login", async () => {
+    const flow = { handle: "h/1", flowType: "self_login", redirectUri: "urn:mcp-auth:self-login", state: "/admin/clients" };
+    db.prisma.authorizationRequest.findUniqueOrThrow.mockResolvedValue({ ...flow, requireFreshLogin: true });
+    const fresh = (await callback()).headers.getSetCookie().join();
+    expect(fresh).toMatch(/reauth=s%3Au1\./);
+    expect(fresh).toMatch(/reauth=[^;]*; Max-Age=600; Path=\/admin;/);
+
+    db.prisma.authorizationRequest.findUniqueOrThrow.mockResolvedValue({ ...flow, requireFreshLogin: false });
+    expect((await callback()).headers.getSetCookie().join()).not.toContain("reauth=");
+
+    db.prisma.authorizationRequest.findUniqueOrThrow.mockResolvedValue({ handle: "h/1", flowType: "oauth", redirectUri: "https://c.example.test/cb", state: "xyz", requireFreshLogin: false });
+    expect((await callback()).headers.getSetCookie().join()).not.toContain("reauth=");
+  });
+
   it("P0 a callback replayed in another browser (no binding cookie) fails with the generic page and sets no session (login CSRF)", async () => {
     const res = await callback("code=c&state=s", await browser(false));
     expect(res.status).toBe(400);

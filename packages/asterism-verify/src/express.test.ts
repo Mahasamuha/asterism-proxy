@@ -4,6 +4,7 @@ import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  buildProtectedResourceMetadata,
   createBearerAuthMiddleware,
   protectedResourceMetadataHandler,
   protectedResourceMetadataPath,
@@ -46,6 +47,10 @@ beforeAll(async () => {
   a.use("/mcp", createBearerAuthMiddleware(cfg()));
   a.get("/mcp", (req: Request, res) => res.json({ principal: (req as AuthenticatedRequest).principal }));
   a.get(protectedResourceMetadataPath(AUD) + "-scoped", protectedResourceMetadataHandler(cfg(), { scopesSupported: ["read", "write"] }));
+  a.get(
+    protectedResourceMetadataPath(AUD) + "-ext",
+    protectedResourceMetadataHandler(cfg(), { resourceName: "Relay", scopes: [{ name: "read", description: "Read" }, { name: "admin", description: "Admin", stepUp: true }] }),
+  );
   a.get("/step-up", createBearerAuthMiddleware(cfg()), requireScopes(cfg(), "admin"), (_req, res) => res.json({ ok: true }));
   a.get("/step-up-two", createBearerAuthMiddleware(cfg()), requireScopes(cfg(), "read", "write"), (_req, res) => res.json({ ok: true }));
   a.get("/no-principal", requireScopes(cfg(), "read"), (_req, res) => res.json({ ok: true }));
@@ -179,6 +184,100 @@ describe("protectedResourceMetadataHandler scopesSupported", () => {
 
   it("P1 rejects invalid scope strings at creation", () => {
     expect(() => protectedResourceMetadataHandler(cfg(), { scopesSupported: ["a b"] })).toThrow(/Invalid scope/);
+  });
+});
+
+describe("buildProtectedResourceMetadata", () => {
+  const scope = (over: Record<string, unknown> = {}) => ({ name: "read", description: "Read things", ...over });
+  const build = (options: Parameters<typeof buildProtectedResourceMetadata>[1]) => buildProtectedResourceMetadata(cfg(), options);
+
+  it("P1 emits asterism_scopes and derives scopes_supported without step-up scopes, in order", () => {
+    const out = build({
+      resourceName: "Constellation",
+      scopes: [
+        scope({ name: "relay", description: "Use your shares" }),
+        scope({ name: "admin", description: "Administer", stepUp: true, shortLived: true }),
+        scope({ name: "write", description: "Write" }),
+      ],
+    });
+    expect(out).toEqual({
+      resource: AUD,
+      resource_name: "Constellation",
+      authorization_servers: [ISS],
+      bearer_methods_supported: ["header"],
+      scopes_supported: ["relay", "write"],
+      asterism_scopes: [
+        { name: "relay", description: "Use your shares" },
+        { name: "admin", description: "Administer", step_up: true, short_lived: true },
+        { name: "write", description: "Write" },
+      ],
+    });
+  });
+
+  it("P1 emits fresh_sign_in and keeps such a scope out of scopes_supported", () => {
+    const out = build({
+      scopes: [scope({ name: "relay" }), scope({ name: "root", description: "Change credentials", stepUp: true, shortLived: true, freshSignIn: true }), scope({ name: "wipe", description: "Wipe", freshSignIn: true })],
+    });
+    expect(out["scopes_supported"]).toEqual(["relay"]);
+    expect(out["asterism_scopes"]).toEqual([
+      { name: "relay", description: "Read things" },
+      { name: "root", description: "Change credentials", step_up: true, short_lived: true, fresh_sign_in: true },
+      { name: "wipe", description: "Wipe", fresh_sign_in: true },
+    ]);
+  });
+
+  it("P1 omits false flags", () => {
+    const out = build({ scopes: [scope({ stepUp: false, shortLived: false, freshSignIn: false })] });
+    expect(out.asterism_scopes).toEqual([{ name: "read", description: "Read things" }]);
+  });
+
+  it("P1 emits resource_name alone, and neither new member by default", () => {
+    expect(build({ resourceName: "Relay" })).toEqual({ resource: AUD, resource_name: "Relay", authorization_servers: [ISS], bearer_methods_supported: ["header"] });
+    expect(build({})).toEqual({ resource: AUD, authorization_servers: [ISS], bearer_methods_supported: ["header"] });
+  });
+
+  it("P1 keeps the legacy scopesSupported path", () => {
+    const out = build({ scopesSupported: ["a", "b"] });
+    expect(out.scopes_supported).toEqual(["a", "b"]);
+    expect(out).not.toHaveProperty("asterism_scopes");
+  });
+
+  it("P1 throws when both scopes and scopesSupported are given", () => {
+    expect(() => build({ scopes: [scope()], scopesSupported: ["read"] })).toThrow(/not both/);
+  });
+
+  it("P1 rejects invalid scope names and duplicates", () => {
+    expect(() => build({ scopes: [scope({ name: "a b" })] })).toThrow(/Invalid scope/);
+    expect(() => build({ scopes: [scope({ name: "" })] })).toThrow(/Invalid scope/);
+    expect(() => build({ scopes: [scope(), scope({ description: "Again" })] })).toThrow(/Duplicate scope "read"/);
+  });
+
+  it("P1 rejects bad descriptions", () => {
+    expect(() => build({ scopes: [scope({ description: "" })] })).toThrow(/Invalid description/);
+    expect(() => build({ scopes: [scope({ description: "   " })] })).toThrow(/Invalid description/);
+    expect(() => build({ scopes: [scope({ description: 5 })] })).toThrow(/Invalid description/);
+    expect(() => build({ scopes: [scope({ description: "x".repeat(301) })] })).toThrow(/Invalid description/);
+    expect(() => build({ scopes: [scope({ description: "x".repeat(300) })] })).not.toThrow();
+  });
+
+  it("P1 caps the number of scopes at 50", () => {
+    const many = (n: number) => Array.from({ length: n }, (_, i) => scope({ name: `s${i}` }));
+    expect(() => build({ scopes: many(50) })).not.toThrow();
+    expect(() => build({ scopes: many(51) })).toThrow(/Too many scopes/);
+  });
+
+  it("P1 validates resourceName", () => {
+    expect(() => build({ resourceName: "" })).toThrow(/Invalid resourceName/);
+    expect(() => build({ resourceName: "x".repeat(201) })).toThrow(/Invalid resourceName/);
+    expect(() => build({ resourceName: "x".repeat(200) })).not.toThrow();
+  });
+
+  it("P1 the handler validates at creation and serves the builder output", async () => {
+    expect(() => protectedResourceMetadataHandler(cfg(), { scopes: [scope({ description: "" })] })).toThrow(/Invalid description/);
+    const res = await get({}, protectedResourceMetadataPath(AUD) + "-ext");
+    expect(await res.json()).toEqual(
+      build({ resourceName: "Relay", scopes: [{ name: "read", description: "Read" }, { name: "admin", description: "Admin", stepUp: true }] }),
+    );
   });
 });
 

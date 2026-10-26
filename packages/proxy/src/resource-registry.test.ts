@@ -1,142 +1,170 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
-import { loadConfigWith } from "./test-helpers/core-config.js";
-import { tempFile } from "./test-helpers/core-files.js";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const cleanups: Array<() => void> = [];
-afterEach(() => {
-  vi.unstubAllEnvs();
-  while (cleanups.length) cleanups.pop()!();
+const h = vi.hoisted(() => ({ findMany: vi.fn() }));
+vi.mock("./db.js", () => ({ prisma: { resourceServer: { findMany: h.findMany } } }));
+
+import { isRegisteredResource, joinResourceServer, loadRegistry, lookupResourceServer, type RegistryRow } from "./resource-registry.js";
+
+const ID = "https://mcp.example.test/mcp";
+
+function row(over: Partial<RegistryRow> = {}): RegistryRow {
+  return {
+    identifier: ID,
+    displayName: "Example MCP",
+    enabled: true,
+    releaseClaims: ["email"],
+    metadata: {
+      resource: ID,
+      scopes: [
+        { name: "read", description: "Read things", stepUp: false, shortLived: false, freshSignIn: false },
+        { name: "admin", description: "Administer", stepUp: true, shortLived: true, freshSignIn: false },
+      ],
+    },
+    scopePolicies: [],
+    ...over,
+  };
+}
+const policy = (over: Partial<RegistryRow["scopePolicies"][number]> & { scopeName: string }) => ({
+  shortLived: false,
+  freshSignIn: false,
+  requireGroups: [],
+  descriptionOverride: null,
+  ...over,
 });
 
-async function loadRegistry(yaml: string | null) {
-  let file = "/nonexistent/resource-servers.yaml";
-  if (yaml !== null) {
-    const t = tempFile("resource-servers.yaml", yaml);
-    cleanups.push(t.cleanup);
-    file = t.file;
-  }
-  await loadConfigWith({ RESOURCE_SERVERS_PATH: file });
-  return import("./resource-registry.js");
-}
-
-const VALID = `
-resourceServers:
-  - identifier: https://mcp.example.test
-    name: Example MCP
-    description: Example
-    scopes:
-      - name: read
-        description: Read things
-      - name: admin
-        description: Administer
-        shortLived: true
-  - identifier: https://other.example.test
-    name: Other
-    scopes:
-      - name: use
-        description: Use it
-`;
-
-describe("resource registry", () => {
-  it("loads servers and looks them up by exact identifier", async () => {
-    const r = await loadRegistry(VALID);
-    const server = r.lookupResourceServer("https://mcp.example.test");
-    expect(server?.name).toBe("Example MCP");
-    expect(server?.scopes.map((s) => s.name)).toEqual(["read", "admin"]);
-    expect(r.isRegisteredResource("https://mcp.example.test")).toBe(true);
-    expect(r.isRegisteredResource("https://other.example.test")).toBe(true);
+describe("joinResourceServer", () => {
+  it("uses the declared scopes, the display name and the policy's releaseClaims", () => {
+    const s = joinResourceServer(row())!;
+    expect(s.name).toBe("Example MCP");
+    expect(s.identifier).toBe(ID);
+    expect(s.releaseClaims).toEqual(["email"]);
+    expect(s.scopes).toEqual([
+      { name: "read", description: "Read things", shortLived: false, freshSignIn: false, requireGroups: undefined },
+      { name: "admin", description: "Administer", shortLived: true, freshSignIn: false, requireGroups: undefined },
+    ]);
   });
 
-  it("defaults shortLived to false and keeps it when true", async () => {
-    const r = await loadRegistry(VALID);
-    const scopes = r.lookupResourceServer("https://mcp.example.test")!.scopes;
-    expect(scopes.find((s) => s.name === "read")?.shortLived).toBe(false);
-    expect(scopes.find((s) => s.name === "admin")?.shortLived).toBe(true);
+  it("policy can tighten shortLived but never loosen it", () => {
+    const s = joinResourceServer(row({ scopePolicies: [policy({ scopeName: "read", shortLived: true }), policy({ scopeName: "admin", shortLived: false })] }))!;
+    expect(s.scopes.find((x) => x.name === "read")!.shortLived).toBe(true);
+    expect(s.scopes.find((x) => x.name === "admin")!.shortLived).toBe(true);
   });
 
-  it.each(["https://mcp.example.test/", "https://MCP.example.test", "http://mcp.example.test", "https://mcp.example.test/x", "", "https://evil.test"])(
-    "does not match near-miss identifier %j",
-    async (id) => {
-      const r = await loadRegistry(VALID);
-      expect(r.isRegisteredResource(id)).toBe(false);
-      expect(r.lookupResourceServer(id)).toBeUndefined();
-    },
-  );
-
-  it("does not leak Object.prototype keys", async () => {
-    const r = await loadRegistry(VALID);
-    expect(r.isRegisteredResource("constructor")).toBe(false);
-    expect(r.isRegisteredResource("__proto__")).toBe(false);
+  it("policy can tighten freshSignIn, which implies shortLived", () => {
+    const s = joinResourceServer(row({ scopePolicies: [policy({ scopeName: "read", freshSignIn: true })] }))!;
+    expect(s.scopes.find((x) => x.name === "read")).toMatchObject({ shortLived: true, freshSignIn: true });
+    expect(s.scopes.find((x) => x.name === "admin")).toMatchObject({ shortLived: true, freshSignIn: false });
   });
 
-  it("accepts an empty registry", async () => {
-    const r = await loadRegistry("resourceServers: []\n");
-    expect(r.isRegisteredResource("https://mcp.example.test")).toBe(false);
+  it("applies the implications to a snapshot that predates them", () => {
+    const old = row({
+      metadata: {
+        scopes: [
+          { name: "legacy", description: "d", shortLived: false },
+          { name: "stepped", description: "d", shortLived: false, stepUp: true },
+          { name: "fresh", description: "d", shortLived: false, stepUp: false, freshSignIn: true },
+        ],
+      },
+    });
+    expect(joinResourceServer(old)!.scopes.map((x) => [x.name, x.shortLived, x.freshSignIn])).toEqual([
+      ["legacy", false, false],
+      ["stepped", true, false],
+      ["fresh", true, true],
+    ]);
   });
 
-  it("treats a missing resourceServers key as empty", async () => {
-    const r = await loadRegistry("{}\n");
-    expect(r.isRegisteredResource("x")).toBe(false);
+  it("takes requireGroups from policy; an empty list means ungated", () => {
+    const s = joinResourceServer(
+      row({ scopePolicies: [policy({ scopeName: "admin", requireGroups: ["ops", "sre"] }), policy({ scopeName: "read", requireGroups: [] })] })
+    )!;
+    expect(s.scopes.find((x) => x.name === "admin")!.requireGroups).toEqual(["ops", "sre"]);
+    expect(s.scopes.find((x) => x.name === "read")!.requireGroups).toBeUndefined();
   });
 
-  it("defaults releaseClaims to [] and leaves requireGroups unset", async () => {
-    const r = await loadRegistry(VALID);
-    const s = r.lookupResourceServer("https://mcp.example.test")!;
-    expect(s.releaseClaims).toEqual([]);
-    expect(s.scopes[0]!.requireGroups).toBeUndefined();
+  it("the description override wins over the declared text", () => {
+    const s = joinResourceServer(row({ scopePolicies: [policy({ scopeName: "read", descriptionOverride: "Look at things" })] }))!;
+    expect(s.scopes.find((x) => x.name === "read")!.description).toBe("Look at things");
+    expect(s.scopes.find((x) => x.name === "admin")!.description).toBe("Administer");
   });
 
-  const withClaims = (extra: string, scopeExtra = "") =>
-    `resourceServers:\n  - {identifier: a, name: A, ${extra} scopes: [{name: s, description: d${scopeExtra}}]}\n`;
-
-  it("accepts releaseClaims and requireGroups", async () => {
-    const r = await loadRegistry(withClaims("releaseClaims: [email, groups, constellation_username],", ", requireGroups: [ops, sre]"));
-    const s = r.lookupResourceServer("a")!;
-    expect(s.releaseClaims).toEqual(["email", "groups", "constellation_username"]);
-    expect(s.scopes[0]!.requireGroups).toEqual(["ops", "sre"]);
+  it("ignores policy for a scope the server no longer declares", () => {
+    const s = joinResourceServer(row({ scopePolicies: [policy({ scopeName: "gone", requireGroups: ["x"], shortLived: true })] }))!;
+    expect(s.scopes.map((x) => x.name)).toEqual(["read", "admin"]);
   });
 
-  it.each(["iss", "sub", "aud", "exp", "nbf", "iat", "jti", "client_id", "scope", "cnf", "act", "azp", "nonce", "auth_time", "typ", "token_type", "may_act", "acr", "amr", "sid", "__proto__", "constructor", "prototype"])("rejects reserved released claim %s", async (name) => {
-    await expect(loadRegistry(withClaims(`releaseClaims: ["${name}"],`))).rejects.toThrow(/reserved claim name/);
+  it("is not registered when disabled or without a valid snapshot", () => {
+    expect(joinResourceServer(row({ enabled: false }))).toBeNull();
+    expect(joinResourceServer(row({ metadata: null }))).toBeNull();
+    expect(joinResourceServer(row({ metadata: { scopes: "nope" } }))).toBeNull();
   });
 
-  it("rejects a scope name listed twice", async () => {
-    const dup = "resourceServers:\n  - {identifier: a, name: A, scopes: [{name: admin, description: d, requireGroups: [g]}, {name: admin, description: d}]}\n";
-    await expect(loadRegistry(dup)).rejects.toThrow(/"admin" is listed more than once/);
+  it("keeps only the first of a repeated scope name", () => {
+    const s = joinResourceServer(
+      row({ metadata: { scopes: [{ name: "a", description: "one", shortLived: false }, { name: "a", description: "two", shortLived: true }] } })
+    )!;
+    expect(s.scopes).toEqual([{ name: "a", description: "one", shortLived: false, freshSignIn: false, requireGroups: undefined }]);
+  });
+});
+
+describe("loadRegistry", () => {
+  beforeEach(() => h.findMany.mockReset());
+
+  it("serves lookups by exact identifier from the loaded rows", async () => {
+    h.findMany.mockResolvedValue([row(), row({ identifier: "https://off.example.test", enabled: false })]);
+    await loadRegistry();
+    expect(lookupResourceServer(ID)?.name).toBe("Example MCP");
+    expect(isRegisteredResource(ID)).toBe(true);
+    expect(isRegisteredResource("https://off.example.test")).toBe(false);
+    for (const near of [ID + "/", "https://MCP.example.test/mcp", "http://mcp.example.test/mcp", "", "https://evil.test"]) {
+      expect(isRegisteredResource(near)).toBe(false);
+    }
   });
 
-  it("rejects duplicate and empty releaseClaims", async () => {
-    await expect(loadRegistry(withClaims("releaseClaims: [email, email],"))).rejects.toThrow(/more than once/);
-    await expect(loadRegistry(withClaims("releaseClaims: [''],"))).rejects.toThrow(/Invalid resource server registry/);
+  it("swaps in the new view: removed servers disappear", async () => {
+    h.findMany.mockResolvedValue([row()]);
+    await loadRegistry();
+    h.findMany.mockResolvedValue([]);
+    await loadRegistry();
+    expect(isRegisteredResource(ID)).toBe(false);
   });
 
-  it("rejects an empty requireGroups", async () => {
-    await expect(loadRegistry(withClaims("", ", requireGroups: []"))).rejects.toThrow(/Invalid resource server registry/);
+  it("keeps the old view when the database read fails", async () => {
+    h.findMany.mockResolvedValue([row()]);
+    await loadRegistry();
+    h.findMany.mockRejectedValueOnce(new Error("db down"));
+    let outcome = "resolved";
+    try {
+      await loadRegistry();
+    } catch (err) {
+      outcome = (err as Error).message;
+    }
+    expect(outcome).toBe("db down");
+    expect(isRegisteredResource(ID)).toBe(true);
   });
 
-  it("fails when the file is missing", async () => {
-    await expect(loadRegistry(null)).rejects.toThrow(/Failed to read resource server registry/);
+  it("ignores a load that started earlier but finishes after a newer one was applied", async () => {
+    let finishSlow!: (rows: RegistryRow[]) => void;
+    h.findMany.mockReturnValueOnce(new Promise((resolve) => (finishSlow = resolve)));
+    const slow = loadRegistry(); // reads the old data: the server is still there
+    h.findMany.mockResolvedValueOnce([]); // a later load sees the server removed
+    await loadRegistry();
+    expect(isRegisteredResource(ID)).toBe(false);
+    finishSlow([row()]);
+    await slow;
+    expect(isRegisteredResource(ID)).toBe(false);
   });
 
-  it("fails on malformed YAML", async () => {
-    await expect(loadRegistry("resourceServers: [unclosed")).rejects.toThrow(/Failed to parse resource server registry/);
-  });
-
-  it("fails on duplicate identifiers", async () => {
-    const dup = `
-resourceServers:
-  - {identifier: a, name: A, scopes: [{name: s, description: d}]}
-  - {identifier: a, name: B, scopes: [{name: s, description: d}]}
-`;
-    await expect(loadRegistry(dup)).rejects.toThrow(/Duplicate resource server identifier in registry: a/);
-  });
-
-  it.each([
-    ["no scopes", "resourceServers:\n  - {identifier: a, name: A, scopes: []}\n"],
-    ["empty identifier", "resourceServers:\n  - {identifier: '', name: A, scopes: [{name: s, description: d}]}\n"],
-    ["missing name", "resourceServers:\n  - {identifier: a, scopes: [{name: s, description: d}]}\n"],
-    ["scope without description", "resourceServers:\n  - {identifier: a, name: A, scopes: [{name: s}]}\n"],
-  ])("rejects a schema violation: %s", async (_label, yaml) => {
-    await expect(loadRegistry(yaml)).rejects.toThrow(/Invalid resource server registry/);
+  it("applies a newer load that finishes before an older one, and still applies later loads", async () => {
+    let finishSlow!: (rows: RegistryRow[]) => void;
+    h.findMany.mockReturnValueOnce(new Promise((resolve) => (finishSlow = resolve)));
+    const slow = loadRegistry();
+    h.findMany.mockResolvedValueOnce([row({ displayName: "Newer" })]);
+    await loadRegistry();
+    finishSlow([row({ displayName: "Older" })]);
+    await slow;
+    expect(lookupResourceServer(ID)?.name).toBe("Newer");
+    h.findMany.mockResolvedValueOnce([row({ displayName: "Latest" })]);
+    await loadRegistry();
+    expect(lookupResourceServer(ID)?.name).toBe("Latest");
   });
 });

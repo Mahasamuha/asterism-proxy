@@ -18,7 +18,7 @@ import {
   localAccountsExist,
   MIN_PASSWORD_LENGTH,
 } from "./local-accounts.js";
-import { setSession, startSession, clearSession, getSessionUserId } from "./session.js";
+import { markReauthenticated, setSession, startSession, clearSession, getSessionUserId } from "./session.js";
 import { issueCsrfToken, verifyCsrfToken } from "./csrf.js";
 import { isSelfLogin, selfLoginReturnPath } from "./self-login.js";
 import { passwordProblem } from "./password-policy.js";
@@ -182,6 +182,10 @@ localAccountsRouter.post("/auth/login", async (req: Request, res: Response) => {
 
   res.clearCookie("csrf_login");
   await startSession(res, userId);
+  // A password was just entered: that is the proof of presence admin changes ask
+  // for. Setup and password change do not set it (a password change is gated by
+  // the existing session; setup is a one-time bootstrap).
+  markReauthenticated(res, userId);
   const { deviceEpoch } = await prisma.user.findUniqueOrThrow({ where: { id: userId }, select: { deviceEpoch: true } });
   issueDeviceCookie(res, username, deviceEpoch);
   log.info({ userId }, "Local login succeeded");

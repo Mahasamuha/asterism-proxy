@@ -7,6 +7,7 @@ import { createLogger } from "../logger.js";
 import { isRegisteredRedirectUri, resolveClient } from "../clients/cimd.js";
 import { isRegisteredResource, lookupResourceServer } from "../resource-registry.js";
 import { startUpstreamAuth } from "../identity/oidc.js";
+import { requestsFreshSignIn } from "./fresh-sign-in.js";
 import { bindFlow } from "../identity/flow-binding.js";
 import { rowCreationRetryAfter } from "../rate-limit.js";
 
@@ -172,6 +173,9 @@ authorizeRouter.get("/oauth/authorize", async (req: Request, res: Response) => {
     return;
   }
 
+  // A scope the server marks fresh-sign-in needs the user to prove presence now,
+  // not ride an existing upstream session (silent SSO).
+  const fresh = requestsFreshSignIn(resourceServer, requestedScopes);
   const handle = randomBytes(24).toString("hex");
   await prisma.authorizationRequest.create({
     data: {
@@ -184,6 +188,7 @@ authorizeRouter.get("/oauth/authorize", async (req: Request, res: Response) => {
       state,
       codeChallenge,
       codeChallengeMethod,
+      requireFreshLogin: fresh,
       expiresAt: new Date(Date.now() + AUTHORIZATION_REQUEST_TTL_MS),
     },
   });
@@ -192,7 +197,8 @@ authorizeRouter.get("/oauth/authorize", async (req: Request, res: Response) => {
   bindFlow(req, res, handle);
 
   // Dispatch to the identity provider. OIDC is the default (§6); local
-  // accounts are used only when OIDC is disabled. A request parameter must not
+  // accounts are used only when OIDC is disabled (their login always asks for
+  // the password, so a fresh sign-in needs nothing extra there). A request parameter must not
   // be able to downgrade an OIDC deployment to password login (the former
   // ?idp=local override), so it is no longer read.
   if (config.enableLocalAccounts && !config.enableOidc) {
@@ -202,6 +208,6 @@ authorizeRouter.get("/oauth/authorize", async (req: Request, res: Response) => {
 
   // config.ts's startup validation guarantees at least one provider is
   // enabled, so if we didn't take the local branch above, OIDC must be on.
-  const upstreamUrl = await startUpstreamAuth(handle);
+  const upstreamUrl = await startUpstreamAuth(handle, { fresh });
   res.redirect(upstreamUrl);
 });

@@ -52,6 +52,28 @@ function failAuthCodeCreateInTransactions() {
   failInTransactions(prisma, "authCode", "create");
 }
 
+describe("fresh-sign-in scopes", () => {
+  it("a request for a fresh-sign-in scope that was not forced fresh is refused on the proxy's page and consumed; nothing is minted", async () => {
+    const { handle } = await flow({ scopes: ["read", "root"] });
+    const c = cookieClient();
+    const row = await prisma.authorizationRequest.findUniqueOrThrow({ where: { handle } });
+    await bindBrowser(app.baseUrl, c, handle, row.subject!);
+    const page = await getPath(app.baseUrl, `/oauth/consent?flow=${handle}`, c.fetch);
+    expect(page.status).toBe(400);
+    expect(page.headers.get("location")).toBeNull();
+    expect(page.text).toContain("start again from the application");
+    expect(await prisma.authorizationRequest.count()).toBe(0);
+    expect(await prisma.authCode.count()).toBe(0);
+    expect(await prisma.grant.count()).toBe(0);
+  });
+
+  it("the same request marked fresh gets the consent page", async () => {
+    const { handle } = await flow({ scopes: ["read", "root"] });
+    await prisma.authorizationRequest.update({ where: { handle }, data: { requireFreshLogin: true } });
+    await consentForm(handle); // asserts the page is 200
+  });
+});
+
 describe("authorization_code consent (P0)", () => {
   it("20 concurrent approvals of one flow produce exactly one code", async () => {
     const { handle, user, client } = await flow();
@@ -87,6 +109,21 @@ describe("authorization_code consent (P0)", () => {
     expect((await submit()).status).toBe(302);
     expect(await prisma.grant.count()).toBe(1);
     expect(await prisma.authCode.count()).toBe(1);
+  });
+
+  it("the GET pins the listed claims on the request row; approval records them, not a claim added since", async () => {
+    const server = (await import("../resource-registry.js")).lookupResourceServer(RESOURCE)!;
+    server.releaseClaims = ["email"];
+    try {
+      const { handle } = await flow();
+      const submit = await consentForm(handle);
+      expect((await prisma.authorizationRequest.findUniqueOrThrow({ where: { handle } })).shownClaims).toEqual(["email"]);
+      server.releaseClaims = ["email", "groups"]; // after the page was shown
+      expect((await submit()).status).toBe(302);
+      expect((await prisma.grant.findFirstOrThrow()).releasedClaims).toEqual(["email"]);
+    } finally {
+      server.releaseClaims = [];
+    }
   });
 
   it("deny consumes the request, creates no grant and cannot be followed by an approval", async () => {

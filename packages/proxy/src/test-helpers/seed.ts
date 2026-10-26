@@ -2,6 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 import bcrypt from "bcryptjs";
 import { prisma } from "../db.js";
 import type { Prisma } from "../generated/prisma/client.js";
+import { loadRegistry } from "../resource-registry.js";
 
 let counter = 0;
 const uniq = () => `${Date.now().toString(36)}${(counter++).toString(36)}`;
@@ -87,4 +88,73 @@ export async function seedDeviceCode(over: Omit<Partial<Prisma.DeviceCodeUncheck
 
 export function seedDeniedClient(over: Partial<Prisma.DeniedClientCreateInput> & Pick<Prisma.DeniedClientCreateInput, "kind" | "value">) {
   return prisma.deniedClient.create({ data: { reason: "test", ...over } });
+}
+
+export interface SeedResourceServerOptions {
+  identifier?: string;
+  displayName?: string;
+  enabled?: boolean;
+  internal?: boolean;
+  releaseClaims?: string[];
+  /** The scopes the server declares in its metadata snapshot. */
+  scopes?: { name: string; description?: string; stepUp?: boolean; shortLived?: boolean; freshSignIn?: boolean }[];
+  /** Operator policy rows. */
+  policies?: { scopeName: string; shortLived?: boolean; freshSignIn?: boolean; requireGroups?: string[]; descriptionOverride?: string | null }[];
+  /** False seeds a server that has never been fetched (no snapshot). */
+  snapshot?: boolean;
+  /** A fetched document waiting for the operator (stored as pendingMetadata). */
+  pendingScopes?: { name: string; description?: string; stepUp?: boolean; shortLived?: boolean; freshSignIn?: boolean }[];
+  lastFetchError?: string | null;
+  metadataExpiresAt?: Date | null;
+  lastFetchAttemptAt?: Date | null;
+}
+
+/** An approved resource server with a metadata snapshot and policy rows, then
+ * `loadRegistry()` so lookups see it. Call it after truncateAll(). */
+export async function seedResourceServer(opts: SeedResourceServerOptions = {}) {
+  const identifier = opts.identifier ?? `https://mcp-${uniq()}.example.test/mcp`;
+  // The same nesting the metadata parser applies: fresh sign-in implies step-up implies short-lived.
+  const declare = (list: NonNullable<SeedResourceServerOptions["scopes"]>) => {
+    const scopes = list.map((s) => {
+      const freshSignIn = s.freshSignIn ?? false;
+      const stepUp = (s.stepUp ?? false) || freshSignIn;
+      return { name: s.name, description: s.description ?? `Use ${s.name}`, stepUp, shortLived: (s.shortLived ?? false) || stepUp, freshSignIn };
+    });
+    return {
+      resource: identifier,
+      resourceName: "Seeded server",
+      scopes,
+      scopesSupported: scopes.filter((s) => !s.stepUp).map((s) => s.name),
+      hasScopeDescriptions: true,
+    };
+  };
+  const metadata = declare(opts.scopes ?? [{ name: "read" }]);
+  const now = new Date();
+  const row = await prisma.resourceServer.create({
+    data: {
+      identifier,
+      displayName: opts.displayName ?? "Seeded server",
+      enabled: opts.enabled ?? true,
+      internal: opts.internal ?? false,
+      releaseClaims: opts.releaseClaims ?? [],
+      ...(opts.snapshot === false
+        ? {}
+        : { metadata, metadataFetchedAt: now, metadataExpiresAt: opts.metadataExpiresAt === undefined ? inMinutes(60) : opts.metadataExpiresAt }),
+      ...(opts.pendingScopes ? { pendingMetadata: declare(opts.pendingScopes), pendingSince: now } : {}),
+      lastFetchError: opts.lastFetchError ?? null,
+      lastFetchAttemptAt: opts.lastFetchAttemptAt ?? null,
+      approvedBy: "test",
+      scopePolicies: {
+        create: (opts.policies ?? []).map((p) => ({
+          scopeName: p.scopeName,
+          shortLived: p.shortLived ?? false,
+          freshSignIn: p.freshSignIn ?? false,
+          requireGroups: p.requireGroups ?? [],
+          descriptionOverride: p.descriptionOverride ?? null,
+        })),
+      },
+    },
+  });
+  await loadRegistry();
+  return { ...row, metadata };
 }

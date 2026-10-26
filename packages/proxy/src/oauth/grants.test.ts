@@ -216,6 +216,14 @@ describe("GET /grants and /auth/logout", () => {
     expect(r.headers.getSetCookie().join(";")).toContain("csrf_grants=");
   });
 
+  it("links to /admin for an admin and only for an admin", async () => {
+    m("grant", "findMany").mockResolvedValue([]);
+    m("localUser", "findUnique").mockResolvedValue({ isAdmin: true, isActive: true });
+    expect((await getPath(app.baseUrl, "/grants")).text).toContain('<a href="/admin">Admin</a>');
+    m("localUser", "findUnique").mockResolvedValue({ isAdmin: false, isActive: true });
+    expect((await getPath(app.baseUrl, "/grants")).text).not.toContain('href="/admin"');
+  });
+
   it("escapes hostile client names and scopes (P1)", async () => {
     resolve.mockResolvedValue(clientRow({ metadata: { client_name: "<img src=x onerror=alert(1)>" } }) as never);
     m("grant", "findMany").mockResolvedValue([{ id: "g1", clientId: CLIENT_ID, resource: RESOURCE, scopes: ["<b>x</b>"], grantedAt: new Date() }]);

@@ -103,15 +103,21 @@ function isLoopbackAddress(address: string, family: 4 | 6): boolean {
 
 const RATE_LIMIT_MAX = 10;
 const RATE_LIMIT_WINDOW_MS = 60 * 1000;
+
+// Two pools, so a flood of attacker-triggered CIMD fetches (via /oauth/authorize)
+// cannot use up the budget an operator's resource-metadata fetch needs for the
+// same host, nor the in-flight slots.
+export type FetchPool = "cimd" | "resource-metadata";
 const rateLimitWindows = new Map<string, { count: number; windowStart: number }>();
 
-function checkRateLimit(rawHostname: string): void {
+function checkRateLimit(pool: FetchPool, rawHostname: string): void {
   // Canonical key: "Example.com." and "example.com" are the same host.
   const hostname = rawHostname.toLowerCase().replace(/\.+$/, "");
+  const key = `${pool}\0${hostname}`;
   const now = Date.now();
-  const entry = rateLimitWindows.get(hostname);
+  const entry = rateLimitWindows.get(key);
   if (!entry || now - entry.windowStart >= RATE_LIMIT_WINDOW_MS) {
-    rateLimitWindows.set(hostname, { count: 1, windowStart: now });
+    rateLimitWindows.set(key, { count: 1, windowStart: now });
     return;
   }
   if (entry.count >= RATE_LIMIT_MAX) {
@@ -127,8 +133,8 @@ function checkRateLimit(rawHostname: string): void {
 // never keeps the process alive on its own.
 setInterval(() => {
   const now = Date.now();
-  for (const [hostname, entry] of rateLimitWindows) {
-    if (now - entry.windowStart >= RATE_LIMIT_WINDOW_MS) rateLimitWindows.delete(hostname);
+  for (const [key, entry] of rateLimitWindows) {
+    if (now - entry.windowStart >= RATE_LIMIT_WINDOW_MS) rateLimitWindows.delete(key);
   }
 }, RATE_LIMIT_WINDOW_MS).unref();
 
@@ -194,7 +200,7 @@ async function lookupWithDeadline(hostname: string, signal: AbortSignal): Promis
   }
 }
 
-async function resolveAndValidate(rawHostname: string, isHttp: boolean, signal: AbortSignal): Promise<ResolvedAddress> {
+async function resolveAndValidate(rawHostname: string, isHttp: boolean, allowPrivateNetwork: boolean, signal: AbortSignal): Promise<ResolvedAddress> {
   const hostname = stripBrackets(rawHostname);
   let records: dns.LookupAddress[];
   try {
@@ -218,7 +224,7 @@ async function resolveAndValidate(rawHostname: string, isHttp: boolean, signal: 
     if (!allLoopback) {
       reject("insecure_http_not_loopback", `http: is only allowed to a loopback address (${hostname})`);
     }
-  } else {
+  } else if (!allowPrivateNetwork) {
     for (const record of records) {
       const family = record.family === 6 ? 6 : 4;
       if (isBlockedAddress(record.address, family)) {
@@ -350,6 +356,17 @@ export interface SafeFetchOptions {
   // response a rejection — CIMD (T9) uses that, since a document accepted from
   // a redirect target is not what the client_id URL actually serves.
   maxRedirects?: number;
+  // Skips only the private/loopback/link-local address block (and so also lets an
+  // https: URL reach such an address). Protocol, size, timeout, redirect, rate-limit
+  // and concurrency limits, and the DNS pinning, all still apply, and applies to
+  // every redirect hop. Exists solely for operator-approved targets (an MCP server
+  // on the same network); never pass it for a URL an attacker can choose. CIMD must
+  // never set it.
+  allowPrivateNetwork?: boolean;
+  // Which rate-limit namespace and concurrency pool the call is charged to.
+  // Defaults to "cimd" (client metadata documents, which an unauthenticated
+  // caller can trigger); operator-driven resource-metadata fetches use their own.
+  pool?: FetchPool;
 }
 
 const DEFAULT_MAX_BYTES = 16 * 1024;
@@ -358,25 +375,28 @@ const DEFAULT_MAX_REDIRECTS = 1;
 
 // Global cap on in-flight calls. Hostnames are attacker-influenced and DNS
 // lookups hold libuv threadpool threads, so excess calls fail fast instead of queuing.
+// The cap applies per pool.
 export const MAX_CONCURRENT_FETCHES = 8;
-let inFlight = 0;
+const inFlight: Record<FetchPool, number> = { cimd: 0, "resource-metadata": 0 };
 
 export async function safeFetchJson(url: string, options: SafeFetchOptions = {}): Promise<unknown> {
-  if (inFlight >= MAX_CONCURRENT_FETCHES) {
+  const pool = options.pool ?? "cimd";
+  if (inFlight[pool] >= MAX_CONCURRENT_FETCHES) {
     reject("busy", `Too many concurrent metadata fetches (${MAX_CONCURRENT_FETCHES})`);
   }
-  inFlight++;
+  inFlight[pool]++;
   try {
-    return await safeFetchJsonInner(url, options);
+    return await safeFetchJsonInner(url, options, pool);
   } finally {
-    inFlight--;
+    inFlight[pool]--;
   }
 }
 
-async function safeFetchJsonInner(url: string, options: SafeFetchOptions): Promise<unknown> {
+async function safeFetchJsonInner(url: string, options: SafeFetchOptions, pool: FetchPool): Promise<unknown> {
   const maxBytes = options.maxBytes ?? DEFAULT_MAX_BYTES;
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const maxRedirects = options.maxRedirects ?? DEFAULT_MAX_REDIRECTS;
+  const allowPrivateNetwork = options.allowPrivateNetwork ?? false;
   // One deadline for the whole call, including any redirect hop — "total
   // timeout ... covering connect and read" is the budget for safeFetchJson()
   // as a whole, not per-hop.
@@ -385,8 +405,8 @@ async function safeFetchJsonInner(url: string, options: SafeFetchOptions): Promi
   let currentUrl = url;
   for (let redirectCount = 0; ; redirectCount++) {
     const parsed = parseAndValidateScheme(currentUrl);
-    checkRateLimit(parsed.hostname);
-    const resolved = await resolveAndValidate(parsed.hostname, parsed.protocol === "http:", signal);
+    checkRateLimit(pool, parsed.hostname);
+    const resolved = await resolveAndValidate(parsed.hostname, parsed.protocol === "http:", allowPrivateNetwork, signal);
 
     let response: RawResponse;
     try {

@@ -1,0 +1,29 @@
+<%- include('_head', { title: 'Audit log' }) %>
+    <table>
+      <thead><tr><th>When (UTC)</th><th>Actor</th><th>Action</th><th>Target</th><th>Change</th></tr></thead>
+      <tbody>
+      <% if (entries.length === 0) { %><tr><td colspan="5">Nothing recorded.</td></tr><% } %>
+      <% entries.forEach(function (e) { %>
+        <tr>
+          <td><%= e.at %></td>
+          <td><%= e.actor %></td>
+          <td><%= e.action %></td>
+          <td><code><%= e.target %></code></td>
+          <td>
+            <% if (e.before !== null || e.after !== null) { %>
+            <details><summary>show</summary>
+              <% if (e.before !== null) { %><p class="muted">Before</p><pre><%= e.before %></pre><% } %>
+              <% if (e.after !== null) { %><p class="muted">After</p><pre><%= e.after %></pre><% } %>
+            </details>
+            <% } %>
+          </td>
+        </tr>
+      <% }); %>
+      </tbody>
+    </table>
+    <div class="pager">
+      <% if (page > 1) { %><a href="/admin/audit?page=<%= page - 1 %>">Newer</a><% } %>
+      <span class="muted">Page <%= page %></span>
+      <% if (hasNext) { %><a href="/admin/audit?page=<%= page + 1 %>">Older</a><% } %>
+    </div>
+<%- include('_foot') %>

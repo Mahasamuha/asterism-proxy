@@ -244,8 +244,30 @@ describe("happy path and identity-provider dispatch (P1)", () => {
   it("OIDC is the default when both providers are enabled", async () => {
     config.enableOidc = true;
     const r = await authorize();
-    expect(upstream).toHaveBeenCalledWith(created().mock.calls[0]![0].data.handle);
+    expect(upstream).toHaveBeenCalledWith(created().mock.calls[0]![0].data.handle, { fresh: false });
     expect(r.headers.get("location")).toBe("https://idp.example.test/auth");
+  });
+
+  it("a request without a fresh-sign-in scope is not marked and does not force a re-authentication", async () => {
+    config.enableOidc = true;
+    await authorize({ scope: "read admin" });
+    expect(created().mock.calls[0]![0].data.requireFreshLogin).toBe(false);
+    expect(upstream).toHaveBeenCalledWith(created().mock.calls[0]![0].data.handle, { fresh: false });
+  });
+
+  it("a fresh-sign-in scope marks the request and forces the upstream sign-in to re-authenticate", async () => {
+    config.enableOidc = true;
+    await authorize({ scope: "read root" });
+    const data = created().mock.calls[0]![0].data;
+    expect(data.requireFreshLogin).toBe(true);
+    expect(upstream).toHaveBeenCalledWith(data.handle, { fresh: true });
+  });
+
+  it("a fresh-sign-in scope with local accounts only still marks the request (the password form always asks)", async () => {
+    const r = await authorize({ scope: "root" });
+    const data = created().mock.calls[0]![0].data;
+    expect(data.requireFreshLogin).toBe(true);
+    expect(r.headers.get("location")).toBe(`/auth/login?flow=${data.handle}`);
   });
 
   it("?idp=local is ignored when OIDC is enabled: the link cannot force password login", async () => {
