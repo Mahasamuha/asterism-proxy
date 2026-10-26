@@ -25,6 +25,13 @@ model User {
   // from the per-username lockout.
   deviceEpoch     Int       @default(0) @map("device_epoch")
   lastKnownClaims Json?     @map("last_known_claims")
+  // The upstream OIDC refresh token (needs offline_access), used to re-check the
+  // user with the identity provider whenever asterism refreshes (identity/upstream-refresh.ts).
+  // Stored in plaintext, the same threat model as SigningKey.privateJwk: whoever
+  // can read the database can already mint tokens.
+  upstreamRefreshToken String?   @map("upstream_refresh_token")
+  // Last successful sign-in or upstream re-check.
+  upstreamCheckedAt    DateTime? @map("upstream_checked_at")
 
   localUser     LocalUser?
   grants        Grant[]
@@ -232,6 +239,10 @@ model Grant {
   clientId  String    @map("client_id")
   resource  String
   scopes    String[]
+  // Identity claims the user saw on the consent page, as a union across
+  // approvals. Access tokens carry only claims listed here AND still released
+  // by the registry.
+  releasedClaims String[] @default([]) @map("released_claims")
   grantedAt DateTime  @default(now()) @map("granted_at")
   revokedAt DateTime? @map("revoked_at")
 

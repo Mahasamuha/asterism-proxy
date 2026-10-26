@@ -33,7 +33,7 @@ const verifier = createVerifier({
 
 try {
   const principal = await verifier.verify(token);
-  // principal: { subject, clientId, scopes, expiresAt }
+  // principal: { subject, clientId, scopes, expiresAt, claims }
 } catch (err) {
   if (err instanceof TokenValidationError) console.warn(err.reason);
   throw err;
@@ -63,6 +63,34 @@ app.use("/mcp", createBearerAuthMiddleware(config));
 If the signing keys can't be fetched (`jwks_unavailable`), the middleware answers **503** with `Retry-After: 30` and a JSON error, and no `WWW-Authenticate` challenge, because the token was not shown to be bad and re-authenticating won't help. Every other failure stays 401.
 
 On success the middleware sets `req.principal`; type the request as `AuthenticatedRequest`. Browser-based MCP clients can only read the challenge if your CORS config lists `WWW-Authenticate` in `Access-Control-Expose-Headers`.
+
+## Identity claims
+
+`principal.claims` holds every payload claim except the registered/protocol ones (`iss`, `sub`, `aud`, `exp`, `nbf`, `iat`, `jti`, `client_id`, `scope`), for example `email`, `groups` or `constellation_username` when the proxy releases them to your server. It is always present (an empty object when there are none). Values are passed through as-is; validate their shape yourself.
+
+It is a fresh plain object per call. Keys named `__proto__`, `constructor` and `prototype` are dropped, so a hostile payload can't tamper with prototypes downstream.
+
+## Advertising scopes
+
+```ts
+app.get(protectedResourceMetadataPath(config.audience), protectedResourceMetadataHandler(config, { scopesSupported: ["read", "write"] }));
+```
+
+The optional second argument adds `scopes_supported` to the metadata; without it the member is omitted. Claude.ai requests exactly the scopes listed there, so leave step-up-only scopes such as `admin` out.
+
+## Step-up (`insufficient_scope`)
+
+```ts
+import { requireScopes, sendInsufficientScope } from "@mahasamuha/asterism-verify";
+
+app.use("/mcp", createBearerAuthMiddleware(config));
+app.post("/mcp/admin", requireScopes(config, "admin"), handler);
+
+// or by hand, inside a handler:
+sendInsufficientScope(res, config, ["admin"], "Admin scope required");
+```
+
+A missing scope answers **403** with `WWW-Authenticate: Bearer realm="<aud>", resource_metadata="<url>", error="insufficient_scope", scope="admin"` (RFC 6750 §3.1) and a JSON `{ error, error_description }` body. `requireScopes` must run after the bearer middleware; with no `req.principal` it fails closed with the same 401 challenge. Scope strings containing whitespace, `"` or a backslash throw when the middleware is created (or when `sendInsufficientScope` is called).
 
 ## Revocation
 

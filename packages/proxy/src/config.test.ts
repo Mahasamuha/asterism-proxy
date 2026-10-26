@@ -28,6 +28,30 @@ describe("ISSUER_URL", () => {
   });
 });
 
+describe("OIDC_CLAIM_MAP", () => {
+  it("is empty when unset or blank", async () => {
+    expect((await loadConfigWith({ OIDC_CLAIM_MAP: undefined })).claimMap).toEqual({});
+    expect((await loadConfigWith({ OIDC_CLAIM_MAP: "  " })).claimMap).toEqual({});
+  });
+
+  it("parses released=upstream pairs, trimming whitespace", async () => {
+    expect((await loadConfigWith({ OIDC_CLAIM_MAP: "groups=roles, email = mail" })).claimMap).toEqual({ groups: "roles", email: "mail" });
+  });
+
+  it.each(["groups", "groups=", "=roles", "a=b=c", "a=b,", "a=b,,c=d", ","])("rejects malformed %j", async (value) => {
+    await expect(loadConfigWith({ OIDC_CLAIM_MAP: value })).rejects.toThrow(/OIDC_CLAIM_MAP/);
+  });
+
+  it("rejects a released name mapped twice", async () => {
+    await expect(loadConfigWith({ OIDC_CLAIM_MAP: "groups=roles,groups=teams" })).rejects.toThrow(/more than once/);
+  });
+
+  it("treats __proto__ as an ordinary name", async () => {
+    const map = (await loadConfigWith({ OIDC_CLAIM_MAP: "__proto__=x" })).claimMap;
+    expect(Object.keys(map)).toEqual(["__proto__"]);
+  });
+});
+
 describe("identity providers", () => {
   it("rejects both off", async () => {
     await expect(loadConfigWith({ ENABLE_OIDC: "false", ENABLE_LOCAL_ACCOUNTS: "false" })).rejects.toThrow(/at least one identity provider/);
@@ -53,8 +77,22 @@ describe("identity providers", () => {
       OIDC_CLIENT_ID: "cid",
       OIDC_CLIENT_SECRET: "secret",
     });
-    expect(c.oidc).toEqual({ issuer: "https://idp.example.com", clientId: "cid", clientSecret: "secret" });
+    expect(c.oidc).toEqual({ issuer: "https://idp.example.com", clientId: "cid", clientSecret: "secret", subjectClaim: "sub" });
   });
+
+  it("takes the subject claim from OIDC_SUBJECT_CLAIM, rejecting an empty one", async () => {
+    const oidcEnv = { ENABLE_OIDC: "true", OIDC_ISSUER: "https://idp.example.com", OIDC_CLIENT_ID: "cid", OIDC_CLIENT_SECRET: "secret" };
+    expect((await loadConfigWith({ ...oidcEnv, OIDC_SUBJECT_CLAIM: "oid" })).oidc?.subjectClaim).toBe("oid");
+    await expect(loadConfigWith({ ...oidcEnv, OIDC_SUBJECT_CLAIM: "" })).rejects.toThrow(/OIDC_SUBJECT_CLAIM/);
+  });
+
+  it.each(["email", "preferred_username", "name", "given_name", "family_name", "nickname", "upn", "unique_name", "Email"])(
+    "refuses the mutable OIDC_SUBJECT_CLAIM %s",
+    async (claim) => {
+      const oidcEnv = { ENABLE_OIDC: "true", OIDC_ISSUER: "https://idp.example.com", OIDC_CLIENT_ID: "cid", OIDC_CLIENT_SECRET: "secret" };
+      await expect(loadConfigWith({ ...oidcEnv, OIDC_SUBJECT_CLAIM: claim })).rejects.toThrow(/immutable and unique/);
+    }
+  );
 
   it.each(["OIDC_ISSUER", "OIDC_CLIENT_ID", "OIDC_CLIENT_SECRET"])("requires %s when OIDC is on", async (missing) => {
     const env: Record<string, string | undefined> = {

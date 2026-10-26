@@ -5,6 +5,12 @@ export interface AuthenticatedRequest extends Request {
   principal?: Principal;
 }
 
+export interface ProtectedResourceMetadataOptions {
+  /** Emitted as `scopes_supported`. List only the scopes clients should request by default:
+   * Claude.ai requests exactly these, so leave step-up-only scopes (e.g. `admin`) out. */
+  scopesSupported?: string[];
+}
+
 const WELL_KNOWN_PRS = "/.well-known/oauth-protected-resource";
 
 /** RFC 9728 §3.1 path of the metadata document for `audience`: the well-known
@@ -22,6 +28,20 @@ export function protectedResourceMetadataUrl(audience: string): string {
   return `${new URL(audience).origin}${protectedResourceMetadataPath(audience)}`;
 }
 
+/** Scope strings are written into a quoted header parameter and a space-separated list, so
+ * whitespace, `"` and `\` (and the empty string) are rejected. Throws on the first bad one. */
+function assertValidScopes(scopes: readonly string[]): void {
+  for (const scope of scopes) {
+    if (typeof scope !== "string" || !/^[^\s"\\]+$/.test(scope)) {
+      throw new Error(`Invalid scope ${JSON.stringify(scope)}: must be non-empty with no whitespace, '"' or backslash`);
+    }
+  }
+}
+
+function bearerChallenge(audience: string): string {
+  return `Bearer realm="${audience}", resource_metadata="${protectedResourceMetadataUrl(audience)}"`;
+}
+
 /** Bearer-token verification middleware. On success, attaches `principal` to
  * the request and calls next(); on failure, responds 401 with a
  * WWW-Authenticate challenge whose `resource_metadata` points at the RFC 9728
@@ -31,7 +51,7 @@ export function protectedResourceMetadataUrl(audience: string): string {
  * that is the resource-server app's responsibility, not this middleware's. */
 export function createBearerAuthMiddleware(config: VerifierConfig): RequestHandler {
   const verifier = createVerifier(config);
-  const challenge = `Bearer realm="${config.audience}", resource_metadata="${protectedResourceMetadataUrl(config.audience)}"`;
+  const challenge = bearerChallenge(config.audience);
 
   return (req: Request, res: Response, next: NextFunction): void => {
     const authHeader = req.headers["authorization"];
@@ -66,17 +86,58 @@ export function createBearerAuthMiddleware(config: VerifierConfig): RequestHandl
   };
 }
 
+/** Responds 403 `insufficient_scope` (RFC 6750 §3.1) with a challenge that names the
+ * `requiredScopes` and carries the RFC 9728 `resource_metadata` URL, so a client can step up.
+ * Throws on a scope containing whitespace, `"` or `\`. */
+export function sendInsufficientScope(
+  res: Response,
+  config: VerifierConfig,
+  requiredScopes: string[],
+  description = "The access token does not have the required scope",
+): void {
+  assertValidScopes(requiredScopes);
+  res.set("WWW-Authenticate", `${bearerChallenge(config.audience)}, error="insufficient_scope", scope="${requiredScopes.join(" ")}"`);
+  res.status(403).json({ error: "insufficient_scope", error_description: description });
+}
+
+/** Middleware that requires every one of `scopes` on `req.principal`; mount it after
+ * createBearerAuthMiddleware. Missing scopes get a 403 via sendInsufficientScope. With no
+ * principal it fails closed with the same 401 challenge as the bearer middleware. Throws at
+ * creation time on an invalid scope string. */
+export function requireScopes(config: VerifierConfig, ...scopes: string[]): RequestHandler {
+  assertValidScopes(scopes);
+  const challenge = bearerChallenge(config.audience);
+
+  return (req: Request, res: Response, next: NextFunction): void => {
+    const principal = (req as AuthenticatedRequest).principal;
+    if (!principal) {
+      res.set("WWW-Authenticate", challenge);
+      res.status(401).json({ error: "unauthorized", error_description: "Bearer token required" });
+      return;
+    }
+    if (scopes.some((s) => !principal.scopes.includes(s))) {
+      sendInsufficientScope(res, config, scopes);
+      return;
+    }
+    next();
+  };
+}
+
 /** RFC 9728 OAuth 2.0 Protected Resource Metadata for this server. Mount at
  * GET protectedResourceMetadataPath(config.audience) so that `resource` equals
  * the audience exactly (§3.3), e.g.
  * `app.get(protectedResourceMetadataPath(aud), protectedResourceMetadataHandler(cfg))`.
- * The handler itself is path-agnostic, so existing callers keep working. */
-export function protectedResourceMetadataHandler(config: VerifierConfig): RequestHandler {
+ * The handler itself is path-agnostic, so existing callers keep working. The optional second
+ * argument adds `scopes_supported`; without it that member is omitted. */
+export function protectedResourceMetadataHandler(config: VerifierConfig, options: ProtectedResourceMetadataOptions = {}): RequestHandler {
+  const { scopesSupported } = options;
+  if (scopesSupported) assertValidScopes(scopesSupported);
   return (_req: Request, res: Response) => {
     res.json({
       resource: config.audience,
       authorization_servers: [config.issuer],
       bearer_methods_supported: ["header"],
+      ...(scopesSupported && { scopes_supported: scopesSupported }),
     });
   };
 }

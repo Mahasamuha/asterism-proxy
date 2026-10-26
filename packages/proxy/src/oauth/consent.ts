@@ -4,7 +4,8 @@ import escHtml from "escape-html";
 import { prisma } from "../db.js";
 import { createLogger } from "../logger.js";
 import { resolveClient } from "../clients/cimd.js";
-import { lookupResourceServer } from "../resource-registry.js";
+import { lookupResourceServer, type ResourceServer } from "../resource-registry.js";
+import { groupsSatisfy, loadUserGroups } from "../identity/released-claims.js";
 import { issueCsrfToken, verifyCsrfToken } from "../identity/csrf.js";
 import { config } from "../config.js";
 import { isSelfLogin } from "../identity/self-login.js";
@@ -139,7 +140,8 @@ async function completeDeviceFlow(
   res: Response,
   authRequest: FlowRequest,
   approved: boolean,
-  upsertGrant?: (tx: Tx) => Promise<string>
+  upsertGrant?: (tx: Tx) => Promise<string>,
+  deniedMessage = "Access denied."
 ): Promise<void> {
   const userCode = authRequest.state;
   if (!userCode) {
@@ -171,7 +173,7 @@ async function completeDeviceFlow(
   }
 
   log.info({ userId: authRequest.subject, clientId: authRequest.clientId, resource: authRequest.resource, approved }, "Device consent completed");
-  renderDeviceDonePage(res, approved ? "Access granted." : "Access denied.");
+  renderDeviceDonePage(res, approved ? "Access granted." : deniedMessage);
 }
 
 /** Consumes the request and mints the code atomically. `resolveGrantId` runs
@@ -219,13 +221,40 @@ async function issueAuthCodeAndRedirect(
 }
 
 /** Deny path: consume first so a consumed request can't also redirect. */
-async function denyAndRedirect(res: Response, authRequest: FlowRequest): Promise<void> {
+async function denyAndRedirect(res: Response, authRequest: FlowRequest, error = "access_denied"): Promise<void> {
   const consumed = await prisma.$transaction((tx) => consumeRequest(tx, authRequest.handle));
   if (!consumed) {
     renderErrorPage(res, REQUEST_USED_MESSAGE);
     return;
   }
-  redirectWithError(res, authRequest, "access_denied");
+  redirectWithError(res, authRequest, error);
+}
+
+/** A scope with `requireGroups` may only be issued to a user whose normalized
+ * `groups` claim intersects it. Returns the first requested scope the user may
+ * not have, or null. Checked on both GET and POST approve. */
+async function findForbiddenScope(authRequest: FlowRequest, resourceServer: ResourceServer): Promise<string | null> {
+  const required = (name: string) => resourceServer.scopes.find((s) => s.name === name)?.requireGroups;
+  const gated = authRequest.scopes.filter((name) => required(name) !== undefined);
+  if (gated.length === 0) return null;
+  const groups = await loadUserGroups(authRequest.subject);
+  return gated.find((name) => !groupsSatisfy(groups, required(name))) ?? null;
+}
+
+/** Refuses a flow the user is not permitted to complete. Request consumed, as
+ * for Deny. The device flow tells the client only access_denied, same as a
+ * manual Deny. The redirect flow must NOT go back to the client: with SSO that
+ * needs no interaction, so a distinct error would tell any client whether the
+ * victim is in a group. The proxy's own page answers instead. */
+async function refuseForbiddenScope(res: Response, authRequest: FlowRequest, scope: string): Promise<void> {
+  log.info({ userId: authRequest.subject, clientId: authRequest.clientId, resource: authRequest.resource, scope }, "Consent refused: user not in a required group");
+  incrementCounter("consent_total", { outcome: "forbidden_scope" });
+  if (isDeviceFlow(authRequest)) {
+    await completeDeviceFlow(res, authRequest, false, undefined, `You are not permitted to grant ${scope}`);
+  } else {
+    const consumed = await prisma.$transaction((tx) => consumeRequest(tx, authRequest.handle));
+    renderErrorPage(res, consumed ? `You are not permitted to grant ${scope}.` : REQUEST_USED_MESSAGE);
+  }
 }
 
 async function findLiveGrant(userId: string, clientId: string, resource: string) {
@@ -253,6 +282,12 @@ consentRouter.get("/oauth/consent", async (req: Request, res: Response) => {
   const resourceServer = lookupResourceServer(authRequest.resource);
   if (!resourceServer) {
     renderErrorPage(res, "The requested resource is no longer registered.");
+    return;
+  }
+
+  const forbiddenScope = await findForbiddenScope(authRequest, resourceServer);
+  if (forbiddenScope) {
+    await refuseForbiddenScope(res, authRequest, forbiddenScope);
     return;
   }
 
@@ -314,6 +349,7 @@ consentRouter.get("/oauth/consent", async (req: Request, res: Response) => {
     redirectHost,
     isLoopbackRedirect,
     resourceServerName: resourceServer.name,
+    releasedClaims: resourceServer.releaseClaims,
     scopes,
     unverified: client.trustLevel === "unverified",
     // The name, logo and domain shown come from the client's own metadata
@@ -358,8 +394,15 @@ consentRouter.post("/oauth/consent", async (req: Request, res: Response) => {
     renderErrorPage(res, "This client could not be verified.");
     return;
   }
-  if (!lookupResourceServer(authRequest.resource)) {
+  const resourceServer = lookupResourceServer(authRequest.resource);
+  if (!resourceServer) {
     renderErrorPage(res, "The requested resource is no longer registered.");
+    return;
+  }
+  // Defence in depth: the user's groups may have changed since the GET.
+  const forbiddenScope = await findForbiddenScope(authRequest, resourceServer);
+  if (forbiddenScope) {
+    await refuseForbiddenScope(res, authRequest, forbiddenScope);
     return;
   }
 
@@ -376,10 +419,13 @@ consentRouter.post("/oauth/consent", async (req: Request, res: Response) => {
     // one (including any persisted before this rule existed).
     const persistable = (scope: string) => !isShortLivedScope(authRequest.resource, scope);
     const mergedScopes = Array.from(new Set([...(live?.scopes ?? []), ...authRequest.scopes].filter(persistable)));
+    // The consent page listed the resource server's current releaseClaims, so
+    // approving consents to exactly those, on top of any already consented to.
+    const mergedClaims = Array.from(new Set([...(live?.releasedClaims ?? []), ...resourceServer.releaseClaims]));
     const grant = await tx.grant.upsert({
       where: { userId_clientId_resource: { userId: authRequest.subject, clientId: authRequest.clientId, resource: authRequest.resource } },
-      create: { userId: authRequest.subject, clientId: authRequest.clientId, resource: authRequest.resource, scopes: mergedScopes },
-      update: { scopes: mergedScopes, revokedAt: null },
+      create: { userId: authRequest.subject, clientId: authRequest.clientId, resource: authRequest.resource, scopes: mergedScopes, releasedClaims: mergedClaims },
+      update: { scopes: mergedScopes, releasedClaims: mergedClaims, revokedAt: null },
     });
     return grant.id;
   };
