@@ -19,7 +19,7 @@ let n = 0;
 let jwksUri: string;
 let clientId: string;
 let key: TestKey;
-let served: { body: unknown; headers: Record<string, string> };
+let served: { body: unknown; headers: Record<string, string | string[]> };
 
 beforeEach(async () => {
   n++;
@@ -242,16 +242,28 @@ describe("client JWKS cache lifetime (P1)", () => {
     expect(fetchJson).toHaveBeenCalledTimes(2);
   });
 
-  it("max-age=60: cached until it lapses, then refetched", async () => {
+  it("a small max-age is floored at 5 minutes, like CIMD", async () => {
     vi.useFakeTimers({ toFake: ["Date"] });
-    served.headers = { "cache-control": "public, max-age=60" };
+    served.headers = { "cache-control": "public, max-age=1" };
     await verify(await assertion());
-    vi.setSystemTime(Date.now() + 59_000);
+    vi.setSystemTime(Date.now() + 299_000);
     await verify(await assertion());
     expect(fetchJson).toHaveBeenCalledTimes(1);
     vi.setSystemTime(Date.now() + 2_000);
     await verify(await assertion());
     expect(fetchJson).toHaveBeenCalledTimes(2);
+  });
+
+  it("a header sent as an array is joined, so no-store in a later element still applies", async () => {
+    served.headers = { "cache-control": ["public", "no-store"] };
+    await useTwice();
+    expect(fetchJson).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(["max-age=", "max-age=abc", "max-age=1.5", "max-age=-1"])("%s is ignored: the default lifetime applies", async (cc) => {
+    served.headers = { "cache-control": cc };
+    await useTwice();
+    expect(fetchJson).toHaveBeenCalledTimes(1);
   });
 
   it("a huge max-age is capped at 24 hours", async () => {

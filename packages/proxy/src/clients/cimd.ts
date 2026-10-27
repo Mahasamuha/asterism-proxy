@@ -259,8 +259,10 @@ export function cacheLifetimeMs(cacheControl: string | string[] | undefined): nu
   if (directives.includes("no-store") || directives.includes("no-cache")) return 0;
   const maxAge = directives.find((s) => s.startsWith("max-age="));
   if (!maxAge) return DEFAULT_TTL_MS;
-  const seconds = Number(maxAge.slice("max-age=".length));
-  if (!Number.isFinite(seconds) || seconds < 0) return DEFAULT_TTL_MS;
+  const raw = maxAge.slice("max-age=".length);
+  // Only a non-negative integer counts; "max-age=" (empty) is not "max-age=0".
+  if (!/^\d+$/.test(raw)) return DEFAULT_TTL_MS;
+  const seconds = Number(raw);
   if (seconds === 0) return 0;
   return Math.min(Math.max(seconds * 1000, MIN_TTL_MS), DEFAULT_TTL_MS);
 }
