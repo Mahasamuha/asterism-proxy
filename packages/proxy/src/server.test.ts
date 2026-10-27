@@ -12,7 +12,12 @@ const oidc = vi.hoisted(() => ({
   handleUpstreamCallback: vi.fn(),
   startUpstreamAuth: vi.fn(),
 }));
+const logs = vi.hoisted(() => ({ warn: vi.fn() }));
 vi.mock("./db.js", () => db);
+vi.mock("./logger.js", () => {
+  const log = { debug: vi.fn(), info: vi.fn(), error: vi.fn(), warn: logs.warn, child: () => log };
+  return { logger: log, createLogger: () => log };
+});
 vi.mock("./identity/oidc.js", () => oidc);
 
 import { startApp, type StartedApp } from "./test-helpers/app.js";
@@ -150,6 +155,25 @@ describe("trust proxy", () => {
     await app?.close();
     expect(await trustProxySetting("loopback")).toBe("loopback");
   });
+
+  it("P1 warns once, and only, when X-Forwarded-For arrives while TRUST_PROXY is unset", async () => {
+    const base = await boot({ TRUST_PROXY: undefined });
+    const forwarded = (await import("./server.js")).app;
+    await fetch(`${base}/health`);
+    expect(logs.warn).not.toHaveBeenCalled();
+    const res = await fetch(`${base}/health`, { headers: { "x-forwarded-for": "203.0.113.9" } });
+    expect(res.status).toBe(200);
+    await fetch(`${base}/health`, { headers: { "x-forwarded-for": "203.0.113.10" } });
+    expect(logs.warn).toHaveBeenCalledTimes(1);
+    expect(String(logs.warn.mock.calls[0]?.[0])).toMatch(/TRUST_PROXY/);
+    expect(forwarded.get("trust proxy")).toBeFalsy();
+  });
+
+  it("P1 does not warn when TRUST_PROXY is set", async () => {
+    const base = await boot({ TRUST_PROXY: "1" });
+    await fetch(`${base}/health`, { headers: { "x-forwarded-for": "203.0.113.9" } });
+    expect(logs.warn).not.toHaveBeenCalled();
+  });
 });
 
 describe("request id and security headers", () => {
@@ -212,6 +236,17 @@ describe("request id and security headers", () => {
     const res = await fetch(`${base}/oauth/consent`, { method: "POST" });
     expect(res.status).toBe(400);
     expect(res.headers.get("content-security-policy")).toBe(CSP);
+  });
+
+  it("P1 dynamic responses are no-store, while /assets stays cacheable and the JWKS keeps its own max-age", async () => {
+    const base = await boot();
+    for (const path of ["/health", "/nope"]) {
+      expect((await fetch(`${base}${path}`)).headers.get("cache-control"), path).toBe("no-store");
+    }
+    const bad = await fetch(`${base}/oauth/token`, { method: "POST", headers: { "content-type": "application/json" }, body: "{" });
+    expect(bad.headers.get("cache-control")).toBe("no-store");
+    expect((await fetch(`${base}/assets/mahasamuha.css`)).headers.get("cache-control")).toBe("public, max-age=86400");
+    expect((await fetch(`${base}/assets/fonts/Geist-Variable.woff2`)).headers.get("cache-control")).toBe("public, max-age=86400");
   });
 
   it("serves the stylesheet, fonts and brand marks under /assets with the strict CSP, and nothing else there", async () => {

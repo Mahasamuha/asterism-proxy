@@ -56,6 +56,9 @@ app.use((_req: Request, res: Response, next: NextFunction) => {
   res.set("Referrer-Policy", "no-referrer");
   res.set("Content-Security-Policy", CONTENT_SECURITY_POLICY);
   if (sendHsts) res.set("Strict-Transport-Security", "max-age=31536000");
+  // Login, consent, account and device pages carry CSRF tokens and flow handles. Routes
+  // that want caching (JWKS) and the static handler below set their own value over this.
+  res.set("Cache-Control", "no-store");
   next();
 });
 
@@ -66,6 +69,17 @@ app.use(express.urlencoded({ extended: true }));
 // proxy's address, so every client shares one login-throttle bucket (T7).
 if (config.trustProxy !== undefined) {
   app.set("trust proxy", config.trustProxy);
+} else {
+  // Without TRUST_PROXY, everything behind an ingress shares one req.ip (one rate-limit and
+  // login-throttle bucket). A forwarded request is the sign of that setup; say so once.
+  let warned = false;
+  app.use((req: Request, _res: Response, next: NextFunction) => {
+    if (!warned && req.headers["x-forwarded-for"] !== undefined) {
+      warned = true;
+      log.warn("Received a request with X-Forwarded-For but TRUST_PROXY is not set: all clients behind the proxy share one IP for rate limiting and the login throttle. Set TRUST_PROXY to the number of proxy hops or the proxy's address.");
+    }
+    next();
+  });
 }
 
 // COOKIE_SECRET (required, validated in config.ts) signs the session and CSRF
@@ -74,7 +88,15 @@ app.use(cookieParser(config.cookieSecret));
 
 // The admin UI's stylesheet and fonts (src/public, copied into dist by the
 // build). Static files only: no directory index, no trailing-slash redirect.
-app.use("/assets", express.static(path.join(__dirname, "public"), { index: false, redirect: false, maxAge: "1d" }));
+app.use(
+  "/assets",
+  express.static(path.join(__dirname, "public"), {
+    index: false,
+    redirect: false,
+    // Overrides the global no-store (serve-static leaves an already-set Cache-Control alone).
+    setHeaders: (res) => res.setHeader("Cache-Control", "public, max-age=86400"),
+  }),
+);
 
 app.get("/health", (_req: Request, res: Response) => {
   res.status(200).json({ status: "ok" });
