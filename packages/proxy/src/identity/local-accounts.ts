@@ -165,7 +165,7 @@ async function hashPassword(password: string): Promise<string> {
  * account exists and no token is configured. */
 export async function warnIfSetupUnprotected(): Promise<boolean> {
   if (config.setupToken !== undefined || (await localAccountsExist())) return false;
-  log.warn("No local account exists and SETUP_TOKEN is not set: anyone who can reach /setup can create the first (admin) account. Set SETUP_TOKEN (at least 32 characters) or create the account before exposing this instance.");
+  log.warn("No local account exists and SETUP_TOKEN is not set: anyone who can reach /setup can create the first local account (a normal user; admin is granted only with asterism-cli local-user set-admin). Set SETUP_TOKEN (at least 32 characters) or create the account before exposing this instance.");
   return true;
 }
 
