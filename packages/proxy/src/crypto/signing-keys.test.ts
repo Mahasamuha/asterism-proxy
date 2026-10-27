@@ -4,12 +4,15 @@ const h = vi.hoisted(() => ({
   findFirst: vi.fn(),
   create: vi.fn(),
   findMany: vi.fn(),
+  update: vi.fn((arg: unknown) => ({ op: "update", arg })),
+  deleteMany: vi.fn((arg: unknown) => ({ op: "deleteMany", arg })),
+  transaction: vi.fn(async (_ops: unknown[]) => []),
 }));
 
-vi.mock("../db.js", () => ({ prisma: { signingKey: { findFirst: h.findFirst, create: h.create, findMany: h.findMany } } }));
+vi.mock("../db.js", () => ({ prisma: { signingKey: { findFirst: h.findFirst, create: h.create, findMany: h.findMany, update: h.update, deleteMany: h.deleteMany }, $transaction: h.transaction } }));
 
 import { Prisma } from "../generated/prisma/client.js";
-import { ensureActiveSigningKey, getJwks } from "./signing-keys.js";
+import { ensureActiveSigningKey, getJwks, rotateSigningKey } from "./signing-keys.js";
 
 const p2002 = () => new Prisma.PrismaClientKnownRequestError("unique", { code: "P2002", clientVersion: "test" });
 
@@ -85,5 +88,33 @@ describe("getJwks", () => {
     expect(arg.where.OR[0]).toEqual({ retiredAt: null });
     expect(arg.where.OR[1].retiredAt.gt.toISOString()).toBe("2026-01-01T10:00:00.000Z");
     vi.useRealTimers();
+  });
+});
+
+describe("rotateSigningKey", () => {
+  beforeEach(() => {
+    h.update.mockClear();
+    h.deleteMany.mockClear();
+    h.transaction.mockClear();
+  });
+
+  it("retires the active key and keeps it by default", async () => {
+    h.findFirst.mockResolvedValueOnce({ kid: "old" });
+    const { removedKids } = await rotateSigningKey();
+    expect(removedKids).toEqual([]);
+    expect(h.update).toHaveBeenCalledWith({ where: { kid: "old" }, data: { retiredAt: expect.any(Date) } });
+    expect(h.deleteMany).not.toHaveBeenCalled();
+  });
+
+  it("compromised deletes every existing key, retired ones included, before creating the new one", async () => {
+    h.findFirst.mockResolvedValueOnce({ kid: "old" });
+    h.findMany.mockResolvedValueOnce([{ kid: "old" }, { kid: "older" }]);
+    const { kid, removedKids } = await rotateSigningKey({ compromised: true });
+    expect(removedKids).toEqual(["old", "older"]);
+    expect(h.update).not.toHaveBeenCalled();
+    expect(h.deleteMany).toHaveBeenCalledWith({ where: { kid: { in: ["old", "older"] } } });
+    const ops = h.transaction.mock.calls[0]![0];
+    expect(ops[0]).toMatchObject({ op: "deleteMany" });
+    expect(h.create.mock.calls[0]![0].data.kid).toBe(kid);
   });
 });

@@ -26,7 +26,7 @@ Commands:
                          [--require-groups a,b|--no-require-groups] [--description X|--no-description]
   resource-server refresh <identifier>
   resource-server remove <identifier>   (revokes every grant and refresh token; set --disable is reversible)
-  rotate-signing-key
+  rotate-signing-key [--compromised]   (--compromised deletes the old keys now; every issued access token stops verifying)
 EOF
 }
 

@@ -90,31 +90,39 @@ async function getSigningKeyForSigning(): Promise<{ kid: string; privateJwk: JWK
 }
 
 /** Generates a new active key and retires the previous one. Both remain published in
- * JWKS (see getJwks) until the retired key ages out, so in-flight tokens keep verifying. */
-export async function rotateSigningKey(): Promise<{ kid: string }> {
+ * JWKS (see getJwks) until the retired key ages out, so in-flight tokens keep verifying.
+ *
+ * `compromised` instead deletes every existing key row (retired ones too: a database
+ * exposure leaks all stored private keys, not just the active one) in the same
+ * transaction, so only the new key is ever published again. Tokens signed by a deleted
+ * key stop verifying at once, which is the point. Nothing references SigningKey.kid
+ * (tokens carry it only in their header), so deletion leaves no dangling rows. */
+export async function rotateSigningKey(options: { compromised?: boolean } = {}): Promise<{ kid: string; removedKids: string[] }> {
   const current = await prisma.signingKey.findFirst({
     where: { retiredAt: null },
     select: { kid: true },
   });
   const { kid, publicJwk, privateJwk } = await generateSigningKey();
 
-  await prisma.$transaction([
-    ...(current
-      ? [prisma.signingKey.update({ where: { kid: current.kid }, data: { retiredAt: new Date() } })]
-      : []),
-    prisma.signingKey.create({
-      data: {
-        kid,
-        algorithm: ALG,
-        publicJwk: publicJwk as object,
-        privateJwk: privateJwk as object,
-        activatedAt: new Date(),
-      },
-    }),
-  ]);
+  const data = {
+    kid,
+    algorithm: ALG,
+    publicJwk: publicJwk as object,
+    privateJwk: privateJwk as object,
+    activatedAt: new Date(),
+  };
+  // Old rows go before the insert; the single-active index would reject the
+  // new key otherwise.
+  const existing = options.compromised ? await prisma.signingKey.findMany({ select: { kid: true } }) : [];
+  const ops: Prisma.PrismaPromise<unknown>[] = [];
+  if (options.compromised) ops.push(prisma.signingKey.deleteMany({ where: { kid: { in: existing.map((k) => k.kid) } } }));
+  else if (current) ops.push(prisma.signingKey.update({ where: { kid: current.kid }, data: { retiredAt: new Date() } }));
+  ops.push(prisma.signingKey.create({ data }));
+  await prisma.$transaction(ops);
 
-  log.info({ newKid: kid, retiredKid: current?.kid ?? null }, "Rotated signing key");
-  return { kid };
+  const removedKids = existing.map((k) => k.kid);
+  log.info({ newKid: kid, retiredKid: current?.kid ?? null, removedKids }, options.compromised ? "Rotated signing key (compromised: old keys deleted)" : "Rotated signing key");
+  return { kid, removedKids };
 }
 
 /** Active key plus any retired key still within its verification grace period. Only
@@ -141,7 +149,10 @@ export async function signJwt(payload: JWTPayload, expiresIn: string | number): 
   // normalize a number to jose's own relative-duration string form first.
   const jwtExpiresIn = typeof expiresIn === "number" ? `${expiresIn}s` : expiresIn;
   return new SignJWT(payload)
-    .setProtectedHeader({ alg: ALG, kid: key.kid })
+    // typ per RFC 9068 §2.1, so a JWT minted for another purpose by this issuer
+    // can't be presented as an access token. Every caller of this function signs
+    // access tokens (via mintAccessToken).
+    .setProtectedHeader({ alg: ALG, kid: key.kid, typ: "at+jwt" })
     .setIssuedAt()
     .setExpirationTime(jwtExpiresIn)
     .sign(privateKey);
