@@ -15,7 +15,8 @@ const MAX_USERNAME_FAILURES = 10;
 const MAX_PASSWORD_CHANGE_FAILURES = 5;
 const MAX_DEVICE_COOKIE_FAILURES = 5;
 const MAX_THROTTLE_KEY_LENGTH = 256;
-const FAILURE_WINDOW_MS = 15 * 60 * 1000;
+/** How far back failures count; also what the 429 pages tell the client to wait. */
+export const FAILURE_WINDOW_MS = 15 * 60 * 1000;
 export { MIN_PASSWORD_LENGTH } from "./password-policy.js";
 
 // A real, well-formed cost-12 bcrypt hash of a random throwaway string, used so failed lookups take the

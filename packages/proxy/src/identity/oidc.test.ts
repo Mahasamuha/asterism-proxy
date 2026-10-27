@@ -87,7 +87,7 @@ describe("getOidcConfig", () => {
     await oidc.getOidcConfig();
     expect(oc.discovery.mock.calls[0]?.[4]).toBeUndefined();
 
-    for (const issuer of ["http://localhost:9000", "http://127.0.0.1:9000"]) {
+    for (const issuer of ["http://localhost:9000", "http://127.0.0.1:9000", "http://[::1]:9000"]) {
       vi.resetModules();
       cfg.oidc = { issuer, clientId: "cid", clientSecret: "s", subjectClaim: "sub" };
       oc.discovery.mockClear();

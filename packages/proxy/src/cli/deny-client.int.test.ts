@@ -99,6 +99,13 @@ describe("deny-client add", () => {
     expect(two.stdout).not.toContain("exact client_id");
   });
 
+  it("P1 an over-long --reason is refused and nothing is written", async () => {
+    const res = await runCli("deny-client", ["add", "evil.example.com", "--reason", "x".repeat(501)]);
+    expect(res.code).toBe(1);
+    expect(res.stderr).toContain("limit is 500");
+    expect(await prisma.deniedClient.count()).toBe(0);
+  });
+
   it("P1 adding the same entry twice is an upsert that updates the reason", async () => {
     await runCli("deny-client", ["add", "evil.example.com", "--reason", "one"]);
     await runCli("deny-client", ["add", "evil.example.com", "--reason", "two"]);

@@ -84,10 +84,19 @@ describe("local-user deactivate / list / usage", () => {
     expect((await prisma.refreshToken.findUniqueOrThrow({ where: { tokenHash: ot.row.tokenHash } })).revokedAt).toBeNull();
   });
 
-  it("P1 deactivating an unknown user fails", async () => {
+  it("P1 deactivate writes an audit row, like set-admin", async () => {
+    await seedLocalUser({ username: "alice" });
+    expect((await runCli("local-user", ["deactivate", "alice"])).code).toBe(0);
+    const rows = await prisma.adminAuditLog.findMany();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ actor: "cli", action: "local-user.deactivate", target: "alice", before: { isActive: true } });
+  });
+
+  it("P1 deactivating an unknown user fails and writes no audit row", async () => {
     const res = await runCli("local-user", ["deactivate", "ghost"]);
     expect(res.code).toBe(1);
     expect(res.stderr).toContain('No local user "ghost"');
+    expect(await prisma.adminAuditLog.count()).toBe(0);
   });
 
   it("P1 list shows status and last login, and never a hash", async () => {

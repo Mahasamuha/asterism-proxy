@@ -22,7 +22,7 @@ let _configFetchedAt = 0;
  * for development/testing. Anything else must be HTTPS. */
 function discoveryOptions(issuer: string): client.DiscoveryRequestOptions | undefined {
   const url = new URL(issuer);
-  const isLoopback = url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "::1";
+  const isLoopback = url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "[::1]";
   if (url.protocol === "http:" && isLoopback) {
     return { execute: [client.allowInsecureRequests] };
   }

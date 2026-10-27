@@ -1,4 +1,4 @@
-import { Router, type Request, type Response } from "express";
+import { Router, type NextFunction, type Request, type Response } from "express";
 import { config } from "../config.js";
 import { prisma } from "../db.js";
 import { createLogger } from "../logger.js";
@@ -8,7 +8,7 @@ import { createSelfLoginRequest } from "../identity/self-login.js";
 import { startUpstreamAuth } from "../identity/oidc.js";
 import { bodyOf, stringField } from "../http-params.js";
 import { createIpRateLimiter, rowCreationRetryAfter } from "../rate-limit.js";
-import { addDenial, DenylistError, listDenials, previewDenial, removeDenial } from "../clients/denylist.js";
+import { addDenial, checkReason, DenylistError, listDenials, previewDenial, removeDenial } from "../clients/denylist.js";
 import {
   acceptPendingMetadata,
   approveResourceServer,
@@ -84,10 +84,18 @@ function parseList(raw: string | undefined): string[] {
   return (raw ?? "").split(",").map((s) => s.trim()).filter((s) => s !== "");
 }
 
+/** An over-long form field. Refused, never cut: a silently shortened identifier or reason is worse than an error. */
+class FieldTooLongError extends Error {
+  constructor(key: string) {
+    super(`The ${key.replace(/_/g, " ")} field is too long (the limit is ${MAX_FIELD_LENGTH} characters).`);
+  }
+}
+
 /** A text field, capped so a huge value never reaches the service or the database. */
 function field(body: Record<string, unknown>, key: string): string {
   const value = (stringField(body, key) ?? "").trim();
-  return value.length > MAX_FIELD_LENGTH ? value.slice(0, MAX_FIELD_LENGTH) : value;
+  if (value.length > MAX_FIELD_LENGTH) throw new FieldTooLongError(key);
+  return value;
 }
 
 const checked = (body: Record<string, unknown>, key: string): boolean => stringField(body, key) === "on";
@@ -441,13 +449,16 @@ adminRouter.post("/admin/clients/confirm", async (req, res) => {
   const admin = await requireAdminWrite(req, res, "/admin/clients");
   if (!admin) return;
   const body = bodyOf(req);
-  const value = field(body, "value");
-  const reason = field(body, "reason").slice(0, 500);
+  let value = "";
+  let reason = "";
   try {
+    value = field(body, "value");
+    reason = field(body, "reason");
+    checkReason(reason);
     const p = await previewDenial(value);
     render(res, "clients-confirm", { p, value: p.value, reason });
   } catch (err) {
-    if (!(err instanceof DenylistError)) throw err;
+    if (!(err instanceof DenylistError || err instanceof FieldTooLongError)) throw err;
     await renderClients(res, { error: err.message, value, reason }, 400);
   }
 });
@@ -457,14 +468,17 @@ adminRouter.post("/admin/clients/add", async (req, res) => {
   const admin = await requireAdminWrite(req, res, "/admin/clients");
   if (!admin) return;
   const body = bodyOf(req);
-  const value = field(body, "value");
-  const reason = field(body, "reason").slice(0, 500);
+  let value = "";
+  let reason = "";
   try {
+    value = field(body, "value");
+    reason = field(body, "reason");
+    checkReason(reason);
     const r = await addDenial(value, reason === "" ? undefined : reason, admin.actor);
     const text = `Denied ${r.kind} ${r.value}. Revoked ${r.grantsRevoked} grant(s) and ${r.tokensRevoked} refresh token(s); access tokens already issued stay valid until they expire (at most 15 minutes).`;
     await renderClients(res, { notice: r.note ? `${r.note} ${text}` : text });
   } catch (err) {
-    if (!(err instanceof DenylistError)) throw err;
+    if (!(err instanceof DenylistError || err instanceof FieldTooLongError)) throw err;
     await renderClients(res, { error: err.message, value, reason }, 400);
   }
 });
@@ -476,7 +490,13 @@ adminRouter.post("/admin/clients/remove", async (req, res) => {
     const r = await removeDenial(field(bodyOf(req), "value"), admin.actor);
     await renderClients(res, { notice: r.removed ? `Removed ${r.kind} ${r.value}. Revoked grants are not restored; clients must be re-authorized.` : `No ${r.kind} entry for ${r.value}.` });
   } catch (err) {
-    if (!(err instanceof DenylistError)) throw err;
+    if (!(err instanceof DenylistError || err instanceof FieldTooLongError)) throw err;
     await renderClients(res, { error: err.message }, 400);
   }
+});
+
+// Any other form's over-long field: the generic page, 400, nothing written (field() runs before any service call).
+adminRouter.use((err: unknown, _req: Request, res: Response, next: NextFunction) => {
+  if (err instanceof FieldTooLongError) message(res, 400, "Input too long", err.message, { href: "/admin", text: "back to the admin overview →" });
+  else next(err);
 });

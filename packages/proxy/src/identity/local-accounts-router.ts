@@ -18,6 +18,7 @@ import {
   changePassword,
   localAccountsExist,
   MIN_PASSWORD_LENGTH,
+  FAILURE_WINDOW_MS,
 } from "./local-accounts.js";
 import { markReauthenticated, setSession, startSession, clearSession, getSessionUserId } from "./session.js";
 import { issueCsrfToken, issueBoundCsrfToken, verifyBoundCsrfToken, verifyCsrfToken, LOGOUT_CSRF_PURPOSE } from "./csrf.js";
@@ -27,6 +28,14 @@ import { isFlowBound } from "./flow-binding.js";
 import { issueDeviceCookie, validDeviceCookieNonce } from "./device-cookie.js";
 
 const log = createLogger("local-accounts-router");
+
+const THROTTLE_MESSAGE = `Too many failed attempts. Please wait ${Math.ceil(FAILURE_WINDOW_MS / 60_000)} minutes.`;
+
+/** Sets Retry-After on a throttled response. The attempt slot cannot say when the
+ * oldest counted failure ages out, so this is the full window: conservative. */
+function throttled(res: Response): void {
+  res.set("Retry-After", String(Math.ceil(FAILURE_WINDOW_MS / 1000)));
+}
 
 export const localAccountsRouter: Router = Router();
 
@@ -65,7 +74,8 @@ localAccountsRouter.post("/setup", async (req: Request, res: Response, next: Nex
   if (config.setupToken !== undefined) {
     const slot = await beginIpAttempt(req.ip ?? "unknown");
     if (!slot) {
-      renderSetup(res, 429, ["Too many failed attempts. Please wait 15 minutes."], issueCsrfToken(res, "csrf_setup"));
+      throttled(res);
+      renderSetup(res, 429, [THROTTLE_MESSAGE], issueCsrfToken(res, "csrf_setup"));
       return;
     }
     const ok = setupTokenMatches(stringField(body, "setup_token") ?? "", config.setupToken);
@@ -173,7 +183,8 @@ localAccountsRouter.post("/auth/login", async (req: Request, res: Response) => {
   const deviceNonce = await validDeviceCookieNonce(req, username);
   const slot = deviceNonce !== null ? await beginDeviceLoginAttempt(ip, deviceNonce) : await beginLoginAttempt(ip, username);
   if (!slot) {
-    rerender("Too many failed attempts. Please wait 15 minutes.", 429);
+    throttled(res);
+    rerender(THROTTLE_MESSAGE, 429);
     return;
   }
 
@@ -280,7 +291,8 @@ localAccountsRouter.post("/auth/password", async (req: Request, res: Response) =
   // session cookie, so it is throttled per user like login.
   const slot = await beginPasswordChangeAttempt(userId);
   if (!slot) {
-    renderAccount(req, res, userId, 429, localUser.username, ["Too many failed attempts. Please wait 15 minutes."]);
+    throttled(res);
+    renderAccount(req, res, userId, 429, localUser.username, [THROTTLE_MESSAGE]);
     return;
   }
   let newEpoch: number;

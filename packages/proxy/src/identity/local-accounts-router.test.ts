@@ -18,6 +18,8 @@ const la = vi.hoisted(() => ({
   changePassword: vi.fn(),
   localAccountsExist: vi.fn(),
   MIN_PASSWORD_LENGTH: 12,
+  // Not the real 15 minutes, so the tests show the wait is derived from the constant.
+  FAILURE_WINDOW_MS: 10 * 60 * 1000,
 }));
 const sess = vi.hoisted(() => ({ getSessionUserId: vi.fn(), startSession: vi.fn() }));
 vi.mock("../db.js", () => db);
@@ -123,6 +125,25 @@ describe("/setup", () => {
     const res = await fetch(`${app.baseUrl}/setup`, { method: "POST", body, headers });
     expect(res.status).toBe(403);
     expect(la.createFirstLocalUser).not.toHaveBeenCalled();
+  });
+
+  it("P0 a throttled setup-token guess gets 429 with Retry-After and creates nothing", async () => {
+    const saved = config.setupToken;
+    config.setupToken = "the-token";
+    try {
+      la.beginIpAttempt.mockResolvedValue(null);
+      const { jar, csrf } = await withCsrf("/setup");
+      const res = await jar.fetch(`${app.baseUrl}/setup`, {
+        method: "POST",
+        ...form({ username: "alice", password: GOOD_PW, confirm_password: GOOD_PW, setup_token: "the-token", csrf_token: csrf }),
+      });
+      expect(res.status).toBe(429);
+      expect(res.headers.get("retry-after")).toBe("600");
+      expect(await res.text()).toContain("Please wait 10 minutes.");
+      expect(la.createFirstLocalUser).not.toHaveBeenCalled();
+    } finally {
+      config.setupToken = saved;
+    }
   });
 
   it("P0 POST with no body at all is 403, not a crash", async () => {
@@ -233,7 +254,9 @@ describe("POST /auth/login", () => {
     const { jar, csrf } = await withCsrf("/auth/login");
     const res = await post(jar, { username: "a", password: "b", csrf_token: csrf });
     expect(res.status).toBe(429);
-    expect(await res.text()).toContain("Too many failed attempts");
+    expect(res.headers.get("retry-after")).toBe("600");
+    const html = await res.text();
+    expect(html).toContain("Too many failed attempts. Please wait 10 minutes.");
     expect(la.validateLocalUser).not.toHaveBeenCalled();
     expect(la.endAttempt).not.toHaveBeenCalled();
   });
@@ -414,6 +437,21 @@ describe("/auth/account and POST /auth/password", () => {
       ...form({ current_password: "old", new_password: GOOD_PW, confirm_new_password: GOOD_PW, csrf_token: csrf }),
     });
     expect(res.status).toBe(403);
+    expect(la.changePassword).not.toHaveBeenCalled();
+  });
+
+  it("P0 a throttled password change gets 429 with Retry-After and the check is never evaluated", async () => {
+    loggedIn();
+    la.beginPasswordChangeAttempt.mockResolvedValue(null);
+    const jar = cookieClient();
+    const csrf = csrfFrom(await (await jar.fetch(`${app.baseUrl}/auth/account`)).text());
+    const res = await jar.fetch(`${app.baseUrl}/auth/password`, {
+      method: "POST",
+      ...form({ current_password: "old", new_password: GOOD_PW, confirm_new_password: GOOD_PW, csrf_token: csrf }),
+    });
+    expect(res.status).toBe(429);
+    expect(res.headers.get("retry-after")).toBe("600");
+    expect(await res.text()).toContain("Please wait 10 minutes.");
     expect(la.changePassword).not.toHaveBeenCalled();
   });
 

@@ -13,6 +13,16 @@ import type { DenyKind, DeniedClient } from "../generated/prisma/client.js";
 /** A refusal the operator can act on; its message is safe to print. */
 export class DenylistError extends Error {}
 
+/** Longest reason accepted; longer is refused rather than cut, so the CLI and the admin UI agree. */
+export const MAX_REASON_LENGTH = 500;
+
+/** Throws DenylistError when `reason` is over MAX_REASON_LENGTH. */
+export function checkReason(reason: string | undefined): void {
+  if (reason !== undefined && reason.length > MAX_REASON_LENGTH) {
+    throw new DenylistError(`The reason is ${reason.length} characters; the limit is ${MAX_REASON_LENGTH}.`);
+  }
+}
+
 // Bare hostname: dot-separated LDH labels, no scheme, port, path or userinfo.
 const HOSTNAME_RE = /^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$/;
 
@@ -103,6 +113,7 @@ export async function previewDenial(raw: string): Promise<DenyPreview> {
 
 /** Adds (or updates the reason of) an entry and revokes what it now matches. */
 export async function addDenial(raw: string, reason: string | undefined, actor: string): Promise<DenyResult> {
+  checkReason(reason);
   const { kind, value: v, note } = parseTarget(raw);
   const now = new Date();
 
