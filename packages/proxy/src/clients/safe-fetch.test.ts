@@ -560,15 +560,36 @@ describe("safeFetchJson", () => {
       expect(await reasonOf(safeFetchJson(base("/x"), { pool: "client-jwks" }))).toBe("ok");
     });
 
-    it("keeps a separate in-flight cap per pool", async () => {
+    it.each([["cimd"], ["resource-metadata"], ["client-jwks"]] as const)("enforces a separate in-flight cap for the %s pool", async (pool) => {
       lookup.mockImplementation((() => new Promise(() => {})) as never);
-      const cimd = Array.from({ length: MAX_CONCURRENT_FETCHES }, (_, i) =>
-        reasonOf(safeFetchJson(`https://pool-c${i}-${n++}.test/x`, { timeoutMs: 150 })),
+      const others = (["cimd", "resource-metadata", "client-jwks"] as const).filter((p) => p !== pool);
+      const filling = Array.from({ length: MAX_CONCURRENT_FETCHES }, (_, i) =>
+        reasonOf(safeFetchJson(`https://pool-${pool}${i}-${n++}.test/x`, { timeoutMs: 150, pool })),
       );
-      expect(await reasonOf(safeFetchJson("https://pool-over.test/x", { timeoutMs: 150 }))).toBe("busy");
-      // the cimd pool is full; a metadata fetch still gets a slot (and then times out in DNS)
-      expect(await reasonOf(safeFetchJson("https://pool-meta.test/x", { timeoutMs: 150, pool: "resource-metadata" }))).toBe("timeout");
-      await Promise.all(cimd);
+      expect(await reasonOf(safeFetchJson(`https://pool-over-${n++}.test/x`, { timeoutMs: 150, pool }))).toBe("busy");
+      // this pool is full; each of the others still gets a slot (and then times out in DNS)
+      for (const other of others) {
+        expect(await reasonOf(safeFetchJson(`https://pool-${other}-${n++}.test/x`, { timeoutMs: 150, pool: other }))).toBe("timeout");
+      }
+      expect(await Promise.all(filling)).toEqual(Array(MAX_CONCURRENT_FETCHES).fill("timeout"));
+      // slots are released again
+      expect(await reasonOf(safeFetchJson(`https://pool-after-${n++}.test/x`, { timeoutMs: 150, pool }))).toBe("timeout");
+    });
+  });
+
+  describe("connection reuse", () => {
+    it("opens a new connection per fetch: no pooled keep-alive socket that would skip the pinned lookup", async () => {
+      const sockets = new Set<unknown>();
+      const connectionHeaders: (string | undefined)[] = [];
+      srv.routes["/k"] = (req, res) => {
+        sockets.add(req.socket);
+        connectionHeaders.push(req.headers.connection);
+        res.writeHead(200, { "content-type": "application/json" }).end("{}");
+      };
+      await safeFetchJson(base("/k"));
+      await safeFetchJson(base("/k"));
+      expect(sockets.size).toBe(2);
+      expect(connectionHeaders).toEqual(["close", "close"]);
     });
   });
 

@@ -153,27 +153,36 @@ describe("createBearerAuthMiddleware", () => {
   });
 
   it("P0 an exception thrown by the downstream handler is not answered as a 401", async () => {
-    const errors: unknown[] = [];
-    const a = express();
-    a.use("/boom", createBearerAuthMiddleware(cfg()));
-    a.get("/boom", () => {
-      throw new Error("downstream bug");
+    // Called directly, not through Express: Express catches a handler's throw itself,
+    // which would hide a `.then(...).catch(...)` that turns it into an auth failure.
+    const res = { set: vi.fn().mockReturnThis(), status: vi.fn().mockReturnThis(), json: vi.fn().mockReturnThis() };
+    const boom = new Error("downstream bug");
+    const next = vi.fn(() => {
+      throw boom;
     });
-    a.use((err: unknown, _req: Request, res: express.Response, _next: express.NextFunction) => {
-      errors.push(err);
-      res.status(500).json({ error: "app_error" });
-    });
-    const srv = a.listen(0, "127.0.0.1");
-    await new Promise<void>((r) => srv.once("listening", r));
+    const req = { headers: { authorization: `Bearer ${await token()}` } };
+
+    // The throw escapes the promise chain as an unhandled rejection (nothing may swallow it
+    // as an auth failure). Take over the process listeners for this test so vitest does not
+    // report it as an error, and assert it is the downstream error.
+    const saved = process.listeners("unhandledRejection");
+    process.removeAllListeners("unhandledRejection");
+    const unhandled: unknown[] = [];
+    process.on("unhandledRejection", (reason) => unhandled.push(reason));
     try {
-      const res = await fetch(`http://127.0.0.1:${(srv.address() as AddressInfo).port}/boom`, { headers: { authorization: `Bearer ${await token()}` } });
-      expect(res.status).toBe(500);
-      expect(res.headers.get("www-authenticate")).toBeNull();
-      expect(errors).toHaveLength(1);
+      createBearerAuthMiddleware(cfg())(req as never, res as never, next);
+      await vi.waitFor(() => expect(next).toHaveBeenCalledTimes(1));
+      await new Promise((r) => setImmediate(r)); // let any rejection handler and the unhandled-rejection check run
+      await new Promise((r) => setImmediate(r));
     } finally {
-      srv.closeAllConnections();
-      await new Promise((r) => srv.close(r));
+      process.removeAllListeners("unhandledRejection");
+      for (const l of saved) process.on("unhandledRejection", l as (...args: unknown[]) => void);
     }
+
+    expect(res.status).not.toHaveBeenCalled();
+    expect(res.json).not.toHaveBeenCalled();
+    expect(res.set).not.toHaveBeenCalled(); // no WWW-Authenticate
+    expect(unhandled).toEqual([boom]);
   });
 
   it("P1 an empty token is an invalid_token challenge, not a crash", async () => {

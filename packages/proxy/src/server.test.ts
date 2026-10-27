@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const db = vi.hoisted(() => ({
   prisma: {
     localUser: { count: vi.fn() },
+    signingKey: { findMany: vi.fn() },
     $queryRaw: vi.fn(),
   },
 }));
@@ -258,6 +259,11 @@ describe("request id and security headers", () => {
     expect(bad.headers.get("cache-control")).toBe("no-store");
     expect((await fetch(`${base}/assets/mahasamuha.css`)).headers.get("cache-control")).toBe("public, max-age=86400");
     expect((await fetch(`${base}/assets/fonts/Geist-Variable.woff2`)).headers.get("cache-control")).toBe("public, max-age=86400");
+    db.prisma.signingKey.findMany.mockResolvedValue([{ publicJwk: { kid: "k1" } }]);
+    const jwks = await fetch(`${base}/.well-known/jwks.json`);
+    expect(jwks.status).toBe(200);
+    expect(await jwks.json()).toEqual({ keys: [{ kid: "k1" }] });
+    expect(jwks.headers.get("cache-control")).toBe("public, max-age=3600");
   });
 
   it("serves the stylesheet, fonts and brand marks under /assets with the strict CSP, and nothing else there", async () => {

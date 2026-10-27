@@ -12,7 +12,9 @@ const h = vi.hoisted(() => ({
 vi.mock("../db.js", () => ({ prisma: { signingKey: { findFirst: h.findFirst, create: h.create, findMany: h.findMany, update: h.update, deleteMany: h.deleteMany }, $transaction: h.transaction } }));
 
 import { Prisma } from "../generated/prisma/client.js";
-import { ensureActiveSigningKey, getJwks, rotateSigningKey } from "./signing-keys.js";
+import { decodeProtectedHeader } from "jose";
+import { makeEs256Key } from "../test-helpers/keys.js";
+import { ensureActiveSigningKey, getJwks, rotateSigningKey, signJwt } from "./signing-keys.js";
 
 const p2002 = () => new Prisma.PrismaClientKnownRequestError("unique", { code: "P2002", clientVersion: "test" });
 
@@ -113,8 +115,20 @@ describe("rotateSigningKey", () => {
     expect(removedKids).toEqual(["old", "older"]);
     expect(h.update).not.toHaveBeenCalled();
     expect(h.deleteMany).toHaveBeenCalledWith({ where: { kid: { in: ["old", "older"] } } });
+    // Every row is listed: no retiredAt (or any other) filter, so retired keys are deleted too.
+    expect(h.findMany).toHaveBeenCalledTimes(1);
+    expect(h.findMany).toHaveBeenCalledWith({ select: { kid: true } });
     const ops = h.transaction.mock.calls[0]![0];
     expect(ops[0]).toMatchObject({ op: "deleteMany" });
     expect(h.create.mock.calls[0]![0].data.kid).toBe(kid);
+  });
+});
+
+describe("signJwt", () => {
+  it("signs with the active key and marks the token typ at+jwt (RFC 9068)", async () => {
+    const key = await makeEs256Key("active-kid");
+    h.findFirst.mockResolvedValueOnce({ kid: key.kid, privateJwk: key.privateJwk });
+    const header = decodeProtectedHeader(await signJwt({ sub: "x" }, 60));
+    expect(header).toEqual({ alg: "ES256", kid: "active-kid", typ: "at+jwt" });
   });
 });

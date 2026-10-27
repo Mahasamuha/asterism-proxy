@@ -214,6 +214,19 @@ describe("authorization_code: code state machine (P0)", () => {
     expect(m("authCode", "delete")).not.toHaveBeenCalled();
   });
 
+  it("replaying a consumed code with a mismatched resource and valid proof is answered 'already used' (not invalid_target) and revokes the chain", async () => {
+    arrange(codeEntry({ consumedAt: new Date() }));
+    const r = await token(codeFields({ resource: OTHER_RESOURCE }));
+    expect(r.status).toBe(400);
+    expect(r.json).toMatchObject({ error: "invalid_grant", error_description: "Authorization code already used" });
+    // The presenter held the verifier (and passed client authentication): a genuine replay.
+    const call = m("refreshToken", "updateMany").mock.calls[0]![0];
+    expect(call.where).toEqual({ grantId: "g1", revokedAt: null });
+    expect(call.data.revokedAt).toBeInstanceOf(Date);
+    expect(m("authCode", "delete")).not.toHaveBeenCalled();
+    expect(mint).not.toHaveBeenCalled();
+  });
+
   it("replaying a consumed code that fails client authentication does not revoke", async () => {
     arrange(codeEntry({ consumedAt: new Date() }));
     authenticate.mockResolvedValue({ ok: false, error: "invalid_client", errorDescription: "bad assertion" });
@@ -455,6 +468,15 @@ describe("refresh_token grant", () => {
     const predecessor = await m("refreshToken", "findUnique").mock.results[0]!.value;
     expect(created.expiresAt).toEqual(predecessor.expiresAt);
     expect(mint.mock.calls[0]![0].scopes).toEqual(["read"]);
+  });
+
+  it("a short-lived scope on a stored refresh row is dropped from the access token and the successor row", async () => {
+    arrangeRefresh(refreshEntry({ scopes: ["read", "admin", "root", "offline_access"] }));
+    const r = await token(refreshFields());
+    expect(r.status).toBe(200);
+    expect(r.json["scope"]).toBe("read offline_access");
+    expect(mint.mock.calls[0]![0].scopes).toEqual(["read"]);
+    expect(m("refreshToken", "create").mock.calls[0]![0].data.scopes).toEqual(["read", "offline_access"]);
   });
 
   it.each([

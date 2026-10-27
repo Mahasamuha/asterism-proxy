@@ -24,6 +24,7 @@ vi.mock("../db.js", () => db);
 vi.mock("./local-accounts.js", () => la);
 vi.mock("./session.js", async (orig) => ({ ...(await orig<typeof import("./session.js")>()), getSessionUserId: sess.getSessionUserId, startSession: sess.startSession }));
 
+import { cookieName } from "../cookies.js";
 import { setSession } from "./session.js";
 import { localAccountsRouter } from "./local-accounts-router.js";
 import { startRouterApp, type RouterApp } from "../test-helpers/identity-app.js";
@@ -343,6 +344,36 @@ describe("/auth/account and POST /auth/password", () => {
   it("P0 password change needs CSRF (403 without; no body is 403 not 500)", async () => {
     loggedIn();
     expect((await fetch(`${app.baseUrl}/auth/password`, { method: "POST" })).status).toBe(403);
+    expect(la.changePassword).not.toHaveBeenCalled();
+  });
+
+  it("P0 the logout token does not work for the password form, even with its cookie planted under the password cookie's name", async () => {
+    loggedIn();
+    const jar = cookieClient();
+    const html = await (await jar.fetch(`${app.baseUrl}/auth/account`)).text();
+    const logoutToken = csrfFrom(html.split("<form").find((f) => f.includes('action="/auth/logout"'))!);
+    expect(logoutToken).not.toBe(csrfFrom(html));
+    const planted = cookieClient();
+    // Same nonce, so the token's HMAC differs from the password form's only by purpose.
+    planted.cookies.set(cookieName("csrf_password"), jar.cookies.get(cookieName("csrf_logout"))!);
+    const res = await planted.fetch(`${app.baseUrl}/auth/password`, {
+      method: "POST",
+      ...form({ current_password: "old", new_password: GOOD_PW, confirm_new_password: GOOD_PW, csrf_token: logoutToken }),
+    });
+    expect(res.status).toBe(403);
+    expect(la.changePassword).not.toHaveBeenCalled();
+  });
+
+  it("P0 a password token minted for one user is refused for another", async () => {
+    loggedIn();
+    const jar = cookieClient();
+    const csrf = csrfFrom(await (await jar.fetch(`${app.baseUrl}/auth/account`)).text());
+    sess.getSessionUserId.mockResolvedValue("u2");
+    const res = await jar.fetch(`${app.baseUrl}/auth/password`, {
+      method: "POST",
+      ...form({ current_password: "old", new_password: GOOD_PW, confirm_new_password: GOOD_PW, csrf_token: csrf }),
+    });
+    expect(res.status).toBe(403);
     expect(la.changePassword).not.toHaveBeenCalled();
   });
 

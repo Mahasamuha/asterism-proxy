@@ -149,6 +149,21 @@ describe("CSRF (P0)", () => {
     expect(m("authorizationRequest", "deleteMany")).not.toHaveBeenCalled();
   });
 
+  it("P0 a token minted for one user cannot approve the same flow once it belongs to another user", async () => {
+    const client = await boundClient("u1");
+    const csrf = csrfFrom((await getPath(app.baseUrl, "/oauth/consent?flow=h1", client.fetch)).text);
+    // Same browser, same flow handle and same CSRF nonce cookie, but the flow's
+    // subject (and the browser's session) is now u2: u1's form token must not carry over.
+    m("authorizationRequest", "findUnique").mockImplementation(async () => flowRow({ subject: "u2" }));
+    m("user", "findFirst").mockResolvedValue({ id: "u2" });
+    await bindBrowser(app.baseUrl, client, "h1", "u2");
+    const r = await postForm(app.baseUrl, "/oauth/consent", { flow: "h1", action: "approve", csrf_token: csrf }, client.fetch);
+    expect(r.status).toBe(400);
+    expect(r.text).toContain("CSRF");
+    expect(m("authCode", "create")).not.toHaveBeenCalled();
+    expect(m("authorizationRequest", "deleteMany")).not.toHaveBeenCalled();
+  });
+
   it("a repeated csrf_token field does not match", async () => {
     const client = await boundClient();
     const page = await getPath(app.baseUrl, "/oauth/consent?flow=h1", client.fetch);

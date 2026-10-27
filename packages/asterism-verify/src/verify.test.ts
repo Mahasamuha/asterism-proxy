@@ -209,7 +209,7 @@ describe("verify: kid and signature", () => {
   });
 
   it("P0 a token whose typ is not at+jwt is rejected as invalid_token_type", async () => {
-    for (const typ of ["JWT", "id_token+jwt", "at+jwt+x"]) {
+    for (const typ of ["JWT", "id_token+jwt", "at+jwt+x", "x-at+jwt", "foo/at+jwt", "xapplication/at+jwt"]) {
       expect(await reasonOf(createVerifier(config()).verify(await sign(key, claims(), { typ }))), typ).toBe("invalid_token_type");
     }
   });

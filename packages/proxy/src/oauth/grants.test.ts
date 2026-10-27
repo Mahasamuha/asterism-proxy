@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { CLIENT_ID, RESOURCE, clientRow, createPrismaMock, getPath, postEmpty, postForm, startRouterApp, type RouterApp } from "../test-helpers/oauth-harness.js";
 import { cookieClient, csrfFrom } from "../test-helpers/http.js";
+import { cookieName } from "../cookies.js";
 
 vi.mock("../db.js", async () => ({ prisma: (await import("../test-helpers/oauth-harness.js")).createPrismaMock() }));
 vi.mock("../resource-registry.js", async () => (await import("../test-helpers/oauth-harness.js")).fakeResourceRegistry());
@@ -186,11 +187,43 @@ describe("POST /grants/:id/revoke", () => {
     m("grant", "findUnique").mockResolvedValue({ id: "g1", userId: "u1", clientId: CLIENT_ID, resource: RESOURCE });
     const client = cookieClient();
     const html = (await getPath(app.baseUrl, "/grants", client.fetch)).text;
-    const logoutForm = html.split("<form").find((f) => f.includes('action="/auth/logout"'))!;
-    // Different cookies and purposes: each token only passes its own check.
-    expect((await postForm(app.baseUrl, "/grants/g1/revoke", { csrf_token: csrfFrom(logoutForm) }, client.fetch)).status).toBe(403);
-    expect((await postForm(app.baseUrl, "/auth/logout", { csrf_token: csrfFrom(html) }, client.fetch)).status).toBe(403);
+    const logoutToken = csrfFrom(html.split("<form").find((f) => f.includes('action="/auth/logout"'))!);
+    const revokeToken = csrfFrom(html);
+    const grantsCookie = cookieName("csrf_grants");
+    const logoutCookie = cookieName("csrf_logout");
+    expect(client.cookies.get(grantsCookie)).toBeDefined();
+    expect(client.cookies.get(logoutCookie)).toBeDefined();
+    expect(client.cookies.get(grantsCookie)).not.toBe(client.cookies.get(logoutCookie));
+
+    // The two forms have different cookies, so swapping tokens alone fails anyway. Make the
+    // cookie match as well (the planted-cookie case): only the purpose can then refuse it.
+    const asLogout = cookieClient();
+    asLogout.cookies.set(grantsCookie, client.cookies.get(logoutCookie)!);
+    expect((await postForm(app.baseUrl, "/grants/g1/revoke", { csrf_token: logoutToken }, asLogout.fetch)).status).toBe(403);
+
+    const asRevoke = cookieClient();
+    asRevoke.cookies.set(logoutCookie, client.cookies.get(grantsCookie)!);
+    expect((await postForm(app.baseUrl, "/auth/logout", { csrf_token: revokeToken }, asRevoke.fetch)).status).toBe(403);
+
     expect(m("grant", "update")).not.toHaveBeenCalled();
+    expect(db.$transaction).not.toHaveBeenCalled();
+    expect(m("user", "update")).not.toHaveBeenCalled();
+  });
+
+  it("P0 a logout token minted for one user is refused for another and revokes nothing (M4)", async () => {
+    m("grant", "findMany").mockResolvedValue([]);
+    const client = cookieClient();
+    const html = (await getPath(app.baseUrl, "/grants", client.fetch)).text;
+    const token = csrfFrom(html.split("<form").find((f) => f.includes('action="/auth/logout"'))!);
+    session.mockResolvedValue("u2");
+    const r = await postForm(app.baseUrl, "/auth/logout", { csrf_token: token }, client.fetch);
+    expect(r.status).toBe(403);
+    expect(r.headers.getSetCookie().join(";")).not.toMatch(/session=;/);
+    expect(m("user", "update")).not.toHaveBeenCalled();
+    // and it still works for the user it was minted for
+    session.mockResolvedValue("u1");
+    m("user", "update").mockResolvedValue({ sessionEpoch: 1 });
+    expect((await postForm(app.baseUrl, "/auth/logout", { csrf_token: token }, client.fetch)).status).toBe(200);
   });
 
   it.each([
