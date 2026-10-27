@@ -5,6 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import cookieParser from "cookie-parser";
 import { createLogger } from "./logger.js";
+import { errorFields, stackFrames } from "./error-fields.js";
 import { config } from "./config.js";
 import { loadRegistry } from "./resource-registry.js";
 import { jwksRouter } from "./crypto/jwks-router.js";
@@ -131,7 +132,7 @@ app.use((_req: Request, res: Response) => {
 // Centralized error boundary (§10): route handlers throw, Express 5 forwards
 // rejected async handlers here automatically. Never leak internals.
 app.use((err: unknown, req: Request, res: Response, _next: NextFunction) => {
-  log.error({ err, path: req.path }, "Unhandled request error");
+  log.error({ ...errorFields(err), path: req.path, stackFrames: stackFrames(err) }, "Unhandled request error");
   if (res.headersSent) return;
   // body-parser (malformed JSON, oversized body, bad charset...) and other
   // http-errors carry a 4xx status: those are the client's fault, and the status
@@ -157,7 +158,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     try {
       await getOidcConfig();
     } catch (err) {
-      log.error({ err, issuer: config.oidc?.issuer }, "OIDC discovery failed at startup; check OIDC_ISSUER and that the provider is reachable");
+      log.error({ ...errorFields(err), issuer: config.oidc?.issuer }, "OIDC discovery failed at startup; check OIDC_ISSUER and that the provider is reachable");
       process.exit(1);
     }
   }
@@ -179,7 +180,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   await startRegistryListener();
 
   if (config.enableLocalAccounts) {
-    await warnIfSetupUnprotected().catch((err) => log.warn({ err }, "Could not check whether /setup is exposed"));
+    await warnIfSetupUnprotected().catch((err) => log.warn(errorFields(err), "Could not check whether /setup is exposed"));
   }
 
   server.listen(config.port, () => {
@@ -188,16 +189,16 @@ if (import.meta.url === `file://${process.argv[1]}`) {
 
   // Periodic cleanup of expired rows (§T20), matching Constellation's
   // established 5-minute cadence for the same kind of TTL-store pruning.
-  pruneExpiredRows().catch((err) => log.warn({ err }, "pruneExpiredRows failed"));
+  pruneExpiredRows().catch((err) => log.warn(errorFields(err), "pruneExpiredRows failed"));
   const cleanupInterval = setInterval(() => {
-    pruneExpiredRows().catch((err) => log.warn({ err }, "pruneExpiredRows failed"));
+    pruneExpiredRows().catch((err) => log.warn(errorFields(err), "pruneExpiredRows failed"));
   }, 5 * 60 * 1000);
   cleanupInterval.unref();
 
   // Keeps resource server metadata snapshots fresh (they are never fetched on
   // the request path).
   const metadataInterval = setInterval(() => {
-    refreshDueResourceServers().catch((err) => log.warn({ err }, "refreshDueResourceServers failed"));
+    refreshDueResourceServers().catch((err) => log.warn(errorFields(err), "refreshDueResourceServers failed"));
   }, REFRESH_JOB_INTERVAL_MS);
   metadataInterval.unref();
 
@@ -209,9 +210,9 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     log.info("Shutdown complete");
   }
 
-  process.once("SIGTERM", () => shutdown().catch((err) => { log.error({ err }, "Error during shutdown"); process.exit(1); }));
-  process.once("SIGINT", () => shutdown().catch((err) => { log.error({ err }, "Error during shutdown"); process.exit(1); }));
+  process.once("SIGTERM", () => shutdown().catch((err) => { log.error(errorFields(err), "Error during shutdown"); process.exit(1); }));
+  process.once("SIGINT", () => shutdown().catch((err) => { log.error(errorFields(err), "Error during shutdown"); process.exit(1); }));
 
-  process.on("unhandledRejection", (err) => { log.error({ err }, "Unhandled rejection"); process.exit(1); });
-  process.on("uncaughtException", (err) => { log.error({ err }, "Uncaught exception"); process.exit(1); });
+  process.on("unhandledRejection", (err) => { log.error(errorFields(err), "Unhandled rejection"); process.exit(1); });
+  process.on("uncaughtException", (err) => { log.error(errorFields(err), "Uncaught exception"); process.exit(1); });
 }

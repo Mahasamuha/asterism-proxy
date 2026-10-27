@@ -1,5 +1,6 @@
 import { prisma } from "../db.js";
 import { createLogger } from "../logger.js";
+import { errorFields } from "../error-fields.js";
 import { prismaErrorCode, refreshMetadata, ResourceServerError } from "./service.js";
 
 const log = createLogger("resource-servers");
@@ -47,7 +48,7 @@ export async function refreshDueResourceServers(): Promise<number> {
         } catch (err) {
           // Removed while its metadata was being fetched: nothing left to refresh.
           if (prismaErrorCode(err) === "P2025" || err instanceof ResourceServerError) continue;
-          log.warn({ err, identifier }, "Resource server metadata refresh crashed");
+          log.warn({ ...errorFields(err), identifier }, "Resource server metadata refresh crashed");
         }
       }
     };

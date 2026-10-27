@@ -2,6 +2,7 @@ import * as client from "openid-client";
 import { prisma } from "../db.js";
 import { config } from "../config.js";
 import { createLogger } from "../logger.js";
+import { errorFields } from "../error-fields.js";
 import { claimsToStore, emailFromClaims, getOidcConfig, subjectFromClaims } from "./oidc.js";
 
 const log = createLogger("upstream-refresh");
@@ -65,10 +66,10 @@ async function doRecheck(userId: string): Promise<UpstreamRecheck> {
   const checkedAt = user.upstreamCheckedAt;
   const failOpen = (err: unknown): UpstreamRecheck => {
     if (checkedAt && now - checkedAt.getTime() < UPSTREAM_FAIL_OPEN_MS) {
-      log.warn({ userId, err }, "Upstream unavailable; allowing refresh on a recent check");
+      log.warn({ userId, ...errorFields(err) }, "Upstream unavailable; allowing refresh on a recent check");
       return { ok: true };
     }
-    log.error({ userId, err }, "Upstream unavailable and last check is too old");
+    log.error({ userId, ...errorFields(err) }, "Upstream unavailable and last check is too old");
     return { ok: false, reason: "upstream_unavailable" };
   };
   const unavailable = (err: unknown): UpstreamRecheck => {
@@ -79,14 +80,14 @@ async function doRecheck(userId: string): Promise<UpstreamRecheck> {
   const rejected = async (err: unknown): Promise<UpstreamRecheck> => {
     recentFailures.delete(userId);
     await clearUpstreamToken(userId, storedToken, checkedAt);
-    log.warn({ userId, err }, "Upstream rejected the refresh; user must sign in again");
+    log.warn({ userId, ...errorFields(err) }, "Upstream rejected the refresh; user must sign in again");
     return { ok: false, reason: "upstream_rejected" };
   };
   // Refused without failing open, and the token is kept: whatever went wrong says
   // nothing certain about the user (a misconfigured client, a bad response, a bug).
   const refused = (where: string, err: unknown): UpstreamRecheck => {
     recentFailures.delete(userId);
-    log.error({ userId, err }, `Upstream ${where} failed; refusing without clearing the token`);
+    log.error({ userId, ...errorFields(err) }, `Upstream ${where} failed; refusing without clearing the token`);
     return { ok: false, reason: "upstream_error" };
   };
   const fail = (endpoint: "token" | "userinfo", err: unknown): Promise<UpstreamRecheck> | UpstreamRecheck => {
@@ -176,7 +177,7 @@ async function doRecheck(userId: string): Promise<UpstreamRecheck> {
     // The provider confirmed the user, so this refresh may go ahead. If it rotated
     // the token, the new one is lost and the next check will fail with
     // invalid_grant, sending the user through sign-in once.
-    log.error({ userId, err }, "Could not store the upstream re-check result");
+    log.error({ userId, ...errorFields(err) }, "Could not store the upstream re-check result");
   }
   return { ok: true };
 }
@@ -249,6 +250,6 @@ async function clearUpstreamToken(userId: string, refusedToken: string, checkedA
       data: { upstreamRefreshToken: null },
     });
   } catch (err) {
-    log.error({ userId, err }, "Could not clear the refused upstream token");
+    log.error({ userId, ...errorFields(err) }, "Could not clear the refused upstream token");
   }
 }

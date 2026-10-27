@@ -2,6 +2,7 @@ import * as client from "openid-client";
 import { prisma } from "../db.js";
 import { config } from "../config.js";
 import { createLogger } from "../logger.js";
+import { errorFields } from "../error-fields.js";
 import { Prisma } from "../generated/prisma/client.js";
 import { FRESH_LOGIN_MAX_AGE_S } from "./self-login.js";
 
@@ -53,7 +54,7 @@ export async function getOidcConfig(): Promise<client.Configuration> {
     log.info({ issuer: oidc.issuer }, "OIDC provider discovered");
   } catch (err) {
     if (_config) {
-      log.warn({ err, issuer: oidc.issuer }, "OIDC re-discovery failed, using stale config");
+      log.warn({ ...errorFields(err), issuer: oidc.issuer }, "OIDC re-discovery failed, using stale config");
     } else {
       throw err;
     }

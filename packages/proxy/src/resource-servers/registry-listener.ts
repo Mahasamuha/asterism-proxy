@@ -1,6 +1,7 @@
 import pg from "pg";
 import { config } from "../config.js";
 import { createLogger } from "../logger.js";
+import { errorFields } from "../error-fields.js";
 import { loadRegistry } from "../resource-registry.js";
 
 const log = createLogger("registry-listener");
@@ -71,7 +72,7 @@ function requestReload(): Promise<void> {
             break;
           } catch (err) {
             if (!running) return;
-            log.warn({ err, retryInMs: delay }, "Could not reload the resource server registry; keeping the current one and retrying");
+            log.warn({ ...errorFields(err), retryInMs: delay }, "Could not reload the resource server registry; keeping the current one and retrying");
             await sleepBeforeRetry(delay);
             if (!running) return;
             delay = Math.min(delay * 2, MAX_BACKOFF_MS);
@@ -99,7 +100,7 @@ async function connect(): Promise<void> {
     next.on("error", () => undefined); // a late error on a dead client must not crash the process
     next.end().catch(() => undefined);
     if (!running) return;
-    log.warn({ err, retryInMs: backoffMs }, "Registry listener connection lost; reconnecting");
+    log.warn({ ...errorFields(err), retryInMs: backoffMs }, "Registry listener connection lost; reconnecting");
     scheduleReconnect();
   };
   next.on("error", lost);

@@ -1,5 +1,6 @@
 import { Router, Request, Response } from "express";
 import { createLogger } from "../logger.js";
+import { errorFields } from "../error-fields.js";
 import { config } from "../config.js";
 import { prisma } from "../db.js";
 import { handleUpstreamCallback } from "./oidc.js";
@@ -23,7 +24,7 @@ oidcRouter.get("/oauth/callback", async (req: Request, res: Response) => {
   } catch (err) {
     // This is a browser redirect target, so show a page rather than the JSON
     // error body. Details are logged only; the page is deliberately generic.
-    log.warn({ err }, "OIDC callback failed");
+    log.warn(errorFields(err), "OIDC callback failed");
     renderMessage(res, 400, {
       status: "error",
       heading: "Sign-in failed",

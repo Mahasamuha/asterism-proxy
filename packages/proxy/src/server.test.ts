@@ -12,10 +12,10 @@ const oidc = vi.hoisted(() => ({
   handleUpstreamCallback: vi.fn(),
   startUpstreamAuth: vi.fn(),
 }));
-const logs = vi.hoisted(() => ({ warn: vi.fn() }));
+const logs = vi.hoisted(() => ({ warn: vi.fn(), error: vi.fn() }));
 vi.mock("./db.js", () => db);
 vi.mock("./logger.js", () => {
-  const log = { debug: vi.fn(), info: vi.fn(), error: vi.fn(), warn: logs.warn, child: () => log };
+  const log = { debug: vi.fn(), info: vi.fn(), error: logs.error, warn: logs.warn, child: () => log };
   return { logger: log, createLogger: () => log };
 });
 vi.mock("./identity/oidc.js", () => oidc);
@@ -86,6 +86,17 @@ describe("error boundary", () => {
     const text = await res.text();
     expect(JSON.parse(text)).toEqual({ error: "server_error", error_description: "An internal error occurred" });
     expect(text).not.toMatch(/password|10\.9\.8\.7|mcp_auth/);
+  });
+
+  it("P1 the error handler logs picked fields, not the error object or its stack's message", async () => {
+    const base = await boot();
+    db.prisma.localUser.count.mockRejectedValue(Object.assign(new Error("secret-in-message"), { code: "P1001", response: { headers: { authorization: "Bearer s3cret" } } }));
+    await fetch(`${base}/setup`);
+    const logged = logs.error.mock.calls.find((c) => c[1] === "Unhandled request error")?.[0] as Record<string, unknown>;
+    expect(logged).toMatchObject({ errName: "Error", errCode: "P1001", path: "/setup" });
+    expect(logged).not.toHaveProperty("err");
+    expect(JSON.stringify(logged)).not.toContain("s3cret");
+    expect(String(logged.stackFrames)).not.toContain("secret-in-message");
   });
 
   it("P0 a non-Error rejection, or a 5xx/3xx status on the error, is still a generic 500", async () => {
