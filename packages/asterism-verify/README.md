@@ -7,6 +7,7 @@ Verifies JWT access tokens issued by [asterism-proxy](https://github.com/Mahasam
 - With discovery, the discovery document's `issuer` must exactly equal the configured `issuer`. A `jwks_uri` (discovered or configured) must be `https:`; `http:` is accepted only for loopback hosts (`localhost`, `127.0.0.1`, `[::1]`) for development. Redirects are not followed, and responses are capped at 256 KB (JWKS) and 64 KB (discovery).
 - `aud` must be a **single string** equal to this server's identifier. Array audiences are rejected outright, so a token minted for one MCP server can't be replayed against another.
 - JWKS and discovery requests time out after 10 seconds. A signing key the issuer publishes but that can't be imported (for example one without `alg`) fails as `invalid_signature`.
+- The key's `alg` is the only algorithm accepted. A token whose header `typ` is something other than `at+jwt` (or `application/at+jwt`, case-insensitive) is rejected as `invalid_token_type`; a missing `typ` is accepted, since proxies before this release did not set it.
 - Failures throw a typed `TokenValidationError` with a `reason`.
 - Optional Express helpers: bearer-auth middleware that emits RFC 9728 `WWW-Authenticate` challenges, and a protected-resource metadata handler.
 

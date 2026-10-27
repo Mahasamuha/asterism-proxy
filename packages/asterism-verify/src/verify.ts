@@ -43,6 +43,7 @@ export type TokenValidationReason =
   | "unknown_kid"
   | "jwks_unavailable"
   | "invalid_signature"
+  | "invalid_token_type"
   | "invalid_issuer"
   | "array_audience"
   | "invalid_audience"
@@ -69,8 +70,9 @@ export function createVerifier(config: VerifierConfig): Verifier {
   return {
     async verify(token: string): Promise<Principal> {
       let kid: string | undefined;
+      let typ: string | undefined;
       try {
-        ({ kid } = decodeProtectedHeader(token));
+        ({ kid, typ } = decodeProtectedHeader(token));
       } catch {
         throw new TokenValidationError("malformed", "Token is not a well-formed JWT");
       }
@@ -98,6 +100,13 @@ export function createVerifier(config: VerifierConfig): Verifier {
         throw new TokenValidationError("invalid_signature", `Signing key "${kid}" could not be imported`);
       }
 
+      // RFC 9068 §4: an access token's typ is "at+jwt" (case-insensitive, optionally the full
+      // media type). Rejects other JWTs from the same issuer, e.g. an ID token. A missing typ
+      // is accepted: proxies before this release did not set it.
+      if (typ !== undefined && !/^(?:application\/)?at\+jwt$/i.test(typ)) {
+        throw new TokenValidationError("invalid_token_type", "Token typ is not at+jwt");
+      }
+
       let payload: JWTPayload;
       try {
         // Deliberately not passing `audience` here — jose's own audience
@@ -105,7 +114,11 @@ export function createVerifier(config: VerifierConfig): Verifier {
         // expected value, which is exactly the multi-audience confusion
         // this whole design exists to prevent (§1 requirement 2). Verify
         // signature/iss/exp/nbf via jose, then check aud manually below.
-        ({ payload } = await jwtVerify(token, key, { issuer: config.issuer }));
+        ({ payload } = await jwtVerify(token, key, {
+          issuer: config.issuer,
+          // Pinned to the key's own alg, so the token's header can't pick another.
+          algorithms: [jwk.alg as string],
+        }));
       } catch (err) {
         if (err instanceof joseErrors.JWTExpired) {
           throw new TokenValidationError("expired", "Token has expired");

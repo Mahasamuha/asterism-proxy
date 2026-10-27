@@ -98,24 +98,28 @@ export function createBearerAuthMiddleware(config: VerifierConfig): RequestHandl
     const token = authHeader.slice("Bearer ".length);
     verifier
       .verify(token)
-      .then((principal) => {
-        (req as AuthenticatedRequest).principal = principal;
-        next();
-      })
-      .catch((err: unknown) => {
-        if (err instanceof TokenValidationError && err.reason === "jwks_unavailable") {
-          // The token wasn't proven bad; the signing keys couldn't be fetched. No challenge:
-          // re-authenticating wouldn't help.
-          res.set("Retry-After", "30");
-          res.status(503).json({
-            error: "temporarily_unavailable",
-            error_description: "Token verification is temporarily unavailable",
-          });
-          return;
-        }
-        res.set("WWW-Authenticate", `${challenge}, error="invalid_token"`);
-        res.status(401).json({ error: "invalid_token", error_description: "Bearer token is invalid or expired" });
-      });
+      .then(
+        (principal) => {
+          (req as AuthenticatedRequest).principal = principal;
+          // Outside the rejection handler below: an exception thrown downstream must not be
+          // answered as an authentication failure.
+          next();
+        },
+        (err: unknown) => {
+          if (err instanceof TokenValidationError && err.reason === "jwks_unavailable") {
+            // The token wasn't proven bad; the signing keys couldn't be fetched. No challenge:
+            // re-authenticating wouldn't help.
+            res.set("Retry-After", "30");
+            res.status(503).json({
+              error: "temporarily_unavailable",
+              error_description: "Token verification is temporarily unavailable",
+            });
+            return;
+          }
+          res.set("WWW-Authenticate", `${challenge}, error="invalid_token"`);
+          res.status(401).json({ error: "invalid_token", error_description: "Bearer token is invalid or expired" });
+        },
+      );
   };
 }
 

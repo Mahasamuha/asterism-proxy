@@ -152,6 +152,30 @@ describe("createBearerAuthMiddleware", () => {
     }
   });
 
+  it("P0 an exception thrown by the downstream handler is not answered as a 401", async () => {
+    const errors: unknown[] = [];
+    const a = express();
+    a.use("/boom", createBearerAuthMiddleware(cfg()));
+    a.get("/boom", () => {
+      throw new Error("downstream bug");
+    });
+    a.use((err: unknown, _req: Request, res: express.Response, _next: express.NextFunction) => {
+      errors.push(err);
+      res.status(500).json({ error: "app_error" });
+    });
+    const srv = a.listen(0, "127.0.0.1");
+    await new Promise<void>((r) => srv.once("listening", r));
+    try {
+      const res = await fetch(`http://127.0.0.1:${(srv.address() as AddressInfo).port}/boom`, { headers: { authorization: `Bearer ${await token()}` } });
+      expect(res.status).toBe(500);
+      expect(res.headers.get("www-authenticate")).toBeNull();
+      expect(errors).toHaveLength(1);
+    } finally {
+      srv.closeAllConnections();
+      await new Promise((r) => srv.close(r));
+    }
+  });
+
   it("P1 an empty token is an invalid_token challenge, not a crash", async () => {
     const res = await get({ authorization: "Bearer " });
     expect(res.status).toBe(401);

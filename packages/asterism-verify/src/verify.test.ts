@@ -208,6 +208,19 @@ describe("verify: kid and signature", () => {
     expect(await reasonOf(createVerifier(config()).verify(await sign(rs, claims())))).toBe("invalid_signature");
   });
 
+  it("P0 a token whose typ is not at+jwt is rejected as invalid_token_type", async () => {
+    for (const typ of ["JWT", "id_token+jwt", "at+jwt+x"]) {
+      expect(await reasonOf(createVerifier(config()).verify(await sign(key, claims(), { typ }))), typ).toBe("invalid_token_type");
+    }
+  });
+
+  it("P1 typ at+jwt is accepted in any case and as application/at+jwt; a missing typ is accepted", async () => {
+    const v = createVerifier(config());
+    for (const typ of ["at+jwt", "AT+JWT", "application/at+jwt", "Application/AT+JWT", undefined]) {
+      expect((await v.verify(await sign(key, claims(), { typ }))).subject, String(typ)).toBe("user-1");
+    }
+  });
+
   it("P0 a published key that cannot be imported gives a typed error, not a raw one", async () => {
     // A key without "alg" makes jose's importJWK throw a TypeError.
     const { alg: _alg, ...noAlg } = key.publicJwk;

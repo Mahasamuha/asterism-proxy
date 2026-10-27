@@ -27,7 +27,7 @@ expectTypeOf<Principal>().toEqualTypeOf<{ subject: string; clientId: string; sco
 
 // Adding a reason is allowed; removing or renaming one is a breaking change.
 expectTypeOf<
-  "malformed" | "unknown_kid" | "jwks_unavailable" | "invalid_signature" | "invalid_issuer" | "array_audience" | "invalid_audience" | "expired" | "not_yet_valid" | "missing_claims"
+  "malformed" | "unknown_kid" | "jwks_unavailable" | "invalid_signature" | "invalid_token_type" | "invalid_issuer" | "array_audience" | "invalid_audience" | "expired" | "not_yet_valid" | "missing_claims"
 >().toExtend<TokenValidationReason>();
 
 expectTypeOf(createVerifier).parameters.toEqualTypeOf<[VerifierConfig]>();
