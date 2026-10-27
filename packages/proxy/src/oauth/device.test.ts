@@ -100,6 +100,18 @@ describe("POST /oauth/device/code", () => {
     expect(m("deviceCode", "create")).not.toHaveBeenCalled();
   });
 
+  it("M1 refuses with 429 and Retry-After before resolving the client once an address is over its limit", async () => {
+    const ip = freshIp();
+    const post = () => postForm(app.baseUrl, "/oauth/device/code", { client_id: CLIENT_ID, resource: RESOURCE }, from(ip));
+    for (let i = 0; i < 60; i++) await post();
+    resolve.mockClear();
+    const r = await post();
+    expect(r.status).toBe(429);
+    expect(r.json["error"]).toBe("temporarily_unavailable");
+    expect(Number(r.headers.get("retry-after"))).toBeGreaterThan(0);
+    expect(resolve).not.toHaveBeenCalled();
+  });
+
   it.each([
     ["missing", {}],
     ["unregistered", { resource: "https://nope.example.test" }],
@@ -341,6 +353,13 @@ describe("user-code entry limiters count failures only (M10)", () => {
     for (let i = 0; i < 15; i++) expect((await enterCode(ip, "")).status).toBe(200);
     m("deviceCode", "findFirst").mockResolvedValue(null);
     expect((await enterCode(ip, "WXYZ2345")).status).toBe(200);
+  });
+
+  it("L2 addresses in one IPv6 /64 share the failed-entry budget; another /64 does not", async () => {
+    m("deviceCode", "findFirst").mockResolvedValue(null);
+    for (let i = 0; i < 10; i++) expect((await enterCode(`2001:db8:1:2:${i + 1}::${i + 1}`, "WXYZ2345")).status).toBe(200);
+    expect((await enterCode("2001:db8:1:2:ffff::1", "WXYZ2345")).status).toBe(429);
+    expect((await enterCode("2001:db8:1:3::1", "WXYZ2345")).status).toBe(200);
   });
 
   it("has no global ceiling: failures from many addresses never lock out an address that has none of its own", async () => {

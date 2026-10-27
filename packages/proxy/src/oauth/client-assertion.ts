@@ -55,6 +55,11 @@ function jwksTtlMs(cacheControl: string | string[] | undefined): number {
 async function fetchClientJwks(jwksUri: string): Promise<jose.JWK[]> {
   let headers: IncomingHttpHeaders = {};
   const raw = await safeFetchJson(jwksUri, {
+    // Own pool: CIMD fetches (unauthenticated, via /oauth/authorize) must not
+    // be able to fill the slots this endpoint needs. No redirects: the key set
+    // is at the URL the client metadata names.
+    pool: "client-jwks",
+    maxRedirects: 0,
     onHeaders: (h) => {
       headers = h;
     },

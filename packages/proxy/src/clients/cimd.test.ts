@@ -107,6 +107,22 @@ describe("validateDocument", () => {
     expect(bad({ client_name: n })).toThrow(/client_name/);
   });
 
+  it.each([
+    ["a right-to-left override", "App\u202Eexe.txt"],
+    ["a zero-width space", "Ap\u200Bp"],
+    ["a newline", "App\nSecond line"],
+    ["a line separator", "App\u2028x"],
+    ["a C1 control", "App\u0085x"],
+  ])("rejects a client_name with %s", (_label, n) => {
+    expect(bad({ client_name: n })).toThrow(/client_name/);
+  });
+
+  it("accepts ordinary non-ASCII client_names", () => {
+    expect(doc({ client_name: "Café Ünïcode" }).client_name).toBe("Café Ünïcode");
+    expect(doc({ client_name: "Notes 📝" }).client_name).toBe("Notes 📝");
+    expect(doc({ client_name: "日本語アプリ" }).client_name).toBe("日本語アプリ");
+  });
+
   it("accepts a 200-character client_name", () => {
     expect(() => doc({ client_name: "x".repeat(200) })).not.toThrow();
   });
@@ -353,6 +369,8 @@ describe("resolveClient", () => {
     expect(arg.create).toMatchObject({ clientId: ID, source: "cimd", trustLevel: "allowlisted" });
     expect(arg.create.expiresAt.toISOString()).toBe("2026-03-01T01:00:00.000Z");
     expect(arg.update.expiresAt.toISOString()).toBe("2026-03-01T01:00:00.000Z");
+    // a refresh must restamp the fetch time, or it stays at the first-ever fetch
+    expect(arg.update.fetchedAt).toEqual(NOW);
     expect(arg.create.metadata).toMatchObject({ client_id: ID, client_name: "App" });
   });
 
@@ -421,9 +439,13 @@ describe("resolveClient", () => {
   });
 
   describe("stale fallback when the per-host limit or busy cap blocks a refetch", () => {
-    const stale = (fetchedAgoMs: number) => row({ expiresAt: NOW, fetchedAt: new Date(NOW.getTime() - fetchedAgoMs), trustLevel: "domain_verified" });
+    // expired `expiredAgoMs` ago; fetchedAt is the usual 24 h default TTL before that
+    const stale = (expiredAgoMs: number) => {
+      const expiresAt = new Date(NOW.getTime() - expiredAgoMs);
+      return row({ expiresAt, fetchedAt: new Date(expiresAt.getTime() - DAY), trustLevel: "domain_verified" });
+    };
 
-    it.each(["rate_limited", "busy"])("serves the expired row fetched within 24 h on %s", async (reason) => {
+    it.each(["rate_limited", "busy"])("serves a default-TTL row that expired within 24 h on %s", async (reason) => {
       h.findUnique.mockResolvedValue(stale(60 * 60 * 1000));
       h.safeFetchJson.mockRejectedValueOnce(new h.SafeFetchError(reason));
       const out = await resolveClient(ID);
@@ -431,7 +453,7 @@ describe("resolveClient", () => {
       expect(h.upsert).not.toHaveBeenCalled();
     });
 
-    it("fails when the row is older than 24 h", async () => {
+    it("fails when the row expired more than 24 h ago", async () => {
       h.findUnique.mockResolvedValue(stale(DAY + 1000));
       h.safeFetchJson.mockRejectedValueOnce(new h.SafeFetchError("rate_limited"));
       expect(await resolveClient(ID)).toBeNull();

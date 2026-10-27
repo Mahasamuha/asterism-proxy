@@ -10,7 +10,7 @@ import { requestsFreshSignIn } from "./fresh-sign-in.js";
 import { bodyOf, stringField } from "../http-params.js";
 import { issueCsrfToken, verifyCsrfToken } from "../identity/csrf.js";
 import { bindFlow } from "../identity/flow-binding.js";
-import { rowCreationRetryAfter } from "../rate-limit.js";
+import { clientResolutionRetryAfter, ipRateLimitKey, rowCreationRetryAfter } from "../rate-limit.js";
 import { allowFormSubmissionTo } from "../security-headers.js";
 
 const log = createLogger("device");
@@ -86,7 +86,7 @@ export function resetDeviceEntryLimits(): void {
   failedByIp.clear();
 }
 
-/** Reserves a failed-entry slot for `ip`. Returns a function that gives the
+/** Reserves a failed-entry slot for `ip` (already an ipRateLimitKey). Returns a function that gives the
  * slot back (call it on success), or null if the limit is reached. */
 function reserveFailedEntry(ip: string): (() => void) | null {
   const now = Date.now();
@@ -129,6 +129,16 @@ deviceRouter.post("/oauth/device/code", async (req: Request, res: Response) => {
 
   if (!clientId) {
     res.status(400).json({ error: "invalid_request", error_description: "client_id is required" });
+    return;
+  }
+
+  // resolveClient can fetch the client's metadata document, so cap it per
+  // address before it runs.
+  const resolveRetryAfter = clientResolutionRetryAfter(req);
+  if (resolveRetryAfter > 0) {
+    log.warn({ ip: req.ip }, "Device code client resolution rate limit exceeded");
+    res.set("Retry-After", String(resolveRetryAfter));
+    res.status(429).json({ error: "temporarily_unavailable", error_description: "Too many requests from this address; slow down and retry later" });
     return;
   }
 
@@ -232,7 +242,7 @@ async function startDeviceConsent(req: Request, res: Response, rawCode: string):
     await renderEntry(res, "Invalid or missing CSRF token. Please try again.", normalizeUserCode(rawCode) ? formatUserCode(normalizeUserCode(rawCode)) : "", 403);
     return;
   }
-  const release = reserveFailedEntry(req.ip ?? "unknown");
+  const release = reserveFailedEntry(ipRateLimitKey(req.ip));
   if (!release) {
     await renderEntry(res, "Too many attempts. Please wait and try again.", "", 429);
     return;

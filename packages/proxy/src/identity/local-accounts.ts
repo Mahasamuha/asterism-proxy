@@ -4,6 +4,7 @@ import { prisma } from "../db.js";
 import type { LoginFailureKind, Prisma } from "../generated/prisma/client.js";
 import { createLogger } from "../logger.js";
 import { incrementCounter } from "../metrics.js";
+import { ipRateLimitKey } from "../rate-limit.js";
 import { MAX_PASSWORD_BYTES } from "./password-policy.js";
 
 const log = createLogger("local-accounts");
@@ -67,11 +68,16 @@ const IP_LIMITED_KINDS: LoginFailureKind[] = ["login", "device", "setup"];
 
 async function reserveAttempt(limits: AttemptLimits): Promise<AttemptSlot | null> {
   const since = new Date(Date.now() - FAILURE_WINDOW_MS);
+  // Count, lock and store the address as its rate-limit key (an IPv6 /64), so a
+  // client rotating addresses inside its prefix shares one budget. The column is
+  // a plain string, so rows need no migration; rows written before this change
+  // hold full addresses and simply stop counting once their window passes.
+  const ip = limits.maxPerIp !== undefined ? ipRateLimitKey(limits.ip) : limits.ip;
   // Bound the key so a huge username can't bloat the table.
   const key = limits.key === undefined ? null : limits.key.slice(0, MAX_THROTTLE_KEY_LENGTH);
   // Locks are always taken in sorted order so two requests sharing both keys can't deadlock.
   // `kind` is one of four fixed words (no ":"), so "<kind>:key:<anything>" cannot equal another kind's name.
-  const lockNames = [limits.maxPerIp !== undefined ? `login:ip:${limits.ip}` : null, key !== null ? `login:${limits.kind}:key:${key}` : null]
+  const lockNames = [limits.maxPerIp !== undefined ? `login:ip:${ip}` : null, key !== null ? `login:${limits.kind}:key:${key}` : null]
     .filter((k): k is string => k !== null)
     .sort();
 
@@ -81,14 +87,14 @@ async function reserveAttempt(limits: AttemptLimits): Promise<AttemptSlot | null
         await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${name}::text, 0::bigint))`;
       }
       if (limits.maxPerIp !== undefined) {
-        const byIp = await tx.loginFailure.count({ where: { kind: { in: IP_LIMITED_KINDS }, ip: limits.ip, failedAt: { gte: since } } });
+        const byIp = await tx.loginFailure.count({ where: { kind: { in: IP_LIMITED_KINDS }, ip, failedAt: { gte: since } } });
         if (byIp >= limits.maxPerIp) return null;
       }
       if (key !== null && limits.maxPerKey !== undefined) {
         const byKey = await tx.loginFailure.count({ where: { kind: limits.kind, username: key, failedAt: { gte: since } } });
         if (byKey >= limits.maxPerKey) return null;
       }
-      const row = await tx.loginFailure.create({ data: { kind: limits.kind, ip: limits.ip, username: key }, select: { id: true } });
+      const row = await tx.loginFailure.create({ data: { kind: limits.kind, ip, username: key }, select: { id: true } });
       return { id: row.id, kind: limits.kind, key };
     },
     // Waiting for the per-key lock (and a pooled connection) under a burst must not trip the 5s default.

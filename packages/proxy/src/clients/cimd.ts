@@ -19,11 +19,18 @@ const MAX_DOCUMENT_BYTES = 5 * 1024;
 // the client_id URL itself, not from wherever that URL points.
 const CIMD_MAX_REDIRECTS = 0;
 // A fetch refused by the per-host rate limit or the global concurrency cap may
-// be served from an existing row this recent (an attacker can otherwise exhaust
-// the budget for a no-store client's host and deny it to real users).
+// be served from an existing row that expired no longer ago than this (an
+// attacker can otherwise exhaust the budget for a no-store client's host and
+// deny it to real users). Measured from expiry, not from the fetch: a refetch
+// only happens once the row has expired, so a window from fetchedAt would
+// never be open for a client with a long TTL.
 const STALE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const CLIENT_ID_URL_MAX_LENGTH = 2000;
 const CLIENT_NAME_MAX_LENGTH = 200;
+// Same rule as UNSAFE_TEXT in resource-servers/metadata.ts: the name is shown at
+// consent, and control, format (bidi override, zero-width) and line or paragraph
+// separator characters could hide or reorder what it appears to say.
+const UNSAFE_TEXT = /[\p{Cc}\p{Cf}\u2028\u2029]/u;
 
 // Grant types this server can actually issue; anything else in a document is
 // meaningless here and is dropped.
@@ -160,6 +167,9 @@ export function validateDocument(fetchedFromUrl: string, raw: unknown): ClientMe
   const clientName = doc["client_name"];
   if (typeof clientName !== "string" || clientName.trim() === "" || clientName.trim().length > CLIENT_NAME_MAX_LENGTH) {
     throw new CimdValidationError(`client_name is required and must be a non-empty string of at most ${CLIENT_NAME_MAX_LENGTH} characters`);
+  }
+  if (UNSAFE_TEXT.test(clientName)) {
+    throw new CimdValidationError("client_name must not contain control, format or line-separator characters");
   }
 
   // A CIMD client is public or private_key_jwt; a shared secret in a public
@@ -342,10 +352,10 @@ async function fetchAndStore(clientId: string, cached: OauthClient | null): Prom
     if (
       err instanceof SafeFetchError &&
       (err.reason === "rate_limited" || err.reason === "busy") &&
-      cached &&
-      Date.now() - cached.fetchedAt.getTime() <= STALE_MAX_AGE_MS
+      cached?.expiresAt &&
+      Date.now() - cached.expiresAt.getTime() <= STALE_MAX_AGE_MS
     ) {
-      log.warn({ clientId, reason: err.reason, fetchedAt: cached.fetchedAt }, "Serving stale CIMD client row because the refetch was refused");
+      log.warn({ clientId, reason: err.reason, expiresAt: cached.expiresAt }, "Serving stale CIMD client row because the refetch was refused");
       incrementCounter("cimd_stale_served_total", { reason: err.reason });
       return { ...cached, trustLevel: assignTrustLevel(clientId, cached.source) };
     }
@@ -376,6 +386,7 @@ async function fetchAndStore(clientId: string, cached: OauthClient | null): Prom
       metadata: document as unknown as Prisma.InputJsonObject,
       trustLevel,
       expiresAt,
+      fetchedAt: new Date(),
       lastSeenAt: new Date(),
     },
   });

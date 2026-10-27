@@ -92,6 +92,15 @@ describe("login throttle", () => {
     expect(await evaluated(results)).toBe(5);
   });
 
+  it("L2 addresses in one IPv6 /64 share the per-IP budget; the counter stores the /64", async () => {
+    const results: Response[] = [];
+    for (let i = 0; i < 8; i++) results.push(await attempt(proxied.baseUrl, `user${i}`, "wrong password", `2001:db8:5:6:${i + 1}::${i + 1}`));
+    expect(await evaluated(results)).toBe(5);
+    expect(await prisma.loginFailure.findFirstOrThrow().then((r) => r.ip)).toBe("2001:db8:5:6::/64");
+    // A different /64 has its own budget.
+    expect((await evaluated([await attempt(proxied.baseUrl, "other", "wrong password", "2001:db8:5:7::1")]))).toBe(1);
+  });
+
   it("M4 /auth/password is throttled per user", async () => {
     const { password } = await seedLocalUser({ username: "alice" });
     const jar = cookieClient();

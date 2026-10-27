@@ -516,6 +516,13 @@ describe("safeFetchJson", () => {
       expect(await reasonOf(safeFetchJson(base("/x"), { pool: "resource-metadata" }))).toBe("rate_limited");
     });
 
+    it("keeps a separate per-host rate limit for client-jwks fetches", async () => {
+      srv.routes["/x"] = { body: {} };
+      for (let i = 0; i < 10; i++) expect(await reasonOf(safeFetchJson(base("/x")))).toBe("ok");
+      expect(await reasonOf(safeFetchJson(base("/x")))).toBe("rate_limited");
+      expect(await reasonOf(safeFetchJson(base("/x"), { pool: "client-jwks" }))).toBe("ok");
+    });
+
     it("keeps a separate in-flight cap per pool", async () => {
       lookup.mockImplementation((() => new Promise(() => {})) as never);
       const cimd = Array.from({ length: MAX_CONCURRENT_FETCHES }, (_, i) =>

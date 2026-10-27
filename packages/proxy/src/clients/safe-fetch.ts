@@ -104,10 +104,11 @@ function isLoopbackAddress(address: string, family: 4 | 6): boolean {
 const RATE_LIMIT_MAX = 10;
 const RATE_LIMIT_WINDOW_MS = 60 * 1000;
 
-// Two pools, so a flood of attacker-triggered CIMD fetches (via /oauth/authorize)
+// Separate pools, so a flood of attacker-triggered CIMD fetches (via /oauth/authorize)
 // cannot use up the budget an operator's resource-metadata fetch needs for the
-// same host, nor the in-flight slots.
-export type FetchPool = "cimd" | "resource-metadata";
+// same host, nor the in-flight slots, and cannot starve client JWKS fetches at
+// the token endpoint (private_key_jwt).
+export type FetchPool = "cimd" | "resource-metadata" | "client-jwks";
 const rateLimitWindows = new Map<string, { count: number; windowStart: number }>();
 
 function checkRateLimit(pool: FetchPool, rawHostname: string): void {
@@ -365,7 +366,7 @@ export interface SafeFetchOptions {
   allowPrivateNetwork?: boolean;
   // Which rate-limit namespace and concurrency pool the call is charged to.
   // Defaults to "cimd" (client metadata documents, which an unauthenticated
-  // caller can trigger); operator-driven resource-metadata fetches use their own.
+  // caller can trigger); operator-driven resource-metadata fetches and client JWKS fetches use their own.
   pool?: FetchPool;
 }
 
@@ -377,7 +378,7 @@ const DEFAULT_MAX_REDIRECTS = 1;
 // lookups hold libuv threadpool threads, so excess calls fail fast instead of queuing.
 // The cap applies per pool.
 export const MAX_CONCURRENT_FETCHES = 8;
-const inFlight: Record<FetchPool, number> = { cimd: 0, "resource-metadata": 0 };
+const inFlight: Record<FetchPool, number> = { cimd: 0, "resource-metadata": 0, "client-jwks": 0 };
 
 export async function safeFetchJson(url: string, options: SafeFetchOptions = {}): Promise<unknown> {
   const pool = options.pool ?? "cimd";
