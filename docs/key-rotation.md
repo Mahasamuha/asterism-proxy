@@ -22,8 +22,8 @@ JWKS, for a bounded grace period after retirement.
   any retired key whose `retiredAt` is within the last
   `RETIRED_KEY_RETENTION_MS` (currently 2 hours). That window has to
   comfortably exceed:
-  1. The longest access token lifetime (15 minutes, 5 for `admin`-scoped
-     tokens — §1.9), so a token signed moments before rotation is still
+  1. The longest access token lifetime (15 minutes, 5 when a granted scope is
+     marked short-lived, currently `admin` — §1.9), so a token signed moments before rotation is still
      verifiable for its whole lifetime, and
   2. The JWKS endpoint's own `Cache-Control: max-age=3600` (1 hour), so a
      resource server holding a stale cached JWKS can still verify a token
