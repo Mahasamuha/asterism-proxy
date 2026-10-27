@@ -73,6 +73,18 @@ describe("authorization_code concurrency and atomicity (P0)", () => {
     expect(refreshed.json["error"]).toBe("invalid_grant");
   });
 
+  it("a replay without proof of the verifier leaves the refresh token alone", async () => {
+    const { user, clientId, grant } = await world();
+    const { code, verifier } = await seedAuthCode({ userId: user.id, clientId, grantId: grant.id, scopes: ["read", "offline_access"] });
+    const fields = { grant_type: "authorization_code", code, redirect_uri: REDIRECT_URI, client_id: clientId, code_verifier: verifier };
+    const first = await token(fields);
+    expect(first.status).toBe(200);
+    const replay = await token({ ...fields, code_verifier: "x".repeat(50) });
+    expect([replay.status, replay.json["error_description"]]).toEqual([400, "Authorization code already used"]);
+    expect(await prisma.refreshToken.count({ where: { revokedAt: null } })).toBe(1);
+    expect((await token({ grant_type: "refresh_token", refresh_token: first.json["refresh_token"] as string, client_id: clientId })).status).toBe(200);
+  });
+
   it("a failure creating the refresh token rolls back the code claim, so the client can retry", async () => {
     const { user, clientId, grant } = await world();
     const { code, verifier } = await seedAuthCode({ userId: user.id, clientId, grantId: grant.id, scopes: ["read", "offline_access"] });

@@ -200,6 +200,42 @@ describe("authorization_code: code state machine (P0)", () => {
   });
 
   it.each([
+    ["a wrong verifier", { code_verifier: "w".repeat(50) }],
+    ["a missing verifier", { code_verifier: "" }],
+    ["a malformed verifier", { code_verifier: "short" }],
+    ["a wrong client_id", { client_id: "https://other.example.test/c.json" }],
+    ["a wrong redirect_uri", { redirect_uri: "https://client.example.test/other" }],
+  ])("replaying a consumed code with %s is refused without revoking anything or deleting the code", async (_n, over) => {
+    arrange(codeEntry({ consumedAt: new Date() }));
+    const r = await token(codeFields(over));
+    expect(r.status).toBe(400);
+    expect(r.json).toMatchObject({ error: "invalid_grant", error_description: "Authorization code already used" });
+    expect(m("refreshToken", "updateMany")).not.toHaveBeenCalled();
+    expect(m("authCode", "delete")).not.toHaveBeenCalled();
+  });
+
+  it("replaying a consumed code that fails client authentication does not revoke", async () => {
+    arrange(codeEntry({ consumedAt: new Date() }));
+    authenticate.mockResolvedValue({ ok: false, error: "invalid_client", errorDescription: "bad assertion" });
+    const r = await token(codeFields());
+    expect(r.json["error"]).toBe("invalid_client");
+    expect(m("refreshToken", "updateMany")).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["too short", "a".repeat(42)],
+    ["too long", "a".repeat(129)],
+    ["outside the unreserved set", "a".repeat(42) + "+"],
+  ])("a code_verifier that is %s is rejected without burning the code", async (_n, code_verifier) => {
+    arrange(codeEntry({ codeChallenge: createHash("sha256").update(code_verifier).digest("base64url") }));
+    const r = await token(codeFields({ code_verifier }));
+    expect(r.json).toMatchObject({ error: "invalid_grant", error_description: "code_verifier malformed" });
+    expect(m("authCode", "delete")).not.toHaveBeenCalled();
+    expect(m("authCode", "updateMany")).not.toHaveBeenCalled();
+    expect(mint).not.toHaveBeenCalled();
+  });
+
+  it.each([
     ["client_id", { client_id: "https://other.example.test/c.json" }],
     ["redirect_uri", { redirect_uri: "https://client.example.test/other" }],
   ])("a %s mismatch burns the code", async (_n, over) => {
