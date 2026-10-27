@@ -94,7 +94,7 @@ describe("deny-client add", () => {
   it("P1 a client_id entry prints the domain command for the whole host; a domain entry does not", async () => {
     const one = await runCli("deny-client", ["add", "https://evil.example.com:8443/client.json?1"]);
     expect(one.stdout).toContain("blocks only this exact client_id URL");
-    expect(one.stdout).toContain("deny-client add evil.example.com");
+    expect(one.stdout).toMatch(/deny-client add evil\.example\.com$/m);
     const two = await runCli("deny-client", ["add", "evil.example.com"]);
     expect(two.stdout).not.toContain("exact client_id");
   });

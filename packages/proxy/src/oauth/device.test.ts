@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { CLIENT_ID, RESOURCE, clientRow, createPrismaMock, getPath, postEmpty, postForm, startRouterAppWith, type RouterApp } from "../test-helpers/oauth-harness.js";
 
 vi.mock("../db.js", async () => ({ prisma: (await import("../test-helpers/oauth-harness.js")).createPrismaMock() }));
@@ -12,6 +12,7 @@ import { config } from "../config.js";
 import { resolveClient } from "../clients/cimd.js";
 import { DEVICE_FLOW_REDIRECT_URI_SENTINEL, deviceRouter, resetDeviceEntryLimits } from "./device.js";
 import { csrfFrom } from "../test-helpers/http.js";
+import { cookieName } from "../cookies.js";
 import { CONSENT_FORM_SCRIPT } from "../security-headers.js";
 
 // The one script the policy allows, by hash.
@@ -21,6 +22,27 @@ const db = prisma as unknown as ReturnType<typeof createPrismaMock>;
 const resolve = vi.mocked(resolveClient);
 const m = (model: string, method: string) => db[model]![method]!;
 const sha = (s: string) => createHash("sha256").update(s).digest("hex");
+
+const ISSUERS: Array<[string, string]> = [["https://auth.example.test", "https"], ["http://localhost:3000", "http"]];
+/** The cookie-clearing Set-Cookie line for `base`, asserted to be at Path=/ and Secure exactly when https. */
+function expectCleared(res: { headers: Headers }, base: string) {
+  const wire = cookieName(base);
+  const line = res.headers.getSetCookie().find((l) => l.startsWith(`${wire}=;`));
+  expect(line, `clear of ${wire}`).toBeDefined();
+  expect(line).toMatch(/; Path=\/(;|$)/);
+  expect(line).toMatch(/; Expires=/);
+  if (config.issuerUrl.startsWith("https:")) {
+    expect(wire).toBe(`__Host-${base}`);
+    expect(line).toMatch(/; Secure/);
+  } else {
+    expect(wire).toBe(base);
+    expect(line).not.toMatch(/; Secure/);
+  }
+}
+const savedIssuer = config.issuerUrl;
+afterEach(() => {
+  config.issuerUrl = savedIssuer;
+});
 
 let app: RouterApp;
 beforeAll(async () => {
@@ -254,6 +276,14 @@ describe("GET/POST /oauth/device (user-code entry)", () => {
     expect(data).toMatchObject({ clientId: CLIENT_ID, resource: RESOURCE, scopes: ["read"], flowType: "device", redirectUri: DEVICE_FLOW_REDIRECT_URI_SENTINEL, state: "ABCD2345" });
     expect(data.expiresAt).toEqual(entry.expiresAt);
     expect(r.headers.get("location")).toBe(`/auth/login?flow=${data.handle}`);
+  });
+
+  it.each(ISSUERS)("a valid code clears the device CSRF cookie under its wire name at Path=/ (%s)", async (issuer) => {
+    config.issuerUrl = issuer;
+    m("deviceCode", "findFirst").mockResolvedValue(pending());
+    const r = await enterCode(freshIp(), "ABCD-2345");
+    expect(r.status).toBe(302);
+    expectCleared(r, "csrf_device");
   });
 
   it.each([

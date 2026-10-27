@@ -22,7 +22,7 @@ describe("__Host- naming over HTTPS", () => {
     issueBoundCsrfToken(reqWith({}), res, "csrf_admin", "admin", "u1");
     expect(sent.map((c) => c.name)).toEqual(["__Host-csrf_login", "__Host-csrf_admin"]);
     for (const c of sent) {
-      expect(c.opts).toMatchObject({ secure: true, path: "/", httpOnly: true, signed: true });
+      expect(c.opts).toMatchObject({ secure: true, path: "/", httpOnly: true, signed: true, sameSite: "strict" });
       expect(c.opts).not.toHaveProperty("domain");
     }
   });

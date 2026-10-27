@@ -1,8 +1,9 @@
 import { createHash } from "node:crypto";
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { CLIENT_ID, RESOURCE, clientRow, createPrismaMock, getPath, postEmpty, postForm, startRouterApp, type RouterApp } from "../test-helpers/oauth-harness.js";
 import { cookieClient, csrfFrom } from "../test-helpers/http.js";
 import { cookieName } from "../cookies.js";
+import { config } from "../config.js";
 
 vi.mock("../db.js", async () => ({ prisma: (await import("../test-helpers/oauth-harness.js")).createPrismaMock() }));
 vi.mock("../resource-registry.js", async () => (await import("../test-helpers/oauth-harness.js")).fakeResourceRegistry());
@@ -24,6 +25,27 @@ const session = vi.mocked(getSessionUserId);
 const authenticate = vi.mocked(authenticateConfidentialClient);
 const m = (model: string, method: string) => db[model]![method]!;
 const sha = (s: string) => createHash("sha256").update(s).digest("hex");
+
+const ISSUERS: Array<[string, string]> = [["https://auth.example.test", "https"], ["http://localhost:3000", "http"]];
+/** The cookie-clearing Set-Cookie line for `base`, asserted to be at Path=/ and Secure exactly when https. */
+function expectCleared(res: { headers: Headers }, base: string) {
+  const wire = cookieName(base);
+  const line = res.headers.getSetCookie().find((l) => l.startsWith(`${wire}=;`));
+  expect(line, `clear of ${wire}`).toBeDefined();
+  expect(line).toMatch(/; Path=\/(;|$)/);
+  expect(line).toMatch(/; Expires=/);
+  if (config.issuerUrl.startsWith("https:")) {
+    expect(wire).toBe(`__Host-${base}`);
+    expect(line).toMatch(/; Secure/);
+  } else {
+    expect(wire).toBe(base);
+    expect(line).not.toMatch(/; Secure/);
+  }
+}
+const savedIssuer = config.issuerUrl;
+afterEach(() => {
+  config.issuerUrl = savedIssuer;
+});
 
 let app: RouterApp;
 beforeAll(async () => {
@@ -326,6 +348,17 @@ describe("GET /grants and /auth/logout", () => {
     expect(r.status).toBe(200);
     expect(r.headers.getSetCookie().join(";")).toMatch(/session=;/);
     expect(m("user", "update").mock.calls[0]![0]).toMatchObject({ where: { id: "u1" }, data: { sessionEpoch: { increment: 1 } } });
+  });
+
+  it.each(ISSUERS)("POST /auth/logout clears the session and logout CSRF cookies under their wire names at Path=/ (%s)", async (issuer) => {
+    config.issuerUrl = issuer;
+    m("user", "update").mockResolvedValue({ sessionEpoch: 1 });
+    const { jar, csrf } = await logoutToken();
+    const r = await postForm(app.baseUrl, "/auth/logout", { csrf_token: csrf }, jar.fetch);
+    expect(r.status).toBe(200);
+    expectCleared(r, "csrf_logout");
+    expectCleared(r, "session");
+    expectCleared(r, "reauth");
   });
 
   it("POST /auth/logout from a browser that never loaded a page with the button is refused and revokes nothing", async () => {

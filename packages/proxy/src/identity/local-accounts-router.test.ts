@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 const db = vi.hoisted(() => ({
   prisma: {
@@ -24,6 +24,7 @@ vi.mock("../db.js", () => db);
 vi.mock("./local-accounts.js", () => la);
 vi.mock("./session.js", async (orig) => ({ ...(await orig<typeof import("./session.js")>()), getSessionUserId: sess.getSessionUserId, startSession: sess.startSession }));
 
+import { config } from "../config.js";
 import { cookieName } from "../cookies.js";
 import { setSession } from "./session.js";
 import { localAccountsRouter } from "./local-accounts-router.js";
@@ -32,6 +33,27 @@ import { cookieClient, csrfFrom, form } from "../test-helpers/http.js";
 import { bindBrowser, bindRouter } from "../test-helpers/fix-f-bind.js";
 
 const GOOD_PW = "correct horse battery";
+const ISSUERS: Array<[string, string]> = [["https://auth.example.test", "https"], ["http://localhost:3000", "http"]];
+/** The cookie-clearing Set-Cookie line for `base`, asserted to be at Path=/ and Secure exactly when https. */
+function expectCleared(res: { headers: Headers }, base: string) {
+  const wire = cookieName(base);
+  const line = res.headers.getSetCookie().find((l) => l.startsWith(`${wire}=;`));
+  expect(line, `clear of ${wire}`).toBeDefined();
+  expect(line).toMatch(/; Path=\/(;|$)/);
+  expect(line).toMatch(/; Expires=/);
+  if (config.issuerUrl.startsWith("https:")) {
+    expect(wire).toBe(`__Host-${base}`);
+    expect(line).toMatch(/; Secure/);
+  } else {
+    expect(wire).toBe(base);
+    expect(line).not.toMatch(/; Secure/);
+  }
+}
+const savedIssuer = config.issuerUrl;
+afterEach(() => {
+  config.issuerUrl = savedIssuer;
+});
+
 let app: RouterApp;
 
 beforeAll(async () => {
@@ -133,6 +155,15 @@ describe("/setup", () => {
     expect(jar.cookies.has("session")).toBe(true);
     expect(jar.cookies.has("reauth")).toBe(false);
     expect(jar.cookies.has("csrf_setup")).toBe(false);
+  });
+
+  it.each(ISSUERS)("P0 success clears the setup CSRF cookie under its wire name at Path=/ (%s)", async (issuer) => {
+    config.issuerUrl = issuer;
+    const { jar, csrf } = await withCsrf("/setup");
+    const res = await jar.fetch(`${app.baseUrl}/setup`, { method: "POST", ...form({ username: "bob", password: GOOD_PW, confirm_password: GOOD_PW, csrf_token: csrf }) });
+    expect(res.status).toBe(302);
+    expectCleared(res, "csrf_setup");
+    expect(jar.cookies.has(cookieName("csrf_setup"))).toBe(false);
   });
 
   it("P0 an empty username is rejected", async () => {
@@ -255,6 +286,15 @@ describe("POST /auth/login", () => {
     expect(jar.cookies.has("session")).toBe(true);
     expect(jar.cookies.has("reauth")).toBe(true); // a password was just entered
     expect(db.prisma.authorizationRequest.findUnique).not.toHaveBeenCalled();
+  });
+
+  it.each(ISSUERS)("P0 success clears the login CSRF cookie under its wire name at Path=/ (%s)", async (issuer) => {
+    config.issuerUrl = issuer;
+    const { jar, csrf } = await withCsrf("/auth/login");
+    const res = await post(jar, { username: "alice", password: "pw", csrf_token: csrf });
+    expect(res.status).toBe(302);
+    expectCleared(res, "csrf_login");
+    expect(jar.cookies.has(cookieName("csrf_login"))).toBe(false);
   });
 
   it("P0 an OAuth flow records the subject and continues to consent", async () => {

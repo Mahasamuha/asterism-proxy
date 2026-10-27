@@ -4,12 +4,14 @@ import { TEST_COOKIE_SECRET } from "./test-helpers/env.js";
 
 const cfg = vi.hoisted(() => ({ issuerUrl: "https://auth.example.test", cookieSecret: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" }));
 vi.mock("./config.js", () => ({ config: cfg }));
-vi.mock("./db.js", () => ({ prisma: {} }));
+const db = vi.hoisted(() => ({ prisma: { localUser: { findUnique: vi.fn() } } }));
+vi.mock("./db.js", () => db);
 
 import { clearSignedCookie, cookieName, readSignedCookie, setSignedCookie } from "./cookies.js";
 import { bindFlow, isFlowBound } from "./identity/flow-binding.js";
-import { issueDeviceCookie } from "./identity/device-cookie.js";
-import { issueCsrfToken, verifyCsrfToken } from "./identity/csrf.js";
+import { issueDeviceCookie, validDeviceCookieNonce } from "./identity/device-cookie.js";
+import { issueBoundCsrfToken, issueCsrfToken, verifyCsrfToken } from "./identity/csrf.js";
+import { markReauthenticated, setSession } from "./identity/session.js";
 import { startRouterApp, type RouterApp } from "./test-helpers/identity-app.js";
 
 const router = Router();
@@ -18,6 +20,18 @@ router.get("/set", (req, res) => {
   bindFlow(req, res, "h1");
   issueDeviceCookie(res, "alice", 1);
   res.json({ csrf: issueCsrfToken(res, "csrf_login") });
+});
+router.get("/all", (req, res) => {
+  for (const name of ["csrf_setup", "csrf_login", "csrf_device"]) issueCsrfToken(res, name);
+  for (const name of ["csrf_admin", "csrf_consent", "csrf_grants", "csrf_logout", "csrf_password"]) issueBoundCsrfToken(req, res, name, "p", "u1");
+  setSession(res, "u1", 0);
+  markReauthenticated(res, "u1");
+  bindFlow(req, res, "h1");
+  issueDeviceCookie(res, "alice", 1);
+  res.end();
+});
+router.post("/device", async (req, res) => {
+  res.json({ nonce: await validDeviceCookieNonce(req, "alice") });
 });
 router.get("/clear", (_req, res) => {
   clearSignedCookie(res, "probe");
@@ -89,6 +103,42 @@ describe("cookies over an https issuer", () => {
     expect(line).toMatch(/; Secure/);
     expect(line).toMatch(/; Path=\/(;|$)/);
     expect(line).not.toMatch(/Domain=/i);
+  });
+});
+
+describe("SameSite on the wire", () => {
+  const attr = (line: string) => /; SameSite=(\w+)/.exec(line)?.[1];
+  const cases: Array<[string, string]> = [
+    ...["csrf_setup", "csrf_login", "csrf_device", "csrf_admin", "csrf_consent", "csrf_grants", "csrf_logout", "csrf_password"].map((n): [string, string] => [n, "Strict"]),
+    ["session", "Lax"],
+    ["reauth", "Lax"],
+    ["flow_binding", "Lax"],
+  ];
+
+  it.each(["https://auth.example.test", "http://localhost:3000"])("P0 each cookie carries its own SameSite (%s)", async (issuer) => {
+    cfg.issuerUrl = issuer;
+    const lines = (await fetch(`${app.baseUrl}/all`)).headers.getSetCookie();
+    expect(lines).toHaveLength(cases.length + 1);
+    for (const [base, expected] of cases) {
+      const line = lines.find((l) => l.startsWith(`${cookieName(base)}=`));
+      expect(line, base).toBeDefined();
+      expect(attr(line!), base).toBe(expected);
+    }
+    const device = lines.find((l) => /^(__Host-)?device_[0-9a-f]{32}=/.test(l));
+    expect(attr(device!)).toBe("Lax");
+  });
+});
+
+describe("device cookie read-back over https", () => {
+  const row = { isActive: true, user: { deviceEpoch: 1, deactivatedAt: null } };
+  const postDevice = (cookie: string) => fetch(`${app.baseUrl}/device`, { method: "POST", headers: { cookie } }).then((r) => r.json() as Promise<{ nonce: string | null }>);
+  beforeEach(() => db.prisma.localUser.findUnique.mockReset().mockResolvedValue(row));
+
+  it("P0 accepts the __Host- prefixed device cookie and rejects the same signed value under the bare name", async () => {
+    const { pairs } = await issue();
+    const device = pairs.find((p) => /^__Host-device_/.test(p))!;
+    expect((await postDevice(device)).nonce).toMatch(/^[0-9a-f]{32}$/);
+    expect((await postDevice(device.replace(/^__Host-/, ""))).nonce).toBeNull();
   });
 });
 
