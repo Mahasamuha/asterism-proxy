@@ -171,6 +171,28 @@ describe("POST /grants/:id/revoke", () => {
     expect(db.$transaction).not.toHaveBeenCalled();
   });
 
+  it("P0 a token issued to one user is refused for another (M4)", async () => {
+    m("grant", "findUnique").mockResolvedValue({ id: "g1", userId: "u2", clientId: CLIENT_ID, resource: RESOURCE });
+    const client = cookieClient();
+    const token = csrfFrom((await getPath(app.baseUrl, "/grants", client.fetch)).text);
+    session.mockResolvedValue("u2");
+    const r = await postForm(app.baseUrl, "/grants/g1/revoke", { csrf_token: token }, client.fetch);
+    expect(r.status).toBe(403);
+    expect(m("grant", "update")).not.toHaveBeenCalled();
+  });
+
+  it("P0 the logout token does not work for the revoke form, nor the reverse (M4)", async () => {
+    m("grant", "findMany").mockResolvedValue([{ id: "g1", clientId: CLIENT_ID, resource: RESOURCE, scopes: [], grantedAt: new Date() }]);
+    m("grant", "findUnique").mockResolvedValue({ id: "g1", userId: "u1", clientId: CLIENT_ID, resource: RESOURCE });
+    const client = cookieClient();
+    const html = (await getPath(app.baseUrl, "/grants", client.fetch)).text;
+    const logoutForm = html.split("<form").find((f) => f.includes('action="/auth/logout"'))!;
+    // Different cookies and purposes: each token only passes its own check.
+    expect((await postForm(app.baseUrl, "/grants/g1/revoke", { csrf_token: csrfFrom(logoutForm) }, client.fetch)).status).toBe(403);
+    expect((await postForm(app.baseUrl, "/auth/logout", { csrf_token: csrfFrom(html) }, client.fetch)).status).toBe(403);
+    expect(m("grant", "update")).not.toHaveBeenCalled();
+  });
+
   it.each([
     ["an unknown grant", null],
     ["another user's grant", { id: "g1", userId: "someone-else", clientId: CLIENT_ID, resource: RESOURCE }],

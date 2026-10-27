@@ -12,6 +12,9 @@ function safeEqual(a: string, b: string): boolean {
   return timingSafeEqual(Buffer.from(a), Buffer.from(b));
 }
 
+/** Purpose of the sign-out form's bound token, shared by the pages that show it and the handler. */
+export const LOGOUT_CSRF_PURPOSE = "logout";
+
 /** Sets a signed CSRF cookie and returns the token to embed as a hidden form field. */
 export function issueCsrfToken(res: Response, cookieName: string): string {
   const token = generateCsrfToken();
@@ -33,7 +36,8 @@ export function verifyCsrfToken(req: Request, cookieName: string): boolean {
 }
 
 // ---------------------------------------------------------------------------
-// User- and purpose-bound tokens (the admin UI).
+// User- and purpose-bound tokens (every form a signed-in user submits: admin,
+// consent, grants, password change, logout).
 //
 // cookie-parser signs a cookie's value, not its name, so any signed cookie
 // value (say a csrf_* value from the public login page) could be planted under
@@ -41,7 +45,8 @@ export function verifyCsrfToken(req: Request, cookieName: string): boolean {
 // over the purpose, the session's user id and the cookie's random nonce, so a
 // planted value only helps an attacker who can also compute that HMAC (needs
 // COOKIE_SECRET). The nonce cookie stays the same while it is valid, so the
-// token is stable across tabs.
+// token is stable across tabs. The plain scheme above is kept only for the
+// pre-login forms (setup, login, device code entry), which have no user to bind to.
 // ---------------------------------------------------------------------------
 
 const NONCE_RE = /^[0-9a-f]{64}$/;

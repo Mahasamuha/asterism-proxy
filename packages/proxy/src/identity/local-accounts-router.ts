@@ -19,7 +19,7 @@ import {
   MIN_PASSWORD_LENGTH,
 } from "./local-accounts.js";
 import { markReauthenticated, setSession, startSession, clearSession, getSessionUserId } from "./session.js";
-import { issueCsrfToken, verifyCsrfToken } from "./csrf.js";
+import { issueCsrfToken, issueBoundCsrfToken, verifyBoundCsrfToken, verifyCsrfToken, LOGOUT_CSRF_PURPOSE } from "./csrf.js";
 import { isSelfLogin, selfLoginReturnPath } from "./self-login.js";
 import { passwordProblem } from "./password-policy.js";
 import { isFlowBound } from "./flow-binding.js";
@@ -28,6 +28,8 @@ import { issueDeviceCookie, validDeviceCookieNonce } from "./device-cookie.js";
 const log = createLogger("local-accounts-router");
 
 export const localAccountsRouter: Router = Router();
+
+const PASSWORD_CSRF_PURPOSE = "password-change";
 
 // ---------------------------------------------------------------------------
 // GET/POST /setup — self-disabling first-account creation
@@ -240,7 +242,7 @@ localAccountsRouter.get("/auth/account", async (req: Request, res: Response) => 
     return;
   }
 
-  renderAccount(res, 200, localUser.username, []);
+  renderAccount(req, res, userId, 200, localUser.username, []);
 });
 
 localAccountsRouter.post("/auth/password", async (req: Request, res: Response) => {
@@ -254,8 +256,8 @@ localAccountsRouter.post("/auth/password", async (req: Request, res: Response) =
     return;
   }
 
-  if (!verifyCsrfToken(req, "csrf_password")) {
-    renderAccount(res, 403, localUser.username, ["Invalid or missing CSRF token. Please reload and try again."]);
+  if (!verifyBoundCsrfToken(req, "csrf_password", PASSWORD_CSRF_PURPOSE, userId)) {
+    renderAccount(req, res, userId, 403, localUser.username, ["Invalid or missing CSRF token. Please reload and try again."]);
     return;
   }
 
@@ -269,7 +271,7 @@ localAccountsRouter.post("/auth/password", async (req: Request, res: Response) =
   if (newPasswordIssue) errors.push(`New password ${newPasswordIssue}.`);
   if (newPassword !== confirm) errors.push("New passwords do not match.");
   if (errors.length > 0) {
-    renderAccount(res, 200, localUser.username, errors);
+    renderAccount(req, res, userId, 200, localUser.username, errors);
     return;
   }
 
@@ -277,7 +279,7 @@ localAccountsRouter.post("/auth/password", async (req: Request, res: Response) =
   // session cookie, so it is throttled per user like login.
   const slot = await beginPasswordChangeAttempt(userId);
   if (!slot) {
-    renderAccount(res, 429, localUser.username, ["Too many failed attempts. Please wait 15 minutes."]);
+    renderAccount(req, res, userId, 429, localUser.username, ["Too many failed attempts. Please wait 15 minutes."]);
     return;
   }
   let newEpoch: number;
@@ -285,14 +287,14 @@ localAccountsRouter.post("/auth/password", async (req: Request, res: Response) =
     newEpoch = await changePassword(userId, currentPassword, newPassword);
   } catch {
     await endAttempt(slot, false);
-    renderAccount(res, 200, localUser.username, ["Current password is incorrect."]);
+    renderAccount(req, res, userId, 200, localUser.username, ["Current password is incorrect."]);
     return;
   }
 
   await endAttempt(slot, true);
   // Every other session ended with the epoch bump; keep this browser signed in.
   setSession(res, userId, newEpoch);
-  renderAccount(res, 200, localUser.username, [], "Password changed.");
+  renderAccount(req, res, userId, 200, localUser.username, [], "Password changed.");
 });
 
 // ---------------------------------------------------------------------------
@@ -316,10 +318,10 @@ function renderSetup(res: Response, status: number, errors: string[], csrfToken?
   });
 }
 
-function renderAccount(res: Response, status: number, username: string, errors: string[], notice?: string): void {
-  // Each form has its own signed CSRF cookie, so neither token works for the other.
-  const csrfToken = issueCsrfToken(res, "csrf_password");
-  const logoutToken = issueCsrfToken(res, "csrf_logout");
+function renderAccount(req: Request, res: Response, userId: string, status: number, username: string, errors: string[], notice?: string): void {
+  // Each form has its own cookie and purpose, so neither token works for the other.
+  const csrfToken = issueBoundCsrfToken(req, res, "csrf_password", PASSWORD_CSRF_PURPOSE, userId);
+  const logoutToken = issueBoundCsrfToken(req, res, "csrf_logout", LOGOUT_CSRF_PURPOSE, userId);
   res.status(status).render("account", {
     username,
     errors,

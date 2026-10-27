@@ -3,7 +3,7 @@ import type { Request, Response } from "express";
 
 vi.mock("../config.js", () => ({ config: { cookieSecret: "test-secret-test-secret-test-secret", issuerUrl: "https://issuer.test" } }));
 
-import { issueBoundCsrfToken, verifyBoundCsrfToken } from "./csrf.js";
+import { issueBoundCsrfToken, issueCsrfToken, verifyBoundCsrfToken } from "./csrf.js";
 
 function fakeRes() {
   const cookies: Array<{ name: string; value: string }> = [];
@@ -40,6 +40,21 @@ describe("bound CSRF tokens", () => {
     const planted = "ab".repeat(32);
     expect(verifyBoundCsrfToken(reqWith({ csrf_admin: planted }, planted), "csrf_admin", "admin", "u1")).toBe(false);
     expect(verifyBoundCsrfToken(reqWith({ csrf_admin: "short" }, "short"), "csrf_admin", "admin", "u1")).toBe(false);
+  });
+
+  it("P0 a plain token from a pre-login form, planted as a bound cookie, is refused (M4)", () => {
+    const { res, cookies } = fakeRes();
+    const plain = issueCsrfToken(res, "csrf_login");
+    const planted = cookies[0]!.value; // what cookie-parser would verify and hand back
+    expect(verifyBoundCsrfToken(reqWith({ csrf_consent: planted }, plain), "csrf_consent", "consent:h1", "u1")).toBe(false);
+  });
+
+  it("P0 a token for one consent flow fails for another flow", () => {
+    const { res, cookies } = fakeRes();
+    const token = issueBoundCsrfToken(reqWith({}), res, "csrf_consent", "consent:flow-1", "u1");
+    const req = reqWith({ csrf_consent: cookies[0]!.value }, token);
+    expect(verifyBoundCsrfToken(req, "csrf_consent", "consent:flow-1", "u1")).toBe(true);
+    expect(verifyBoundCsrfToken(req, "csrf_consent", "consent:flow-2", "u1")).toBe(false);
   });
 
   it("a missing cookie or token fails", () => {

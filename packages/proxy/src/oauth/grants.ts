@@ -7,7 +7,7 @@ import { resolveClient } from "../clients/cimd.js";
 import { authenticateConfidentialClient } from "./client-assertion.js";
 import { lookupResourceServer } from "../resource-registry.js";
 import { getSessionUserId, clearSession, revokeSessions } from "../identity/session.js";
-import { issueCsrfToken, verifyCsrfToken } from "../identity/csrf.js";
+import { issueBoundCsrfToken, verifyBoundCsrfToken, LOGOUT_CSRF_PURPOSE } from "../identity/csrf.js";
 import { createSelfLoginRequest } from "../identity/self-login.js";
 import { startUpstreamAuth } from "../identity/oidc.js";
 import { bodyOf, stringField } from "../http-params.js";
@@ -18,6 +18,8 @@ import { limitOauthEndpoint, rowCreationRetryAfter } from "../rate-limit.js";
 const log = createLogger("grants");
 
 export const grantsRouter: Router = Router();
+
+const GRANTS_CSRF_PURPOSE = "grants-revoke";
 
 const ERROR_HEADINGS: Record<number, string> = {
   401: "Not signed in",
@@ -64,12 +66,14 @@ async function requireSession(req: Request, res: Response, returnTo: string): Pr
 // could sign a user out with a cross-site form post. A valid session's epoch is
 // bumped, which ends that user's sessions everywhere (a copied cookie included).
 grantsRouter.post("/auth/logout", async (req: Request, res: Response) => {
-  if (!verifyCsrfToken(req, "csrf_logout")) {
+  const userId = await getSessionUserId(req);
+  // The token is bound to the signed-in user, so a post with no session has
+  // nothing to verify against and is refused (the page it came from is stale).
+  if (!userId || !verifyBoundCsrfToken(req, "csrf_logout", LOGOUT_CSRF_PURPOSE, userId)) {
     renderErrorPage(res, 403, "Invalid or missing CSRF token. Please reload the page and try again.");
     return;
   }
-  const userId = await getSessionUserId(req);
-  if (userId) await revokeSessions(userId);
+  await revokeSessions(userId);
   clearSession(res);
   res.clearCookie("csrf_logout");
   renderMessage(res, 200, {
@@ -118,8 +122,8 @@ grantsRouter.get("/grants", async (req: Request, res: Response) => {
   );
 
   const admin = await isAdmin(userId);
-  const csrfToken = issueCsrfToken(res, "csrf_grants");
-  const logoutToken = issueCsrfToken(res, "csrf_logout");
+  const csrfToken = issueBoundCsrfToken(req, res, "csrf_grants", GRANTS_CSRF_PURPOSE, userId);
+  const logoutToken = issueBoundCsrfToken(req, res, "csrf_logout", LOGOUT_CSRF_PURPOSE, userId);
 
   const links: Array<Record<string, unknown>> = [{ href: "/grants", label: "your grants", current: true }];
   if (config.enableLocalAccounts) links.push({ href: "/auth/account", label: "account" });
@@ -147,7 +151,7 @@ grantsRouter.post("/grants/:id/revoke", async (req: Request, res: Response) => {
     return;
   }
 
-  if (!verifyCsrfToken(req, "csrf_grants")) {
+  if (!verifyBoundCsrfToken(req, "csrf_grants", GRANTS_CSRF_PURPOSE, userId)) {
     renderErrorPage(res, 403, "Invalid or missing CSRF token. Please reload and try again.");
     return;
   }

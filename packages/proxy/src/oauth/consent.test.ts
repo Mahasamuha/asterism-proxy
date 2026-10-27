@@ -138,6 +138,17 @@ describe("CSRF (P0)", () => {
     expect(m("authCode", "create")).not.toHaveBeenCalled();
   });
 
+  it("P0 a token minted for one flow cannot approve another flow of the same user (M4)", async () => {
+    m("authorizationRequest", "findUnique").mockImplementation(async ({ where }: { where: { handle: string } }) => flowRow({ handle: where.handle }));
+    const client = await boundClient("u1", "h1");
+    const csrf = csrfFrom((await getPath(app.baseUrl, "/oauth/consent?flow=h1", client.fetch)).text);
+    await bindBrowser(app.baseUrl, client, "h2", "u1");
+    const r = await postForm(app.baseUrl, "/oauth/consent", { flow: "h2", action: "approve", csrf_token: csrf }, client.fetch);
+    expect(r.text).toContain("CSRF");
+    expect(m("authCode", "create")).not.toHaveBeenCalled();
+    expect(m("authorizationRequest", "deleteMany")).not.toHaveBeenCalled();
+  });
+
   it("a repeated csrf_token field does not match", async () => {
     const client = await boundClient();
     const page = await getPath(app.baseUrl, "/oauth/consent?flow=h1", client.fetch);
