@@ -4,6 +4,7 @@
       <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
       <label for="value">Client id (https URL) or domain (also matches subdomains)</label>
       <input id="value" name="value" type="text" value="<%= value %>" required>
+      <p class="muted">A client id entry blocks only that exact URL; the same host can publish others (for example with a different query string). To block a hostile host, enter its domain.</p>
       <label for="reason">Reason (optional)</label>
       <input id="reason" name="reason" type="text" value="<%= reason %>" maxlength="500">
       <div class="actions"><button type="submit">review →</button></div>

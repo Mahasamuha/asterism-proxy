@@ -60,6 +60,7 @@ async function fetchClientJwks(jwksUri: string): Promise<jose.JWK[]> {
     // is at the URL the client metadata names.
     pool: "client-jwks",
     maxRedirects: 0,
+    allowedPorts: [443],
     onHeaders: (h) => {
       headers = h;
     },

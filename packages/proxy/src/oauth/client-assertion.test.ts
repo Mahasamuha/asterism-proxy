@@ -59,7 +59,7 @@ const verify = (jwt: string) => verifyClientAssertion(clientId, jwksUri, jwt);
 describe("verifyClientAssertion accepts (P0)", () => {
   it("a valid ES256 assertion", async () => {
     await expect(verify(await assertion())).resolves.toBeUndefined();
-    expect(fetchJson).toHaveBeenCalledWith(jwksUri, expect.objectContaining({ pool: "client-jwks", maxRedirects: 0 }));
+    expect(fetchJson).toHaveBeenCalledWith(jwksUri, expect.objectContaining({ pool: "client-jwks", maxRedirects: 0, allowedPorts: [443] }));
   });
 
   it("an RS256 assertion (asymmetric algorithms are allowed)", async () => {

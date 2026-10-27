@@ -2,6 +2,7 @@
     <% if (p.note) { %><%- include('../partials/banner', { status: 'warning', text: p.note }) %><% } %>
     <div class="card">
       <p>Deny <%= p.kind === 'domain' ? 'the domain' : 'the client id' %> <code><%= p.value %></code><% if (p.kind === 'domain') { %> and its subdomains<% } %>?</p>
+      <% if (p.kind === 'client_id') { %><p class="muted">This blocks only this exact URL. The same host can publish other client ids, so to block the whole host, deny its domain<% try { %> (<code><%= new URL(p.value).hostname %></code>)<% } catch (e) {} %> instead.</p><% } %>
       <% if (p.existing) { %><p class="muted">This entry already exists; confirming updates its reason.</p><% } %>
       <p>This will revoke <strong><%= p.grantsToRevoke %></strong> grant(s) and <strong><%= p.tokensToRevoke %></strong> refresh token(s). Revoked grants are not restored if you remove the entry later. Access tokens already issued stay valid until they expire (at most 15 minutes).</p>
       <% if (reason) { %><p class="muted">Reason: <%= reason %></p><% } %>

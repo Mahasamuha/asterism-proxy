@@ -11,6 +11,7 @@ export type SafeFetchRejectReason =
   | "invalid_url"
   | "invalid_scheme"
   | "insecure_http_not_loopback"
+  | "port_not_allowed"
   | "dns_resolution_failed"
   | "blocked_address"
   | "rate_limited"
@@ -158,6 +159,18 @@ function parseAndValidateScheme(rawUrl: string): URL {
   }
 
   reject("invalid_scheme", `Scheme must be https: (got ${parsed.protocol})`);
+}
+
+// A hostile name can resolve to this host's own public address, which the
+// address blocklist cannot catch; restricting the port keeps such a fetch from
+// reaching other services listening on it. Only https: is checked: http: is the
+// dev-only loopback exception, which the loopback check already confines.
+function checkPort(parsed: URL, allowedPorts: number[] | undefined): void {
+  if (!allowedPorts || parsed.protocol !== "https:") return;
+  const port = Number(parsed.port || 443);
+  if (!allowedPorts.includes(port)) {
+    reject("port_not_allowed", `Port ${port} is not allowed for ${parsed.hostname}`);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -364,6 +377,9 @@ export interface SafeFetchOptions {
   // on the same network); never pass it for a URL an attacker can choose. CIMD must
   // never set it.
   allowPrivateNetwork?: boolean;
+  // If set, an https: URL (and every redirect hop) must use one of these ports
+  // (443 when the URL names none). For URLs an attacker can choose.
+  allowedPorts?: number[];
   // Which rate-limit namespace and concurrency pool the call is charged to.
   // Defaults to "cimd" (client metadata documents, which an unauthenticated
   // caller can trigger); operator-driven resource-metadata fetches and client JWKS fetches use their own.
@@ -406,6 +422,7 @@ async function safeFetchJsonInner(url: string, options: SafeFetchOptions, pool: 
   let currentUrl = url;
   for (let redirectCount = 0; ; redirectCount++) {
     const parsed = parseAndValidateScheme(currentUrl);
+    checkPort(parsed, options.allowedPorts);
     checkRateLimit(pool, parsed.hostname);
     const resolved = await resolveAndValidate(parsed.hostname, parsed.protocol === "http:", allowPrivateNetwork, signal);
 

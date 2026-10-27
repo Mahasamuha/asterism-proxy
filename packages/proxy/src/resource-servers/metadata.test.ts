@@ -298,6 +298,7 @@ describe("fetchResourceMetadata", () => {
     serve(doc());
     await fetchResourceMetadata(ID, { issuer: ISSUER, internal: false });
     expect(h.safeFetchJson.mock.calls[0]![1]).toMatchObject({ pool: "resource-metadata" });
+    expect(h.safeFetchJson.mock.calls[0]![1]).not.toHaveProperty("allowedPorts");
   });
 
   it("passes internal through as allowPrivateNetwork", async () => {

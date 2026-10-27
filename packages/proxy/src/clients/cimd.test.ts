@@ -316,10 +316,10 @@ describe("resolveClient", () => {
     expect(h.safeFetchJson).not.toHaveBeenCalled();
   });
 
-  it("fetches with maxBytes 5120 and maxRedirects 0", async () => {
+  it("fetches with maxBytes 5120, maxRedirects 0 and only port 443", async () => {
     fetchOk();
     await resolveClient(ID);
-    expect(h.safeFetchJson).toHaveBeenCalledWith(ID, expect.objectContaining({ maxBytes: 5120, maxRedirects: 0 }));
+    expect(h.safeFetchJson).toHaveBeenCalledWith(ID, expect.objectContaining({ maxBytes: 5120, maxRedirects: 0, allowedPorts: [443] }));
   });
 
   it("serves an unexpired cached row without fetching, bumping lastSeenAt", async () => {

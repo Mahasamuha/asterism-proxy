@@ -339,6 +339,7 @@ async function fetchAndStore(clientId: string, cached: OauthClient | null): Prom
     raw = await safeFetchJson(clientId, {
       maxBytes: MAX_DOCUMENT_BYTES,
       maxRedirects: CIMD_MAX_REDIRECTS,
+      allowedPorts: [443],
       onHeaders: (h) => {
         headers = h;
       },

@@ -126,6 +126,43 @@ describe("safeFetchJson", () => {
     });
   });
 
+  describe("allowedPorts", () => {
+    const PUBLIC: Record_[] = [{ address: "10.0.0.1", family: 4 }];
+    const opts = { allowedPorts: [443] };
+
+    it.each([8443, 5432])("refuses port %i before any DNS lookup", async (port) => {
+      expect(await reasonOf(safeFetchJson(`https://${hostname}:${port}/x`, opts))).toBe("port_not_allowed");
+      expect(lookup).not.toHaveBeenCalled();
+    });
+
+    it.each([["https://%h/x"], ["https://%h:443/x"]])("accepts 443 (%s)", async (tpl) => {
+      stubDns({ [hostname]: PUBLIC });
+      // Gets past the port check and stops at the address check.
+      expect(await reasonOf(safeFetchJson(tpl.replace("%h", hostname), opts))).toBe("blocked_address");
+    });
+
+    it("refuses a redirect hop to another port", async () => {
+      srv.routes["/a"] = { status: 302, headers: { location: `https://${hostname}:5432/x` } };
+      expect(await reasonOf(safeFetchJson(base("/a"), opts))).toBe("port_not_allowed");
+    });
+
+    it("counts the rejection under its own reason", async () => {
+      const before = getSafeFetchRejectionCounts().port_not_allowed ?? 0;
+      await reasonOf(safeFetchJson(`https://${hostname}:8443/x`, opts));
+      expect(getSafeFetchRejectionCounts().port_not_allowed).toBe(before + 1);
+    });
+
+    it("leaves any port allowed when the option is not set (resource metadata)", async () => {
+      stubDns({ [hostname]: PUBLIC });
+      expect(await reasonOf(safeFetchJson(`https://${hostname}:8443/x`))).toBe("blocked_address");
+    });
+
+    it("does not affect the dev http loopback path", async () => {
+      srv.routes["/x"] = { body: { ok: 1 } };
+      expect(await safeFetchJson(base("/x"), opts)).toEqual({ ok: 1 });
+    });
+  });
+
   describe("allowPrivateNetwork", () => {
     // The route server speaks plain HTTP, so an https: request to it gets past the address
     // check and then fails the TLS handshake (connection_error), which is how these tests

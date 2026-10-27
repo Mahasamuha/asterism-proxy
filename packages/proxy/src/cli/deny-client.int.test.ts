@@ -91,6 +91,14 @@ describe("deny-client add", () => {
     expect((await prisma.grant.findUniqueOrThrow({ where: { id: grant.id } })).revokedAt?.getTime()).toBe(before.getTime());
   });
 
+  it("P1 a client_id entry prints the domain command for the whole host; a domain entry does not", async () => {
+    const one = await runCli("deny-client", ["add", "https://evil.example.com:8443/client.json?1"]);
+    expect(one.stdout).toContain("blocks only this exact client_id URL");
+    expect(one.stdout).toContain("deny-client add evil.example.com");
+    const two = await runCli("deny-client", ["add", "evil.example.com"]);
+    expect(two.stdout).not.toContain("exact client_id");
+  });
+
   it("P1 adding the same entry twice is an upsert that updates the reason", async () => {
     await runCli("deny-client", ["add", "evil.example.com", "--reason", "one"]);
     await runCli("deny-client", ["add", "evil.example.com", "--reason", "two"]);

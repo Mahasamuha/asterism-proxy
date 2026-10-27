@@ -11,6 +11,8 @@
 // A canonical CIMD client_id URL is a `client_id` entry; a bare https origin or
 // a bare hostname is a `domain` entry (matches subdomains, IDN stored as
 // punycode); any other https URL is refused, since it could never match.
+// A client_id entry matches that exact string only (a `?1` suffix is a new client_id),
+// so `add` prints the domain command that blocks the whole host.
 // `add` also revokes live grants and refresh tokens in the same transaction.
 // The operations live in clients/denylist.ts (shared with the admin UI); changes
 // are audit-logged with actor `cli`.
@@ -27,6 +29,11 @@ async function add(value: string, reason: string | undefined): Promise<void> {
   const r = await addDenial(value, reason, "cli");
   if (r.note) console.log(r.note);
   console.log(`Denied ${r.kind} ${r.value}`);
+  if (r.kind === "client_id") {
+    // Matching is by exact string, so the same host can serve the document at
+    // https://host/c.json?1, ?2, ... as new client_ids.
+    console.log(`Note: this blocks only this exact client_id URL; the same host can publish others. To block the whole host, run: deny-client add ${new URL(r.value).hostname}`);
+  }
   console.log(`Revoked ${r.grantsRevoked} grant(s) and ${r.tokensRevoked} refresh token(s).`);
   console.log("Outstanding access tokens remain valid until they expire (at most 15 minutes).");
 }

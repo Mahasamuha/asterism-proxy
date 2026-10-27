@@ -369,7 +369,9 @@ client denylist and shows the audit log. Everything it does is also possible wit
 - Adding a client to the denylist shows a confirmation page with how many grants and
   refresh tokens it will revoke. Single-label hostnames (such as `com`) are refused,
   since they would match every host under them; this applies to `asterism-cli
-  deny-client` too.
+  deny-client` too. A `client_id` entry matches that exact URL only, so the same host can
+  serve a new client_id (say, with a different query string); deny the domain to block the
+  whole host. The CLI and the admin UI both say so when you add a `client_id` entry.
 
 ## Identity claims in access tokens
 
