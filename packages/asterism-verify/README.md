@@ -54,7 +54,8 @@ import {
 const config = { issuer: "https://auth.example.com", audience: "https://files.example.com/mcp" };
 const app = express();
 
-// RFC 9728 §3.1: served at /.well-known/oauth-protected-resource/mcp for this audience
+// RFC 9728 §3.1: served at /.well-known/oauth-protected-resource/mcp for this audience.
+// asterism won't register a server that declares no scopes; see "Advertising scopes".
 app.get(protectedResourceMetadataPath(config.audience), protectedResourceMetadataHandler(config));
 
 // 401s carry WWW-Authenticate with resource_metadata pointing at the document above
@@ -77,7 +78,7 @@ It is a fresh plain object per call. Keys named `__proto__`, `constructor` and `
 app.get(protectedResourceMetadataPath(config.audience), protectedResourceMetadataHandler(config, { scopesSupported: ["read", "write"] }));
 ```
 
-The optional second argument adds `scopes_supported` to the metadata; without it the member is omitted. Claude.ai requests exactly the scopes listed there, so leave step-up-only scopes such as `admin` out.
+The optional second argument adds `scopes_supported` to the metadata; without it the member is omitted. The document is valid RFC 9728 either way, but the asterism proxy refuses to register a server whose metadata declares no scopes ("Metadata declares no scopes"), so pass `scopesSupported` or `scopes` with at least one scope of your own (`offline_access` doesn't count; it's only a hint to clients). Claude.ai requests exactly the scopes listed there, so leave step-up-only scopes such as `admin` out.
 
 To describe the server and its scopes to the proxy, pass `resourceName` and `scopes` instead:
 
