@@ -2,9 +2,11 @@ import { Router, Request, Response, NextFunction } from "express";
 import { createHash, timingSafeEqual } from "node:crypto";
 import { renderMessage } from "../pages.js";
 import { config } from "../config.js";
+import { clearSignedCookie } from "../cookies.js";
 import { prisma } from "../db.js";
 import { bodyOf, stringField } from "../http-params.js";
 import { createLogger } from "../logger.js";
+import { errorFields } from "../error-fields.js";
 import {
   beginLoginAttempt,
   beginDeviceLoginAttempt,
@@ -99,7 +101,7 @@ localAccountsRouter.post("/setup", async (req: Request, res: Response, next: Nex
     if (msg.toLowerCase().includes("unique")) {
       renderSetup(res, 200, ["Username already taken."], issueCsrfToken(res, "csrf_setup"));
     } else {
-      log.error({ err, username }, "Failed to create first user via setup");
+      log.error({ ...errorFields(err), username }, "Failed to create first user via setup");
       renderSetup(res, 200, ["Setup failed. Please try again."], issueCsrfToken(res, "csrf_setup"));
     }
     return;
@@ -109,7 +111,7 @@ localAccountsRouter.post("/setup", async (req: Request, res: Response, next: Nex
     return;
   }
 
-  res.clearCookie("csrf_setup");
+  clearSignedCookie(res, "csrf_setup");
   await startSession(res, userId);
   log.info({ username }, "First local account created via setup");
   res.redirect("/auth/account");
@@ -186,7 +188,7 @@ localAccountsRouter.post("/auth/login", async (req: Request, res: Response) => {
   }
   await endAttempt(slot, true);
 
-  res.clearCookie("csrf_login");
+  clearSignedCookie(res, "csrf_login");
   await startSession(res, userId);
   // A password was just entered: that is the proof of presence admin changes ask
   // for. Setup and password change do not set it (a password change is gated by

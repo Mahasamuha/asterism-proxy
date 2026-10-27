@@ -180,6 +180,14 @@ be listed under `environment:` in `docker-compose.yml` (it already is).
   `local-user deactivate` bump it, which ends that user's sessions in every browser
   (the browser that changed the password stays signed in). Deploying this version
   signs everyone out once, because the cookie format changed.
+- **Cookie names.** Behind an `https:` `ISSUER_URL` every cookie (session, `reauth`,
+  `csrf_*`, `flow_binding`, `device_<tag>`) is named `__Host-<name>`, so browsers
+  accept it only if it is `Secure`, `Path=/` and has no `Domain`. A sibling
+  subdomain therefore cannot plant or overwrite them with `Domain=<parent>`.
+  Over plain `http:` (local development) the bare names are used, since browsers
+  reject `__Host-` cookies that are not Secure. **This release signs everyone out
+  once more**, because the old un-prefixed names are no longer read; any in-progress
+  login or consent page needs a reload. Nothing needs doing on your side.
 - **Device codes.** Failed user-code entries are limited to 10 per IP per
   15 minutes (in memory, reset on restart). Successful entries don't count. There
   is no global ceiling across IPs: with 31^8 possible codes, guessing a live one is
@@ -333,7 +341,7 @@ client denylist and shows the audit log. Everything it does is also possible wit
   but every change (each POST) needs a re-authentication within the last 10
   minutes, recorded in a separate signed `reauth` cookie (set only after a local
   password login or an upstream sign-in that enforced `max_age`, never by a silent
-  SSO sign-in, and only sent under `/admin`); otherwise nothing is saved and the
+  SSO sign-in, and, like every cookie, `Path=/` so it can carry the `__Host-` prefix); otherwise nothing is saved and the
   page offers a fresh sign-in that returns to the form.
   For OIDC the fresh sign-in sends `prompt=login` and `max_age=600` upstream and
   the callback rejects an ID token whose `auth_time` is older than that or missing,

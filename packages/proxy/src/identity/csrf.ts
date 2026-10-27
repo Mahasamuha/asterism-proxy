@@ -1,7 +1,10 @@
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { Request, Response } from "express";
 import { config } from "../config.js";
+import { readSignedCookie, setSignedCookie } from "../cookies.js";
 import { bodyOf, stringField } from "../http-params.js";
+
+const CSRF_COOKIE_TTL_MS = 30 * 60 * 1000;
 
 export function generateCsrfToken(): string {
   return randomBytes(32).toString("hex");
@@ -18,18 +21,12 @@ export const LOGOUT_CSRF_PURPOSE = "logout";
 /** Sets a signed CSRF cookie and returns the token to embed as a hidden form field. */
 export function issueCsrfToken(res: Response, cookieName: string): string {
   const token = generateCsrfToken();
-  res.cookie(cookieName, token, {
-    httpOnly: true,
-    secure: config.issuerUrl.startsWith("https:"),
-    sameSite: "strict",
-    maxAge: 30 * 60 * 1000,
-    signed: true,
-  });
+  setSignedCookie(res, cookieName, token, { sameSite: "strict", maxAge: CSRF_COOKIE_TTL_MS });
   return token;
 }
 
 export function verifyCsrfToken(req: Request, cookieName: string): boolean {
-  const cookie = (req.signedCookies as Record<string, string | undefined>)[cookieName];
+  const cookie = readSignedCookie(req, cookieName);
   const body = stringField(bodyOf(req), "csrf_token") ?? "";
   if (!cookie) return false;
   return safeEqual(cookie, body);
@@ -59,22 +56,16 @@ function boundToken(purpose: string, userId: string, nonce: string): string {
 
 /** Sets (or keeps) the signed nonce cookie and returns the form token for `userId` and `purpose`. */
 export function issueBoundCsrfToken(req: Request, res: Response, cookieName: string, purpose: string, userId: string): string {
-  const existing = (req.signedCookies as Record<string, string | undefined>)[cookieName];
-  const nonce = existing !== undefined && NONCE_RE.test(existing) ? existing : generateCsrfToken();
-  res.cookie(cookieName, nonce, {
-    httpOnly: true,
-    secure: config.issuerUrl.startsWith("https:"),
-    sameSite: "strict",
-    maxAge: 30 * 60 * 1000,
-    signed: true,
-  });
+  const existing = readSignedCookie(req, cookieName);
+  const nonce = typeof existing === "string" && NONCE_RE.test(existing) ? existing : generateCsrfToken();
+  setSignedCookie(res, cookieName, nonce, { sameSite: "strict", maxAge: CSRF_COOKIE_TTL_MS });
   return boundToken(purpose, userId, nonce);
 }
 
 /** True when the form token matches the cookie's nonce for this purpose and user. */
 export function verifyBoundCsrfToken(req: Request, cookieName: string, purpose: string, userId: string): boolean {
-  const nonce = (req.signedCookies as Record<string, string | undefined>)[cookieName];
+  const nonce = readSignedCookie(req, cookieName);
   const body = stringField(bodyOf(req), "csrf_token") ?? "";
-  if (nonce === undefined || !NONCE_RE.test(nonce)) return false;
+  if (typeof nonce !== "string" || !NONCE_RE.test(nonce)) return false;
   return safeEqual(boundToken(purpose, userId, nonce), body);
 }

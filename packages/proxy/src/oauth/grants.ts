@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { Router, Request, Response } from "express";
 import { prisma } from "../db.js";
 import { config } from "../config.js";
+import { clearSignedCookie } from "../cookies.js";
 import { createLogger } from "../logger.js";
 import { resolveClient } from "../clients/cimd.js";
 import { authenticateConfidentialClient } from "./client-assertion.js";
@@ -75,7 +76,7 @@ grantsRouter.post("/auth/logout", async (req: Request, res: Response) => {
   }
   await revokeSessions(userId);
   clearSession(res);
-  res.clearCookie("csrf_logout");
+  clearSignedCookie(res, "csrf_logout");
   renderMessage(res, 200, {
     status: "success",
     heading: "Signed out",

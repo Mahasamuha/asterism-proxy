@@ -3,14 +3,39 @@ import type { Request, Response } from "express";
 
 vi.mock("../config.js", () => ({ config: { cookieSecret: "test-secret-test-secret-test-secret", issuerUrl: "https://issuer.test" } }));
 
-import { issueBoundCsrfToken, issueCsrfToken, verifyBoundCsrfToken } from "./csrf.js";
+import { cookieName } from "../cookies.js";
+import { issueBoundCsrfToken, issueCsrfToken, verifyBoundCsrfToken, verifyCsrfToken } from "./csrf.js";
 
 function fakeRes() {
   const cookies: Array<{ name: string; value: string }> = [];
   const res = { cookie: (name: string, value: string) => void cookies.push({ name, value }) } as unknown as Response;
   return { res, cookies };
 }
-const reqWith = (signed: Record<string, string>, token?: string) => ({ signedCookies: signed, body: token === undefined ? {} : { csrf_token: token } }) as unknown as Request;
+/** `signed` is keyed by base name; the request carries the wire names, as a browser would send them. */
+const reqWith = (signed: Record<string, string>, token?: string) => ({ signedCookies: Object.fromEntries(Object.entries(signed).map(([k, v]) => [cookieName(k), v])), body: token === undefined ? {} : { csrf_token: token } }) as unknown as Request;
+
+describe("__Host- naming over HTTPS", () => {
+  it("P0 sets csrf cookies as __Host-<name>, Secure, Path=/, no Domain", () => {
+    const sent: { name: string; opts: Record<string, unknown> }[] = [];
+    const res = { cookie: (name: string, _v: string, opts: Record<string, unknown>) => void sent.push({ name, opts }) } as unknown as Response;
+    issueCsrfToken(res, "csrf_login");
+    issueBoundCsrfToken(reqWith({}), res, "csrf_admin", "admin", "u1");
+    expect(sent.map((c) => c.name)).toEqual(["__Host-csrf_login", "__Host-csrf_admin"]);
+    for (const c of sent) {
+      expect(c.opts).toMatchObject({ secure: true, path: "/", httpOnly: true, signed: true });
+      expect(c.opts).not.toHaveProperty("domain");
+    }
+  });
+
+  it("P0 a request carrying only the un-prefixed name is not accepted", () => {
+    const { res, cookies } = fakeRes();
+    const bound = issueBoundCsrfToken(reqWith({}), res, "csrf_admin", "admin", "u1");
+    const plain = { signedCookies: { csrf_admin: cookies[0]!.value }, body: { csrf_token: bound } } as unknown as Request;
+    expect(verifyBoundCsrfToken(plain, "csrf_admin", "admin", "u1")).toBe(false);
+    expect(verifyCsrfToken({ signedCookies: { csrf_login: "tok" }, body: { csrf_token: "tok" } } as unknown as Request, "csrf_login")).toBe(false);
+    expect(verifyCsrfToken(reqWith({ csrf_login: "tok" }, "tok"), "csrf_login")).toBe(true);
+  });
+});
 
 describe("bound CSRF tokens", () => {
   it("a token verifies for the same cookie, purpose and user", () => {

@@ -1,6 +1,7 @@
 import { createHmac, randomBytes } from "node:crypto";
 import type { Request, Response } from "express";
 import { config } from "../config.js";
+import { readSignedCookie, setSignedCookie } from "../cookies.js";
 import { prisma } from "../db.js";
 
 // ---------------------------------------------------------------------------
@@ -39,12 +40,9 @@ function userTag(username: string): string {
 /** Sets the device cookie for `username` (already normalised) at `deviceEpoch`. */
 export function issueDeviceCookie(res: Response, username: string, deviceEpoch: number): void {
   const tag = userTag(username);
-  res.cookie(`${DEVICE_COOKIE_PREFIX}${tag}`, `d1.${tag}.${deviceEpoch}.${randomBytes(16).toString("hex")}.${Date.now()}`, {
-    httpOnly: true,
-    secure: config.issuerUrl.startsWith("https:"),
+  setSignedCookie(res, `${DEVICE_COOKIE_PREFIX}${tag}`, `d1.${tag}.${deviceEpoch}.${randomBytes(16).toString("hex")}.${Date.now()}`, {
     sameSite: "lax",
     maxAge: DEVICE_COOKIE_TTL_MS,
-    signed: true,
   });
 }
 
@@ -55,7 +53,7 @@ export function issueDeviceCookie(res: Response, username: string, deviceEpoch: 
  * database is only consulted for a cookie that already passed its signature. */
 export async function validDeviceCookieNonce(req: Request, username: string): Promise<string | null> {
   const tag = userTag(username);
-  const value = (req.signedCookies as Record<string, string | false | undefined>)[`${DEVICE_COOKIE_PREFIX}${tag}`];
+  const value = readSignedCookie(req, `${DEVICE_COOKIE_PREFIX}${tag}`);
   if (typeof value !== "string") return null;
   const match = VALUE_PATTERN.exec(value);
   if (!match || match[1] !== tag) return null;

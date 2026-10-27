@@ -115,7 +115,7 @@ describe("setSession / clearSession", () => {
   it("P0 sets a signed httpOnly SameSite=Lax cookie with a 7-day maxAge", () => {
     const cookie = vi.fn();
     setSession({ cookie } as unknown as Response, "u1", 4);
-    expect(cookie).toHaveBeenCalledWith("session", `u1.4.${NOW}`, { httpOnly: true, secure: false, sameSite: "lax", maxAge: TTL, signed: true });
+    expect(cookie).toHaveBeenCalledWith("session", `u1.4.${NOW}`, { httpOnly: true, secure: false, sameSite: "lax", maxAge: TTL, path: "/", signed: true });
   });
 
   it("P1 Secure follows the issuer scheme", () => {
@@ -128,13 +128,41 @@ describe("setSession / clearSession", () => {
   it("P1 clearSession clears the session cookie", () => {
     const clearCookie = vi.fn();
     clearSession({ clearCookie } as unknown as Response);
-    expect(clearCookie).toHaveBeenCalledWith("session");
+    expect(clearCookie).toHaveBeenCalledWith("session", { httpOnly: true, secure: false, path: "/" });
   });
 
-  it("P0 clearSession also clears the re-authentication marker, on its own path", () => {
+  it("P0 clearSession also clears the re-authentication marker, on the path it was set on", () => {
     const clearCookie = vi.fn();
     clearSession({ clearCookie } as unknown as Response);
-    expect(clearCookie).toHaveBeenCalledWith("reauth", { path: "/admin" });
+    expect(clearCookie).toHaveBeenCalledWith("reauth", { httpOnly: true, secure: false, path: "/" });
+  });
+
+  it("P0 over HTTPS the cookies are __Host- prefixed: Secure, Path=/, no Domain, cleared under the same name", () => {
+    cfg.issuerUrl = "https://auth.example.test";
+    const cookie = vi.fn();
+    const clearCookie = vi.fn();
+    const res = { cookie, clearCookie } as unknown as Response;
+    setSession(res, "u1", 4);
+    markReauthenticated(res, "u1");
+    clearSession(res);
+    for (const call of cookie.mock.calls) {
+      expect(call[2]).toMatchObject({ secure: true, path: "/" });
+      expect(call[2]).not.toHaveProperty("domain");
+    }
+    expect(cookie.mock.calls.map((c) => c[0])).toEqual(["__Host-session", "__Host-reauth"]);
+    expect(clearCookie.mock.calls).toEqual([
+      ["__Host-session", { httpOnly: true, secure: true, path: "/" }],
+      ["__Host-reauth", { httpOnly: true, secure: true, path: "/" }],
+    ]);
+  });
+
+  it("P0 over HTTPS an un-prefixed session or reauth cookie is not accepted", async () => {
+    cfg.issuerUrl = "https://auth.example.test";
+    expect(await getSession(req(`u1.3.${NOW - 1000}`))).toBeNull();
+    expect(reauthenticatedAt({ signedCookies: { reauth: `u1.${NOW - 1000}` } } as unknown as Request, "u1")).toBeNull();
+    const prefixed = { signedCookies: { "__Host-session": `u1.3.${NOW - 1000}`, "__Host-reauth": `u1.${NOW - 1000}` } } as unknown as Request;
+    expect(await getSession(prefixed)).toEqual({ userId: "u1", issuedAtMs: NOW - 1000 });
+    expect(reauthenticatedAt(prefixed, "u1")).toBe(NOW - 1000);
   });
 });
 
@@ -142,10 +170,10 @@ describe("markReauthenticated / reauthenticatedAt", () => {
   const reauthReq = (reauth: unknown) => ({ signedCookies: { reauth } }) as unknown as Request;
   const WINDOW = 10 * 60 * 1000;
 
-  it("P0 sets a signed httpOnly SameSite=Lax cookie under /admin that lives for the freshness window", () => {
+  it("P0 sets a signed httpOnly SameSite=Lax cookie at Path=/ that lives for the freshness window", () => {
     const cookie = vi.fn();
     markReauthenticated({ cookie } as unknown as Response, "u1");
-    expect(cookie).toHaveBeenCalledWith("reauth", `u1.${NOW}`, { httpOnly: true, secure: false, sameSite: "lax", maxAge: WINDOW, path: "/admin", signed: true });
+    expect(cookie).toHaveBeenCalledWith("reauth", `u1.${NOW}`, { httpOnly: true, secure: false, sameSite: "lax", maxAge: WINDOW, path: "/", signed: true });
   });
 
   it("P1 Secure follows the issuer scheme", () => {

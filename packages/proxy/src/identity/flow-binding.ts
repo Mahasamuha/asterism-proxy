@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { Request, Response } from "express";
-import { config } from "../config.js";
+import { readSignedCookie, setSignedCookie } from "../cookies.js";
 
 // Binds an AuthorizationRequest to the browser that started it. The flow
 // handle travels in URLs (login link, consent link, OIDC redirects), so on its
@@ -24,7 +24,7 @@ function hashHandle(handle: string): string {
 }
 
 function boundHashes(req: Request): string[] {
-  const value = (req.signedCookies as Record<string, string | false | undefined> | undefined)?.[FLOW_BINDING_COOKIE];
+  const value = readSignedCookie(req, FLOW_BINDING_COOKIE);
   if (typeof value !== "string" || value === "") return [];
   return value.split(",").filter((h) => /^[0-9a-f]{32}$/.test(h));
 }
@@ -34,14 +34,7 @@ function boundHashes(req: Request): string[] {
 export function bindFlow(req: Request, res: Response, handle: string): void {
   const hashes = boundHashes(req).filter((h) => h !== hashHandle(handle));
   hashes.push(hashHandle(handle));
-  res.cookie(FLOW_BINDING_COOKIE, hashes.slice(-MAX_BOUND_FLOWS).join(","), {
-    httpOnly: true,
-    secure: config.issuerUrl.startsWith("https:"),
-    sameSite: "lax",
-    path: "/",
-    maxAge: FLOW_BINDING_TTL_MS,
-    signed: true,
-  });
+  setSignedCookie(res, FLOW_BINDING_COOKIE, hashes.slice(-MAX_BOUND_FLOWS).join(","), { sameSite: "lax", maxAge: FLOW_BINDING_TTL_MS });
 }
 
 /** True only if this browser holds a valid binding cookie for `handle`. */
