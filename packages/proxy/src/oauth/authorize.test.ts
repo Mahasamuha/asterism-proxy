@@ -8,6 +8,11 @@ vi.mock("../config.js", async (importOriginal) => {
   return { ...actual, config: { ...actual.config } };
 });
 vi.mock("../clients/cimd.js", async (importOriginal) => ({ ...(await importOriginal<typeof import("../clients/cimd.js")>()), resolveClient: vi.fn() }));
+const limits = vi.hoisted(() => ({ resolution: 0 }));
+vi.mock("../rate-limit.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../rate-limit.js")>()),
+  clientResolutionRetryAfter: () => limits.resolution,
+}));
 vi.mock("../identity/oidc.js", () => ({ startUpstreamAuth: vi.fn() }));
 
 import { prisma } from "../db.js";
@@ -27,6 +32,7 @@ beforeAll(async () => {
 afterAll(() => app.close());
 
 beforeEach(() => {
+  limits.resolution = 0;
   db.reset();
   resolve.mockReset().mockResolvedValue(clientRow() as never);
   upstream.mockReset().mockResolvedValue("https://idp.example.test/auth");
@@ -217,6 +223,13 @@ describe("resource and scope (P0)", () => {
     expect(created()).not.toHaveBeenCalled();
   });
 
+  it("a repeated scope parameter -> invalid_scope, not a scope-less request (as device code)", async () => {
+    const url = errorRedirect(await authorize({ scope: ["read", "read"] }));
+    expect(url.searchParams.get("error")).toBe("invalid_scope");
+    expect(url.searchParams.get("error_description")).toBe("scope must be a single space-delimited string");
+    expect(created()).not.toHaveBeenCalled();
+  });
+
   it("offline_access is exempt from the declared-scope check", async () => {
     const r = await authorize({ scope: "read offline_access" });
     expect(r.status).toBe(302);
@@ -355,5 +368,17 @@ describe("strict redirect_uri forms (M11)", () => {
     resolve.mockResolvedValue(clientRow() as never);
     expect((await authorize({ redirect_uri: REDIRECT_URI })).status).toBe(302);
     expect(created()).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("client resolution rate limit (M1)", () => {
+  it("refuses with 429 and Retry-After before resolving the client", async () => {
+    limits.resolution = 7;
+    const r = await authorize();
+    expect(r.status).toBe(429);
+    expect(r.headers.get("retry-after")).toBe("7");
+    expect(r.headers.get("location")).toBeNull();
+    expect(resolve).not.toHaveBeenCalled();
+    expect(created()).not.toHaveBeenCalled();
   });
 });

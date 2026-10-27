@@ -1,5 +1,5 @@
 import { Request, Response } from "express";
-import { config } from "../config.js";
+import { clearSignedCookie, readSignedCookie, setSignedCookie } from "../cookies.js";
 import { prisma } from "../db.js";
 import { FRESH_LOGIN_MAX_AGE_S } from "./self-login.js";
 
@@ -22,13 +22,7 @@ const REAUTH_MAX_AGE_MS = FRESH_LOGIN_MAX_AGE_S * 1000;
 // browser. getSessionUserId also loads the user on each request, so
 // deactivating a User or LocalUser invalidates its cookies immediately.
 export function setSession(res: Response, userId: string, sessionEpoch: number): void {
-  res.cookie(SESSION_COOKIE, `${userId}.${sessionEpoch}.${Date.now()}`, {
-    httpOnly: true,
-    secure: config.issuerUrl.startsWith("https:"),
-    sameSite: "lax",
-    maxAge: SESSION_TTL_MS,
-    signed: true,
-  });
+  setSignedCookie(res, SESSION_COOKIE, `${userId}.${sessionEpoch}.${Date.now()}`, { sameSite: "lax", maxAge: SESSION_TTL_MS });
 }
 
 /** Signs `userId` in at its current session epoch (a fresh login). Returns that epoch. */
@@ -45,8 +39,8 @@ export async function revokeSessions(userId: string): Promise<number> {
 }
 
 export function clearSession(res: Response): void {
-  res.clearCookie(SESSION_COOKIE);
-  res.clearCookie(REAUTH_COOKIE, { path: "/admin" });
+  clearSignedCookie(res, SESSION_COOKIE);
+  clearSignedCookie(res, REAUTH_COOKIE);
 }
 
 // Re-authentication marker. Any sign-in issues a new session cookie, including a
@@ -54,24 +48,20 @@ export function clearSession(res: Response): void {
 // age says nothing about whether the user just proved presence. This separate
 // cookie is set only where they did (a password entered, or an upstream sign-in
 // that enforced max_age), and the admin UI asks for it before a change. It is
-// signed, bound to the user id, only sent under /admin, and expires with the
-// freshness window.
+// signed, bound to the user id, and expires with the freshness window. It used
+// to be scoped to Path=/admin, which only limited where the browser sent it;
+// nothing relied on that for security (the value is signed, user-bound and
+// short-lived, and only the admin router reads it), and a narrower path would
+// rule out the `__Host-` prefix, which is worth more.
 export function markReauthenticated(res: Response, userId: string): void {
-  res.cookie(REAUTH_COOKIE, `${userId}.${Date.now()}`, {
-    httpOnly: true,
-    secure: config.issuerUrl.startsWith("https:"),
-    sameSite: "lax",
-    maxAge: REAUTH_MAX_AGE_MS,
-    path: "/admin",
-    signed: true,
-  });
+  setSignedCookie(res, REAUTH_COOKIE, `${userId}.${Date.now()}`, { sameSite: "lax", maxAge: REAUTH_MAX_AGE_MS });
 }
 
 /** When `userId` last re-authenticated, per the signed marker cookie; null when
  * it is absent, unsigned, malformed, for another user, or in the future. The
  * caller decides how recent is recent enough. */
 export function reauthenticatedAt(req: Request, userId: string): number | null {
-  const value = (req.signedCookies as Record<string, string | false | undefined> | undefined)?.[REAUTH_COOKIE];
+  const value = readSignedCookie(req, REAUTH_COOKIE);
   if (typeof value !== "string") return null;
   const dot = value.lastIndexOf(".");
   if (dot <= 0 || value.slice(0, dot) !== userId) return null;
@@ -92,7 +82,7 @@ export async function getSessionUserId(req: Request): Promise<string | null> {
  * any kind, possibly silent SSO: not proof of re-authentication, for which see
  * reauthenticatedAt). */
 export async function getSession(req: Request): Promise<{ userId: string; issuedAtMs: number } | null> {
-  const value = (req.signedCookies as Record<string, string | false | undefined>)[SESSION_COOKIE];
+  const value = readSignedCookie(req, SESSION_COOKIE);
   if (typeof value !== "string") return null;
 
   const dot = value.lastIndexOf(".");

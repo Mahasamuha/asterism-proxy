@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { CLIENT_ID, RESOURCE, clientRow, createPrismaMock, getPath, postEmpty, postForm, startRouterAppWith, type RouterApp } from "../test-helpers/oauth-harness.js";
 
 vi.mock("../db.js", async () => ({ prisma: (await import("../test-helpers/oauth-harness.js")).createPrismaMock() }));
@@ -11,7 +11,8 @@ import { prisma } from "../db.js";
 import { config } from "../config.js";
 import { resolveClient } from "../clients/cimd.js";
 import { DEVICE_FLOW_REDIRECT_URI_SENTINEL, deviceRouter, resetDeviceEntryLimits } from "./device.js";
-import { csrfFrom } from "../test-helpers/http.js";
+import { cookieClient, csrfFrom, type CookieClient } from "../test-helpers/http.js";
+import { cookieName } from "../cookies.js";
 import { CONSENT_FORM_SCRIPT } from "../security-headers.js";
 
 // The one script the policy allows, by hash.
@@ -21,6 +22,27 @@ const db = prisma as unknown as ReturnType<typeof createPrismaMock>;
 const resolve = vi.mocked(resolveClient);
 const m = (model: string, method: string) => db[model]![method]!;
 const sha = (s: string) => createHash("sha256").update(s).digest("hex");
+
+const ISSUERS: Array<[string, string]> = [["https://auth.example.test", "https"], ["http://localhost:3000", "http"]];
+/** The cookie-clearing Set-Cookie line for `base`, asserted to be at Path=/ and Secure exactly when https. */
+function expectCleared(res: { headers: Headers }, base: string) {
+  const wire = cookieName(base);
+  const line = res.headers.getSetCookie().find((l) => l.startsWith(`${wire}=;`));
+  expect(line, `clear of ${wire}`).toBeDefined();
+  expect(line).toMatch(/; Path=\/(;|$)/);
+  expect(line).toMatch(/; Expires=/);
+  if (config.issuerUrl.startsWith("https:")) {
+    expect(wire).toBe(`__Host-${base}`);
+    expect(line).toMatch(/; Secure/);
+  } else {
+    expect(wire).toBe(base);
+    expect(line).not.toMatch(/; Secure/);
+  }
+}
+const savedIssuer = config.issuerUrl;
+afterEach(() => {
+  config.issuerUrl = savedIssuer;
+});
 
 let app: RouterApp;
 beforeAll(async () => {
@@ -44,18 +66,8 @@ beforeEach(() => {
 });
 
 /** GETs the entry page (CSRF cookie) then POSTs the code, like a user would. */
-async function enterCode(ip: string, userCode: string | string[]) {
-  const jar = new Map<string, string>();
-  const doFetch = async (url: string, init: RequestInit = {}) => {
-    const headers = { ...(init.headers as Record<string, string>), "x-forwarded-for": ip, cookie: [...jar].map(([k, v]) => `${k}=${v}`).join("; ") };
-    const res = await fetch(url, { ...init, headers, redirect: "manual" });
-    for (const line of res.headers.getSetCookie()) {
-      const [pair] = line.split(";");
-      const eq = pair!.indexOf("=");
-      jar.set(pair!.slice(0, eq), pair!.slice(eq + 1));
-    }
-    return res;
-  };
+async function enterCode(ip: string, userCode: string | string[], client: CookieClient = cookieClient()) {
+  const doFetch = (url: string, init: RequestInit = {}) => client.fetch(url, { ...init, headers: { ...(init.headers as Record<string, string>), "x-forwarded-for": ip } });
   const page = await getPath(app.baseUrl, "/oauth/device", doFetch);
   return postForm(app.baseUrl, "/oauth/device", { csrf_token: csrfFrom(page.text), user_code: userCode }, doFetch);
 }
@@ -98,6 +110,30 @@ describe("POST /oauth/device/code", () => {
     expect(r.status).toBe(400);
     expect(r.json["error"]).toBe("invalid_client");
     expect(m("deviceCode", "create")).not.toHaveBeenCalled();
+  });
+
+  it("M1 refuses with 429 and Retry-After before resolving the client once an address is over its limit", async () => {
+    const ip = freshIp();
+    const post = () => postForm(app.baseUrl, "/oauth/device/code", { client_id: CLIENT_ID, resource: RESOURCE }, from(ip));
+    for (let i = 0; i < 60; i++) await post();
+    resolve.mockClear();
+    const r = await post();
+    expect(r.status).toBe(429);
+    expect(r.json["error"]).toBe("temporarily_unavailable");
+    expect(Number(r.headers.get("retry-after"))).toBeGreaterThan(0);
+    expect(r.headers.get("cache-control")).toBe("no-store");
+    expect(resolve).not.toHaveBeenCalled();
+  });
+
+  it("the row-creation 429 carries Retry-After and no-store", async () => {
+    const ip = freshIp();
+    const post = () => postForm(app.baseUrl, "/oauth/device/code", { client_id: CLIENT_ID, resource: RESOURCE }, from(ip));
+    let r = await post();
+    for (let i = 0; i < 40 && r.status !== 429; i++) r = await post();
+    // Valid requests hit the row-creation limit (30/min) before the resolution one (60/min).
+    expect(r.status).toBe(429);
+    expect(r.headers.get("cache-control")).toBe("no-store");
+    expect(Number(r.headers.get("retry-after"))).toBeGreaterThan(0);
   });
 
   it.each([
@@ -244,6 +280,14 @@ describe("GET/POST /oauth/device (user-code entry)", () => {
     expect(r.headers.get("location")).toBe(`/auth/login?flow=${data.handle}`);
   });
 
+  it.each(ISSUERS)("a valid code clears the device CSRF cookie under its wire name at Path=/ (%s)", async (issuer) => {
+    config.issuerUrl = issuer;
+    m("deviceCode", "findFirst").mockResolvedValue(pending());
+    const r = await enterCode(freshIp(), "ABCD-2345");
+    expect(r.status).toBe(302);
+    expectCleared(r, "csrf_device");
+  });
+
   it.each([
     [["read"], false],
     [["read", "root"], true],
@@ -317,9 +361,24 @@ describe("GET/POST /oauth/device (user-code entry)", () => {
     const blocked = await enterCode(ip, "ABCD2345");
     expect(blocked.status).toBe(429);
     expect(blocked.text).toContain("Too many attempts");
+    // Seconds until the 15-minute failure window ends.
+    const wait = Number(blocked.headers.get("retry-after"));
+    expect(Number.isInteger(wait)).toBe(true);
+    expect(wait).toBeGreaterThan(0);
+    expect(wait).toBeLessThanOrEqual(900);
     expect(m("deviceCode", "findFirst")).toHaveBeenCalledTimes(10);
     // A different address is unaffected.
     expect((await enterCode(freshIp(), "ABCD2345")).status).toBe(200);
+  });
+});
+
+describe("device entry cookies", () => {
+  it("a cleared CSRF cookie is dropped from the jar and not sent again", async () => {
+    m("deviceCode", "findFirst").mockResolvedValue({ clientId: CLIENT_ID, resource: RESOURCE, scopes: ["read"], expiresAt: new Date(Date.now() + 600_000) });
+    const client = cookieClient();
+    const r = await enterCode(freshIp(), "ABCD2345", client);
+    expect(r.status).toBe(302);
+    expect(client.cookies.has(cookieName("csrf_device"))).toBe(false);
   });
 });
 
@@ -341,6 +400,13 @@ describe("user-code entry limiters count failures only (M10)", () => {
     for (let i = 0; i < 15; i++) expect((await enterCode(ip, "")).status).toBe(200);
     m("deviceCode", "findFirst").mockResolvedValue(null);
     expect((await enterCode(ip, "WXYZ2345")).status).toBe(200);
+  });
+
+  it("L2 addresses in one IPv6 /64 share the failed-entry budget; another /64 does not", async () => {
+    m("deviceCode", "findFirst").mockResolvedValue(null);
+    for (let i = 0; i < 10; i++) expect((await enterCode(`2001:db8:1:2:${i + 1}::${i + 1}`, "WXYZ2345")).status).toBe(200);
+    expect((await enterCode("2001:db8:1:2:ffff::1", "WXYZ2345")).status).toBe(429);
+    expect((await enterCode("2001:db8:1:3::1", "WXYZ2345")).status).toBe(200);
   });
 
   it("has no global ceiling: failures from many addresses never lock out an address that has none of its own", async () => {

@@ -11,15 +11,16 @@ import { FRESH_LOGIN_MAX_AGE_S, selfLoginReturnPath } from "../identity/self-log
  * admin group upstream, or disabling the user, takes effect within about that
  * long; a failed re-check means not an admin.
  *
- * - A local account: `LocalUser.isAdmin`, the account active, and local
- *   accounts still enabled.
+ * - A local account: `LocalUser.isAdmin`, the account active and its User
+ *   not deactivated, and local accounts still enabled.
  * - An OIDC user: the stored normalized `groups` contain one of ADMIN_GROUPS,
  *   while OIDC is enabled. An empty ADMIN_GROUPS admits nobody (groupsSatisfy
  *   alone would treat an empty requirement as "no restriction"). */
 export async function isAdmin(userId: string): Promise<boolean> {
   if (config.enableLocalAccounts) {
-    const local = await prisma.localUser.findUnique({ where: { userId }, select: { isAdmin: true, isActive: true } });
-    if (local?.isAdmin && local.isActive) return true;
+    const local = await prisma.localUser.findUnique({ where: { userId }, select: { isAdmin: true, isActive: true, user: { select: { deactivatedAt: true } } } });
+    // A deactivated User also stops here, matching the session check.
+    if (local?.isAdmin && local.isActive && local.user.deactivatedAt === null) return true;
   }
   if (config.enableOidc && config.adminGroups.length > 0) {
     if (!(await recheckUpstream(userId)).ok) return false;

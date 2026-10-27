@@ -1,7 +1,9 @@
 import { createHash } from "node:crypto";
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { CLIENT_ID, RESOURCE, clientRow, createPrismaMock, getPath, postEmpty, postForm, startRouterApp, type RouterApp } from "../test-helpers/oauth-harness.js";
 import { cookieClient, csrfFrom } from "../test-helpers/http.js";
+import { cookieName } from "../cookies.js";
+import { config } from "../config.js";
 
 vi.mock("../db.js", async () => ({ prisma: (await import("../test-helpers/oauth-harness.js")).createPrismaMock() }));
 vi.mock("../resource-registry.js", async () => (await import("../test-helpers/oauth-harness.js")).fakeResourceRegistry());
@@ -23,6 +25,27 @@ const session = vi.mocked(getSessionUserId);
 const authenticate = vi.mocked(authenticateConfidentialClient);
 const m = (model: string, method: string) => db[model]![method]!;
 const sha = (s: string) => createHash("sha256").update(s).digest("hex");
+
+const ISSUERS: Array<[string, string]> = [["https://auth.example.test", "https"], ["http://localhost:3000", "http"]];
+/** The cookie-clearing Set-Cookie line for `base`, asserted to be at Path=/ and Secure exactly when https. */
+function expectCleared(res: { headers: Headers }, base: string) {
+  const wire = cookieName(base);
+  const line = res.headers.getSetCookie().find((l) => l.startsWith(`${wire}=;`));
+  expect(line, `clear of ${wire}`).toBeDefined();
+  expect(line).toMatch(/; Path=\/(;|$)/);
+  expect(line).toMatch(/; Expires=/);
+  if (config.issuerUrl.startsWith("https:")) {
+    expect(wire).toBe(`__Host-${base}`);
+    expect(line).toMatch(/; Secure/);
+  } else {
+    expect(wire).toBe(base);
+    expect(line).not.toMatch(/; Secure/);
+  }
+}
+const savedIssuer = config.issuerUrl;
+afterEach(() => {
+  config.issuerUrl = savedIssuer;
+});
 
 let app: RouterApp;
 beforeAll(async () => {
@@ -77,6 +100,17 @@ describe("POST /oauth/revoke (RFC 7009)", () => {
     m("refreshToken", "findUnique").mockResolvedValue(null);
     expect((await revoke({ token: "rt", client_id: CLIENT_ID })).status).toBe(200);
     expect(authenticate).not.toHaveBeenCalled();
+  });
+
+  it("refuses with invalid_client and revokes nothing when the token is the client's own but the client can't be resolved (P0)", async () => {
+    resolve.mockResolvedValue(null);
+    m("refreshToken", "findUnique").mockResolvedValue(rtEntry());
+    const r = await revoke({ token: "rt", client_id: CLIENT_ID });
+    expect(r.status).toBe(400);
+    expect(r.json["error"]).toBe("invalid_client");
+    expect(r.json["error_description"]).toBe("Client could not be resolved");
+    expect(authenticate).not.toHaveBeenCalled();
+    expect(m("refreshToken", "updateMany")).not.toHaveBeenCalled();
   });
 
   it("a failing client assertion is rejected and revokes nothing (P0)", async () => {
@@ -171,6 +205,60 @@ describe("POST /grants/:id/revoke", () => {
     expect(db.$transaction).not.toHaveBeenCalled();
   });
 
+  it("P0 a token issued to one user is refused for another (M4)", async () => {
+    m("grant", "findUnique").mockResolvedValue({ id: "g1", userId: "u2", clientId: CLIENT_ID, resource: RESOURCE });
+    const client = cookieClient();
+    const token = csrfFrom((await getPath(app.baseUrl, "/grants", client.fetch)).text);
+    session.mockResolvedValue("u2");
+    const r = await postForm(app.baseUrl, "/grants/g1/revoke", { csrf_token: token }, client.fetch);
+    expect(r.status).toBe(403);
+    expect(m("grant", "update")).not.toHaveBeenCalled();
+  });
+
+  it("P0 the logout token does not work for the revoke form, nor the reverse (M4)", async () => {
+    m("grant", "findMany").mockResolvedValue([{ id: "g1", clientId: CLIENT_ID, resource: RESOURCE, scopes: [], grantedAt: new Date() }]);
+    m("grant", "findUnique").mockResolvedValue({ id: "g1", userId: "u1", clientId: CLIENT_ID, resource: RESOURCE });
+    const client = cookieClient();
+    const html = (await getPath(app.baseUrl, "/grants", client.fetch)).text;
+    const logoutToken = csrfFrom(html.split("<form").find((f) => f.includes('action="/auth/logout"'))!);
+    const revokeToken = csrfFrom(html);
+    const grantsCookie = cookieName("csrf_grants");
+    const logoutCookie = cookieName("csrf_logout");
+    expect(client.cookies.get(grantsCookie)).toBeDefined();
+    expect(client.cookies.get(logoutCookie)).toBeDefined();
+    expect(client.cookies.get(grantsCookie)).not.toBe(client.cookies.get(logoutCookie));
+
+    // The two forms have different cookies, so swapping tokens alone fails anyway. Make the
+    // cookie match as well (the planted-cookie case): only the purpose can then refuse it.
+    const asLogout = cookieClient();
+    asLogout.cookies.set(grantsCookie, client.cookies.get(logoutCookie)!);
+    expect((await postForm(app.baseUrl, "/grants/g1/revoke", { csrf_token: logoutToken }, asLogout.fetch)).status).toBe(403);
+
+    const asRevoke = cookieClient();
+    asRevoke.cookies.set(logoutCookie, client.cookies.get(grantsCookie)!);
+    expect((await postForm(app.baseUrl, "/auth/logout", { csrf_token: revokeToken }, asRevoke.fetch)).status).toBe(403);
+
+    expect(m("grant", "update")).not.toHaveBeenCalled();
+    expect(db.$transaction).not.toHaveBeenCalled();
+    expect(m("user", "update")).not.toHaveBeenCalled();
+  });
+
+  it("P0 a logout token minted for one user is refused for another and revokes nothing (M4)", async () => {
+    m("grant", "findMany").mockResolvedValue([]);
+    const client = cookieClient();
+    const html = (await getPath(app.baseUrl, "/grants", client.fetch)).text;
+    const token = csrfFrom(html.split("<form").find((f) => f.includes('action="/auth/logout"'))!);
+    session.mockResolvedValue("u2");
+    const r = await postForm(app.baseUrl, "/auth/logout", { csrf_token: token }, client.fetch);
+    expect(r.status).toBe(403);
+    expect(r.headers.getSetCookie().join(";")).not.toMatch(/session=;/);
+    expect(m("user", "update")).not.toHaveBeenCalled();
+    // and it still works for the user it was minted for
+    session.mockResolvedValue("u1");
+    m("user", "update").mockResolvedValue({ sessionEpoch: 1 });
+    expect((await postForm(app.baseUrl, "/auth/logout", { csrf_token: token }, client.fetch)).status).toBe(200);
+  });
+
   it.each([
     ["an unknown grant", null],
     ["another user's grant", { id: "g1", userId: "someone-else", clientId: CLIENT_ID, resource: RESOURCE }],
@@ -218,9 +306,9 @@ describe("GET /grants and /auth/logout", () => {
 
   it("links to /admin for an admin and only for an admin", async () => {
     m("grant", "findMany").mockResolvedValue([]);
-    m("localUser", "findUnique").mockResolvedValue({ isAdmin: true, isActive: true });
+    m("localUser", "findUnique").mockResolvedValue({ isAdmin: true, isActive: true, user: { deactivatedAt: null } });
     expect((await getPath(app.baseUrl, "/grants")).text).toContain('href="/admin"');
-    m("localUser", "findUnique").mockResolvedValue({ isAdmin: false, isActive: true });
+    m("localUser", "findUnique").mockResolvedValue({ isAdmin: false, isActive: true, user: { deactivatedAt: null } });
     expect((await getPath(app.baseUrl, "/grants")).text).not.toContain('href="/admin"');
   });
 
@@ -271,6 +359,17 @@ describe("GET /grants and /auth/logout", () => {
     expect(r.status).toBe(200);
     expect(r.headers.getSetCookie().join(";")).toMatch(/session=;/);
     expect(m("user", "update").mock.calls[0]![0]).toMatchObject({ where: { id: "u1" }, data: { sessionEpoch: { increment: 1 } } });
+  });
+
+  it.each(ISSUERS)("POST /auth/logout clears the session and logout CSRF cookies under their wire names at Path=/ (%s)", async (issuer) => {
+    config.issuerUrl = issuer;
+    m("user", "update").mockResolvedValue({ sessionEpoch: 1 });
+    const { jar, csrf } = await logoutToken();
+    const r = await postForm(app.baseUrl, "/auth/logout", { csrf_token: csrf }, jar.fetch);
+    expect(r.status).toBe(200);
+    expectCleared(r, "csrf_logout");
+    expectCleared(r, "session");
+    expectCleared(r, "reauth");
   });
 
   it("POST /auth/logout from a browser that never loaded a page with the button is refused and revokes nothing", async () => {

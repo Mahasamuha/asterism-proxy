@@ -43,18 +43,34 @@ function setBounded<V>(map: Map<string, V>, key: string, value: V): void {
   }
 }
 
-/** Returns the TTL in ms: 0 for no-store / no-cache / max-age=0 (do not cache). */
+const MIN_JWKS_TTL_MS = 5 * 60 * 1000;
+
+/** Returns the TTL in ms, with the same rules as CIMD's cacheLifetimeMs: 0 for
+ * no-store / no-cache / an explicit max-age=0 (do not cache); a positive
+ * max-age is clamped to 5 minutes..24h so a tiny value can't make every
+ * assertion fetch the JWKS. A client rotating keys isn't held back by the
+ * floor: an unknown kid triggers a (rate-limited) refetch. A max-age that
+ * isn't a non-negative integer falls back to the default. */
 function jwksTtlMs(cacheControl: string | string[] | undefined): number {
-  const value = Array.isArray(cacheControl) ? cacheControl[0] : cacheControl;
+  const value = Array.isArray(cacheControl) ? cacheControl.join(",") : cacheControl;
   if (!value) return DEFAULT_JWKS_TTL_MS;
   if (/(?:^|,)\s*(?:no-store|no-cache)\b/i.test(value)) return 0;
-  const match = /(?:^|,)\s*max-age=(\d+)/i.exec(value);
-  return match ? Math.min(Number(match[1]) * 1000, DEFAULT_JWKS_TTL_MS) : DEFAULT_JWKS_TTL_MS;
+  const match = /(?:^|,)\s*max-age=([^,\s]*)/i.exec(value);
+  if (!match || !/^\d+$/.test(match[1]!)) return DEFAULT_JWKS_TTL_MS;
+  const seconds = Number(match[1]);
+  if (seconds === 0) return 0;
+  return Math.min(Math.max(seconds * 1000, MIN_JWKS_TTL_MS), DEFAULT_JWKS_TTL_MS);
 }
 
 async function fetchClientJwks(jwksUri: string): Promise<jose.JWK[]> {
   let headers: IncomingHttpHeaders = {};
   const raw = await safeFetchJson(jwksUri, {
+    // Own pool: CIMD fetches (unauthenticated, via /oauth/authorize) must not
+    // be able to fill the slots this endpoint needs. No redirects: the key set
+    // is at the URL the client metadata names.
+    pool: "client-jwks",
+    maxRedirects: 0,
+    allowedPorts: [443],
     onHeaders: (h) => {
       headers = h;
     },
@@ -260,7 +276,7 @@ export async function authenticateConfidentialClient(client: OauthClient, body: 
     await verifyClientAssertion(client.clientId, jwksUri, assertion);
     return { ok: true };
   } catch (err) {
-    log.warn({ clientId: client.clientId, err: err instanceof Error ? err.message : err }, "client_assertion verification failed");
+    log.warn({ clientId: client.clientId, err }, "client_assertion verification failed");
     return {
       ok: false,
       error: "invalid_client",

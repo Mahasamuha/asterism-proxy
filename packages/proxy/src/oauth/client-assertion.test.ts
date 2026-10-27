@@ -1,4 +1,4 @@
-import { SignJWT, base64url, generateKeyPair } from "jose";
+import { SignJWT, base64url, exportJWK, generateKeyPair } from "jose";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { GRANT_TYPE_JWT_BEARER, clientRow } from "../test-helpers/oauth-harness.js";
 import { makeEs256Key, makeRs256Key, type TestKey } from "../test-helpers/keys.js";
@@ -19,7 +19,7 @@ let n = 0;
 let jwksUri: string;
 let clientId: string;
 let key: TestKey;
-let served: { body: unknown; headers: Record<string, string> };
+let served: { body: unknown; headers: Record<string, string | string[]> };
 
 beforeEach(async () => {
   n++;
@@ -59,7 +59,7 @@ const verify = (jwt: string) => verifyClientAssertion(clientId, jwksUri, jwt);
 describe("verifyClientAssertion accepts (P0)", () => {
   it("a valid ES256 assertion", async () => {
     await expect(verify(await assertion())).resolves.toBeUndefined();
-    expect(fetchJson).toHaveBeenCalledWith(jwksUri, expect.anything());
+    expect(fetchJson).toHaveBeenCalledWith(jwksUri, expect.objectContaining({ pool: "client-jwks", maxRedirects: 0, allowedPorts: [443] }));
   });
 
   it("an RS256 assertion (asymmetric algorithms are allowed)", async () => {
@@ -86,7 +86,36 @@ describe("verifyClientAssertion rejects (P0)", () => {
   it("HS256 signed with an oct key published in the JWKS", async () => {
     const secret = new Uint8Array(32).fill(7);
     served.body = { keys: [key.publicJwk, { kty: "oct", kid: "hs", alg: "HS256", k: base64url.encode(secret) }] };
-    await expect(verify(await assertion({}, secret, { alg: "HS256", kid: "hs" }))).rejects.toThrow();
+    // The reason matters: it is our allow-list that refuses HS256 ("not allowed").
+    // Without it jose would fail later with a different reason (its JWKS selector
+    // refuses symmetric algs), and the test would pass for the wrong cause.
+    await expect(verify(await assertion({}, secret, { alg: "HS256", kid: "hs" }))).rejects.toThrow(/"alg" .*not allowed/);
+  });
+
+  it.each(["HS256", "HS384", "HS512"] as const)("%s is refused by the algorithm allow-list, whatever the JWKS holds", async (alg) => {
+    const secret = new Uint8Array(64).fill(9);
+    served.body = { keys: [{ kty: "oct", kid: "hs", k: base64url.encode(secret) }] };
+    await expect(verify(await assertion({}, secret, { alg, kid: "hs" }))).rejects.toThrow(/"alg" .*not allowed/);
+  });
+
+  // jose would verify these (the key is a valid public key with no alg pin), so
+  // only ALLOWED_ALGORITHMS refuses them.
+  it.each([
+    ["RS384", "RS384"],
+    ["RS512", "RS512"],
+    ["PS512", "PS512"],
+    ["ES512", "ES512"],
+  ] as const)("a validly signed %s assertion is refused: the algorithm is not in the allow-list", async (_n, alg) => {
+    const pair = await generateKeyPair(alg, { extractable: true });
+    const publicJwk = { ...(await exportJWK(pair.publicKey)), kid: `x-${alg}` }; // no alg, no use
+    served.body = { keys: [publicJwk] };
+    await expect(verify(await assertion({}, pair.privateKey as unknown as CryptoKey, { alg, kid: `x-${alg}` }))).rejects.toThrow(/"alg" .*not allowed/);
+  });
+
+  it("the same key and a listed algorithm (RS256) is accepted, so the refusals above are about the algorithm", async () => {
+    const pair = await generateKeyPair("RS256", { extractable: true });
+    served.body = { keys: [{ ...(await exportJWK(pair.publicKey)), kid: "x-rs256" }] };
+    await expect(verify(await assertion({}, pair.privateKey as unknown as CryptoKey, { alg: "RS256", kid: "x-rs256" }))).resolves.toBeUndefined();
   });
 
   it("alg=none", async () => {
@@ -213,16 +242,28 @@ describe("client JWKS cache lifetime (P1)", () => {
     expect(fetchJson).toHaveBeenCalledTimes(2);
   });
 
-  it("max-age=60: cached until it lapses, then refetched", async () => {
+  it("a small max-age is floored at 5 minutes, like CIMD", async () => {
     vi.useFakeTimers({ toFake: ["Date"] });
-    served.headers = { "cache-control": "public, max-age=60" };
+    served.headers = { "cache-control": "public, max-age=1" };
     await verify(await assertion());
-    vi.setSystemTime(Date.now() + 59_000);
+    vi.setSystemTime(Date.now() + 299_000);
     await verify(await assertion());
     expect(fetchJson).toHaveBeenCalledTimes(1);
     vi.setSystemTime(Date.now() + 2_000);
     await verify(await assertion());
     expect(fetchJson).toHaveBeenCalledTimes(2);
+  });
+
+  it("a header sent as an array is joined, so no-store in a later element still applies", async () => {
+    served.headers = { "cache-control": ["public", "no-store"] };
+    await useTwice();
+    expect(fetchJson).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(["max-age=", "max-age=abc", "max-age=1.5", "max-age=-1"])("%s is ignored: the default lifetime applies", async (cc) => {
+    served.headers = { "cache-control": cc };
+    await useTwice();
+    expect(fetchJson).toHaveBeenCalledTimes(1);
   });
 
   it("a huge max-age is capped at 24 hours", async () => {

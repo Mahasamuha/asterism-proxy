@@ -7,6 +7,7 @@ Verifies JWT access tokens issued by [asterism-proxy](https://github.com/Mahasam
 - With discovery, the discovery document's `issuer` must exactly equal the configured `issuer`. A `jwks_uri` (discovered or configured) must be `https:`; `http:` is accepted only for loopback hosts (`localhost`, `127.0.0.1`, `[::1]`) for development. Redirects are not followed, and responses are capped at 256 KB (JWKS) and 64 KB (discovery).
 - `aud` must be a **single string** equal to this server's identifier. Array audiences are rejected outright, so a token minted for one MCP server can't be replayed against another.
 - JWKS and discovery requests time out after 10 seconds. A signing key the issuer publishes but that can't be imported (for example one without `alg`) fails as `invalid_signature`.
+- The key's `alg` is the only algorithm accepted. A token whose header `typ` is something other than `at+jwt` (or `application/at+jwt`, case-insensitive) is rejected as `invalid_token_type`; a missing `typ` is accepted, since proxies before this release did not set it.
 - Failures throw a typed `TokenValidationError` with a `reason`.
 - Optional Express helpers: bearer-auth middleware that emits RFC 9728 `WWW-Authenticate` challenges, and a protected-resource metadata handler.
 
@@ -53,7 +54,8 @@ import {
 const config = { issuer: "https://auth.example.com", audience: "https://files.example.com/mcp" };
 const app = express();
 
-// RFC 9728 §3.1: served at /.well-known/oauth-protected-resource/mcp for this audience
+// RFC 9728 §3.1: served at /.well-known/oauth-protected-resource/mcp for this audience.
+// asterism won't register a server that declares no scopes; see "Advertising scopes".
 app.get(protectedResourceMetadataPath(config.audience), protectedResourceMetadataHandler(config));
 
 // 401s carry WWW-Authenticate with resource_metadata pointing at the document above
@@ -76,7 +78,7 @@ It is a fresh plain object per call. Keys named `__proto__`, `constructor` and `
 app.get(protectedResourceMetadataPath(config.audience), protectedResourceMetadataHandler(config, { scopesSupported: ["read", "write"] }));
 ```
 
-The optional second argument adds `scopes_supported` to the metadata; without it the member is omitted. Claude.ai requests exactly the scopes listed there, so leave step-up-only scopes such as `admin` out.
+The optional second argument adds `scopes_supported` to the metadata; without it the member is omitted. The document is valid RFC 9728 either way, but the asterism proxy refuses to register a server whose metadata declares no scopes ("Metadata declares no scopes"), so pass `scopesSupported` or `scopes` with at least one scope of your own (`offline_access` doesn't count; it's only a hint to clients). Claude.ai requests exactly the scopes listed there, so leave step-up-only scopes such as `admin` out.
 
 To describe the server and its scopes to the proxy, pass `resourceName` and `scopes` instead:
 
@@ -126,7 +128,7 @@ This emits `resource_name` and an `asterism_scopes` member, an extension to RFC 
 - `stepUp`, `shortLived` and `freshSignIn` are omitted from the output when false. The implications are applied by asterism, so `freshSignIn: true` alone is enough.
 - `offlineAccess: true` adds `offline_access` to `scopes_supported`. The proxy issues refresh tokens only to clients that ask for it, and Claude.ai asks for exactly what is listed, so set it unless every connection should end when its access token expires. It is the proxy's scope, not yours: it never appears in `asterism_scopes`, and declaring `offline_access` or `openid` in `scopes` throws.
 - `scopes` and `scopesSupported` are alternatives; passing both throws.
-- Options are validated when the handler is created: scope names follow the same rules as `requireScopes`, must be unique, at most 50 scopes; each description is a non-empty string of at most 300 characters; `resourceName` is non-empty and at most 200 characters.
+- Options are validated when the handler is created, with the same rules the proxy applies when it fetches your metadata, so a document the proxy would refuse fails here instead: scope names follow the same rules as `requireScopes` (RFC 6749 scope tokens), must be unique, at most 50 scopes (also for `scopesSupported`, which may not list `openid`); each description is a non-empty string of at most 300 characters; `resourceName` is non-empty and at most 200 characters; `resourceName` and descriptions may not contain control or format characters (bidi overrides, zero-width characters) or line/paragraph separators. Ordinary non-ASCII text such as `Café` is fine.
 
 Servers that don't use Express can serve the same document with `buildProtectedResourceMetadata(config, options)`, which returns the JSON object and throws on the same validation errors.
 
@@ -142,7 +144,7 @@ app.post("/mcp/admin", requireScopes(config, "admin"), handler);
 sendInsufficientScope(res, config, ["admin"], "Admin scope required");
 ```
 
-A missing scope answers **403** with `WWW-Authenticate: Bearer realm="<aud>", resource_metadata="<url>", error="insufficient_scope", scope="admin"` (RFC 6750 §3.1) and a JSON `{ error, error_description }` body. `requireScopes` must run after the bearer middleware; with no `req.principal` it fails closed with the same 401 challenge. Scope strings containing whitespace, `"` or a backslash throw when the middleware is created (or when `sendInsufficientScope` is called).
+A missing scope answers **403** with `WWW-Authenticate: Bearer realm="<aud>", resource_metadata="<url>", error="insufficient_scope", scope="admin"` (RFC 6750 §3.1) and a JSON `{ error, error_description }` body. `requireScopes` must run after the bearer middleware; with no `req.principal` it fails closed with the same 401 challenge. Scope strings that are not RFC 6749 scope tokens (printable ASCII only; no whitespace, `"` or backslash; not empty) throw when the middleware is created (or when `sendInsufficientScope` is called).
 
 ## Revocation
 

@@ -152,6 +152,39 @@ describe("createBearerAuthMiddleware", () => {
     }
   });
 
+  it("P0 an exception thrown by the downstream handler is not answered as a 401", async () => {
+    // Called directly, not through Express: Express catches a handler's throw itself,
+    // which would hide a `.then(...).catch(...)` that turns it into an auth failure.
+    const res = { set: vi.fn().mockReturnThis(), status: vi.fn().mockReturnThis(), json: vi.fn().mockReturnThis() };
+    const boom = new Error("downstream bug");
+    const next = vi.fn(() => {
+      throw boom;
+    });
+    const req = { headers: { authorization: `Bearer ${await token()}` } };
+
+    // The throw escapes the promise chain as an unhandled rejection (nothing may swallow it
+    // as an auth failure). Take over the process listeners for this test so vitest does not
+    // report it as an error, and assert it is the downstream error.
+    const saved = process.listeners("unhandledRejection");
+    process.removeAllListeners("unhandledRejection");
+    const unhandled: unknown[] = [];
+    process.on("unhandledRejection", (reason) => unhandled.push(reason));
+    try {
+      createBearerAuthMiddleware(cfg())(req as never, res as never, next);
+      await vi.waitFor(() => expect(next).toHaveBeenCalledTimes(1));
+      await new Promise((r) => setImmediate(r)); // let any rejection handler and the unhandled-rejection check run
+      await new Promise((r) => setImmediate(r));
+    } finally {
+      process.removeAllListeners("unhandledRejection");
+      for (const l of saved) process.on("unhandledRejection", l as (...args: unknown[]) => void);
+    }
+
+    expect(res.status).not.toHaveBeenCalled();
+    expect(res.json).not.toHaveBeenCalled();
+    expect(res.set).not.toHaveBeenCalled(); // no WWW-Authenticate
+    expect(unhandled).toEqual([boom]);
+  });
+
   it("P1 an empty token is an invalid_token challenge, not a crash", async () => {
     const res = await get({ authorization: "Bearer " });
     expect(res.status).toBe(401);
@@ -274,6 +307,30 @@ describe("buildProtectedResourceMetadata", () => {
     expect(() => build({ scopes: [scope({ description: "x".repeat(300) })] })).not.toThrow();
   });
 
+  it("P1 holds scope names to the RFC 6749 scope-token grammar the proxy enforces", () => {
+    for (const bad of ["café", "a\u0000b", "a\u007fb", "a\u200bb", "😀", "a\u00a0b"]) {
+      expect(() => build({ scopes: [scope({ name: bad })] })).toThrow(/Invalid scope/);
+      expect(() => build({ scopesSupported: [bad] })).toThrow(/Invalid scope/);
+    }
+    expect(() => build({ scopes: [scope({ name: "urn:a/b.c-d_e~!#$%&'()*+,;=<>?@[]^`{|}" })] })).not.toThrow();
+  });
+
+  it("P1 rejects control, format and separator characters in display text", () => {
+    for (const bad of ["a\u202eb", "a\u200bb", "a\nb", "a\u2028b", "a\u2029b", "a\u0000b"]) {
+      expect(() => build({ resourceName: bad })).toThrow(/Invalid resourceName/);
+      expect(() => build({ scopes: [scope({ description: bad })] })).toThrow(/Invalid description/);
+    }
+    expect(() => build({ resourceName: "Café 😀", scopes: [scope({ description: "Lé café 😀" })] })).not.toThrow();
+  });
+
+  it("P1 applies the proxy's limits to scopesSupported", () => {
+    expect(() => build({ scopesSupported: ["openid"] })).toThrow(/reserved/);
+    expect(() => build({ scopesSupported: ["a", "a"] })).toThrow(/Duplicate/);
+    const many = (n: number) => Array.from({ length: n }, (_, i) => `s${i}`);
+    expect(() => build({ scopesSupported: many(50) })).not.toThrow();
+    expect(() => build({ scopesSupported: many(51) })).toThrow(/Too many/);
+  });
+
   it("P1 caps the number of scopes at 50", () => {
     const many = (n: number) => Array.from({ length: n }, (_, i) => scope({ name: `s${i}` }));
     expect(() => build({ scopes: many(50) })).not.toThrow();
@@ -305,7 +362,7 @@ describe("sendInsufficientScope", () => {
 
   it("P0 throws on invalid scope strings", () => {
     const res = { set: vi.fn(), status: vi.fn() } as never;
-    for (const bad of ['a"b', "a\\b", "a b", "", "a\tb", "a\nb"]) {
+    for (const bad of ['a"b', "a\\b", "a b", "", "a\tb", "a\nb", "café", "a\u200bb"]) {
       expect(() => sendInsufficientScope(res, cfg(), [bad])).toThrow(/Invalid scope/);
     }
   });
@@ -338,7 +395,7 @@ describe("requireScopes", () => {
   });
 
   it("P0 throws at creation on invalid scope strings", () => {
-    for (const bad of ['a"b', "a\\b", "a b", ""]) {
+    for (const bad of ['a"b', "a\\b", "a b", "", "café", "a\u0000b"]) {
       expect(() => requireScopes(cfg(), bad)).toThrow(/Invalid scope/);
     }
   });

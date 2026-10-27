@@ -11,6 +11,7 @@ export type SafeFetchRejectReason =
   | "invalid_url"
   | "invalid_scheme"
   | "insecure_http_not_loopback"
+  | "port_not_allowed"
   | "dns_resolution_failed"
   | "blocked_address"
   | "rate_limited"
@@ -104,10 +105,11 @@ function isLoopbackAddress(address: string, family: 4 | 6): boolean {
 const RATE_LIMIT_MAX = 10;
 const RATE_LIMIT_WINDOW_MS = 60 * 1000;
 
-// Two pools, so a flood of attacker-triggered CIMD fetches (via /oauth/authorize)
+// Separate pools, so a flood of attacker-triggered CIMD fetches (via /oauth/authorize)
 // cannot use up the budget an operator's resource-metadata fetch needs for the
-// same host, nor the in-flight slots.
-export type FetchPool = "cimd" | "resource-metadata";
+// same host, nor the in-flight slots, and cannot starve client JWKS fetches at
+// the token endpoint (private_key_jwt).
+export type FetchPool = "cimd" | "resource-metadata" | "client-jwks";
 const rateLimitWindows = new Map<string, { count: number; windowStart: number }>();
 
 function checkRateLimit(pool: FetchPool, rawHostname: string): void {
@@ -157,6 +159,18 @@ function parseAndValidateScheme(rawUrl: string): URL {
   }
 
   reject("invalid_scheme", `Scheme must be https: (got ${parsed.protocol})`);
+}
+
+// A hostile name can resolve to this host's own public address, which the
+// address blocklist cannot catch; restricting the port keeps such a fetch from
+// reaching other services listening on it. Only https: is checked: http: is the
+// dev-only loopback exception, which the loopback check already confines.
+function checkPort(parsed: URL, allowedPorts: number[] | undefined): void {
+  if (!allowedPorts || parsed.protocol !== "https:") return;
+  const port = Number(parsed.port || 443);
+  if (!allowedPorts.includes(port)) {
+    reject("port_not_allowed", `Port ${port} is not allowed for ${parsed.hostname}`);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -363,9 +377,12 @@ export interface SafeFetchOptions {
   // on the same network); never pass it for a URL an attacker can choose. CIMD must
   // never set it.
   allowPrivateNetwork?: boolean;
+  // If set, an https: URL (and every redirect hop) must use one of these ports
+  // (443 when the URL names none). For URLs an attacker can choose.
+  allowedPorts?: number[];
   // Which rate-limit namespace and concurrency pool the call is charged to.
   // Defaults to "cimd" (client metadata documents, which an unauthenticated
-  // caller can trigger); operator-driven resource-metadata fetches use their own.
+  // caller can trigger); operator-driven resource-metadata fetches and client JWKS fetches use their own.
   pool?: FetchPool;
 }
 
@@ -377,7 +394,7 @@ const DEFAULT_MAX_REDIRECTS = 1;
 // lookups hold libuv threadpool threads, so excess calls fail fast instead of queuing.
 // The cap applies per pool.
 export const MAX_CONCURRENT_FETCHES = 8;
-const inFlight: Record<FetchPool, number> = { cimd: 0, "resource-metadata": 0 };
+const inFlight: Record<FetchPool, number> = { cimd: 0, "resource-metadata": 0, "client-jwks": 0 };
 
 export async function safeFetchJson(url: string, options: SafeFetchOptions = {}): Promise<unknown> {
   const pool = options.pool ?? "cimd";
@@ -405,6 +422,7 @@ async function safeFetchJsonInner(url: string, options: SafeFetchOptions, pool: 
   let currentUrl = url;
   for (let redirectCount = 0; ; redirectCount++) {
     const parsed = parseAndValidateScheme(currentUrl);
+    checkPort(parsed, options.allowedPorts);
     checkRateLimit(pool, parsed.hostname);
     const resolved = await resolveAndValidate(parsed.hostname, parsed.protocol === "http:", allowPrivateNetwork, signal);
 

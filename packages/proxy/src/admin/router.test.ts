@@ -23,7 +23,7 @@ vi.mock("../resource-servers/service.js", async (importOriginal) => {
 });
 vi.mock("../clients/denylist.js", async (importOriginal) => {
   const real = await importOriginal<typeof import("../clients/denylist.js")>();
-  return { DenylistError: real.DenylistError, addDenial: vi.fn(), previewDenial: vi.fn(), removeDenial: vi.fn(), listDenials: vi.fn() };
+  return { DenylistError: real.DenylistError, checkReason: real.checkReason, addDenial: vi.fn(), previewDenial: vi.fn(), removeDenial: vi.fn(), listDenials: vi.fn() };
 });
 
 import { prisma } from "../db.js";
@@ -89,7 +89,7 @@ beforeEach(() => {
   config.adminGroups = [];
   session.mockResolvedValue({ userId: "u1", issuedAtMs: Date.now() });
   reauth.mockReturnValue(Date.now());
-  m("localUser", "findUnique").mockResolvedValue({ id: "lu1", isAdmin: true, isActive: true });
+  m("localUser", "findUnique").mockResolvedValue({ id: "lu1", isAdmin: true, isActive: true, user: { deactivatedAt: null } });
   m("authorizationRequest", "create").mockResolvedValue({});
   recheck.mockResolvedValue({ ok: true });
   s.findResourceServerById.mockResolvedValue(status());
@@ -130,7 +130,7 @@ describe("access", () => {
   });
 
   it("P0 a signed-in non-admin gets a 403 page on every page and no POST reaches the service", async () => {
-    m("localUser", "findUnique").mockResolvedValue({ id: "lu1", isAdmin: false, isActive: true });
+    m("localUser", "findUnique").mockResolvedValue({ id: "lu1", isAdmin: false, isActive: true, user: { deactivatedAt: null } });
     for (const p of ["/admin", "/admin/resource-servers", "/admin/resource-servers/new", "/admin/resource-servers/rs1", "/admin/resource-servers/rs1/remove", "/admin/audit", "/admin/clients"]) {
       expect((await getPath(app.baseUrl, p)).status, p).toBe(403);
     }
@@ -180,10 +180,10 @@ describe("access", () => {
   it("P0 a local admin is an admin only while active and while local accounts are enabled", async () => {
     expect((await getPath(app.baseUrl, "/admin")).status).toBe(200);
 
-    m("localUser", "findUnique").mockResolvedValue({ id: "lu1", isAdmin: true, isActive: false });
+    m("localUser", "findUnique").mockResolvedValue({ id: "lu1", isAdmin: true, isActive: false, user: { deactivatedAt: null } });
     expect((await getPath(app.baseUrl, "/admin")).status).toBe(403);
 
-    m("localUser", "findUnique").mockResolvedValue({ id: "lu1", isAdmin: true, isActive: true });
+    m("localUser", "findUnique").mockResolvedValue({ id: "lu1", isAdmin: true, isActive: true, user: { deactivatedAt: null } });
     config.enableLocalAccounts = false;
     config.enableOidc = true;
     expect((await getPath(app.baseUrl, "/admin")).status).toBe(403);
@@ -283,11 +283,11 @@ describe("CSRF and rate limit", () => {
   it("P0 anonymous or non-admin POSTs do not use up an admin's budget", async () => {
     session.mockResolvedValue(null);
     for (let i = 0; i < 100; i++) await fetch(`${app.baseUrl}/admin/clients/add`, { method: "POST", ...form({ value: "x" }) });
-    m("localUser", "findUnique").mockResolvedValue({ id: "lu1", isAdmin: false, isActive: true });
+    m("localUser", "findUnique").mockResolvedValue({ id: "lu1", isAdmin: false, isActive: true, user: { deactivatedAt: null } });
     session.mockResolvedValue({ userId: "u9", issuedAtMs: Date.now() });
     for (let i = 0; i < 100; i++) await fetch(`${app.baseUrl}/admin/clients/add`, { method: "POST", ...form({ value: "x" }) });
 
-    m("localUser", "findUnique").mockResolvedValue({ id: "lu1", isAdmin: true, isActive: true });
+    m("localUser", "findUnique").mockResolvedValue({ id: "lu1", isAdmin: true, isActive: true, user: { deactivatedAt: null } });
     session.mockResolvedValue({ userId: "u1", issuedAtMs: Date.now() });
     d.addDenial.mockResolvedValue({ kind: "domain", value: "evil.example.com", grantsRevoked: 0, tokensRevoked: 0 });
     expect((await post("/admin/clients/add", { value: "evil.example.com" })).res.status).toBe(200);
@@ -631,7 +631,7 @@ describe("resource server changes", () => {
       reauth.mockReturnValue(Date.now() - 11 * MIN);
       expect((await post("/admin/resource-servers/rs1/accept-metadata", { fingerprint: "x" }, "/admin/resource-servers/rs1")).res.status).toBe(401);
       reauth.mockReturnValue(Date.now());
-      m("localUser", "findUnique").mockResolvedValue({ id: "lu1", isAdmin: false, isActive: true });
+      m("localUser", "findUnique").mockResolvedValue({ id: "lu1", isAdmin: false, isActive: true, user: { deactivatedAt: null } });
       expect((await post("/admin/resource-servers/rs1/accept-metadata", { fingerprint: "x" }, "/admin/resource-servers/rs1")).res.status).toBe(403);
       expect(s.acceptPendingMetadata).not.toHaveBeenCalled();
     });
@@ -726,6 +726,24 @@ describe("client denylist", () => {
     expect(r.text).toContain("is not a canonical client_id URL");
   });
 
+  it("an over-long reason is refused on both steps, not cut, and nothing is written", async () => {
+    const reason = "x".repeat(501);
+    const c = await post("/admin/clients/confirm", { value: "evil.example.com", reason });
+    expect(c.res.status).toBe(400);
+    expect(c.text).toContain("limit is 500");
+    expect(d.previewDenial).not.toHaveBeenCalled();
+    const a = await post("/admin/clients/add", { value: "evil.example.com", reason });
+    expect(a.res.status).toBe(400);
+    expect(d.addDenial).not.toHaveBeenCalled();
+  });
+
+  it("an over-long value is refused on the form, not cut", async () => {
+    const r = await post("/admin/clients/add", { value: "a".repeat(2049) });
+    expect(r.res.status).toBe(400);
+    expect(r.text).toContain("too long");
+    expect(d.addDenial).not.toHaveBeenCalled();
+  });
+
   it("remove goes through the shared module as user:<id>", async () => {
     d.removeDenial.mockResolvedValue({ kind: "domain", value: "evil.example.com", removed: true });
     const r = await post("/admin/clients/remove", { value: "evil.example.com" });
@@ -739,5 +757,15 @@ describe("client denylist", () => {
     expect(text).toContain("https://evil.example.com/c.json");
     expect(text).toContain("abuse");
     expect(text).toContain('action="/admin/clients/remove"');
+  });
+});
+
+describe("over-long form fields", () => {
+  it("a long identifier or display name is refused with 400, never truncated, and reaches no service", async () => {
+    const r = await post("/admin/resource-servers/approve", { identifier: "https://x.test/" + "a".repeat(2100) }, "/admin/resource-servers/new");
+    expect(r.res.status).toBe(400);
+    expect(r.text).toContain("too long");
+    expect(s.approveResourceServer).not.toHaveBeenCalled();
+    expect(s.previewResourceServer).not.toHaveBeenCalled();
   });
 });

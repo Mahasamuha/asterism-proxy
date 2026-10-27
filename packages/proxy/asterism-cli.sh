@@ -22,11 +22,12 @@ Commands:
   resource-server show <identifier>
   resource-server approve <identifier> [--name X] [--internal] [--release-claims a,b]
   resource-server set <identifier> [--name X] [--release-claims a,b] [--enable|--disable] [--internal|--no-internal]
-  resource-server policy <identifier> <scope> [--short-lived|--no-short-lived]
+  resource-server policy <identifier> <scope> [--short-lived|--no-short-lived] [--fresh-sign-in|--no-fresh-sign-in]
                          [--require-groups a,b|--no-require-groups] [--description X|--no-description]
   resource-server refresh <identifier>
+  resource-server accept <identifier> <fingerprint>   (accepts the pending metadata changes that `show` lists)
   resource-server remove <identifier>   (revokes every grant and refresh token; set --disable is reversible)
-  rotate-signing-key
+  rotate-signing-key [--compromised]   (--compromised deletes the old keys now; every issued access token stops verifying)
 EOF
 }
 

@@ -49,8 +49,15 @@ describe("isAdmin for OIDC users", () => {
 
   it("an active local admin passes without an upstream call", async () => {
     config.enableLocalAccounts = true;
-    h.localFind.mockResolvedValue({ isAdmin: true, isActive: true });
+    h.localFind.mockResolvedValue({ isAdmin: true, isActive: true, user: { deactivatedAt: null } });
     expect(await isAdmin("u1")).toBe(true);
     expect(h.recheck).not.toHaveBeenCalled();
+  });
+
+  it("P0 a local admin whose User is deactivated is not an admin", async () => {
+    config.enableLocalAccounts = true;
+    config.enableOidc = false;
+    h.localFind.mockResolvedValue({ isAdmin: true, isActive: true, user: { deactivatedAt: new Date() } });
+    expect(await isAdmin("u1")).toBe(false);
   });
 });

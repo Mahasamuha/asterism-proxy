@@ -1,8 +1,27 @@
+import { isIPv4, isIPv6 } from "node:net";
 import type { NextFunction, Request, Response } from "express";
+
+/** The key a per-address limit counts `ip` under. An IPv6 client usually holds
+ * at least a /64, so keying the full address would give it 2^64 budgets: IPv6
+ * collapses to its /64 prefix. IPv4 (and IPv4-mapped IPv6) is the address itself. */
+export function ipRateLimitKey(ip: string | undefined): string {
+  if (ip === undefined || ip === "") return "unknown";
+  const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/i.exec(ip);
+  if (mapped && isIPv4(mapped[1]!)) return mapped[1]!;
+  if (!isIPv6(ip)) return ip;
+  // Expand "::" so the first four groups can be read off.
+  const [head = "", tail] = ip.toLowerCase().split("%")[0]!.split("::");
+  const headGroups = head === "" ? [] : head.split(":");
+  const tailGroups = tail === undefined || tail === "" ? [] : tail.split(":");
+  // A dotted IPv4 tail ("64:ff9b::1.2.3.4") fills two groups.
+  const width = (gs: string[]) => gs.reduce((n, g) => n + (g.includes(".") ? 2 : 1), 0);
+  const groups = tail === undefined ? headGroups : [...headGroups, ...Array<string>(8 - width(headGroups) - width(tailGroups)).fill("0"), ...tailGroups];
+  return `${groups.slice(0, 4).map((g) => g.replace(/^0+(?=.)/, "")).join(":")}::/64`;
+}
 
 // ---------------------------------------------------------------------------
 // Per-IP request limiters for the unauthenticated endpoints that cost memory,
-// CPU or database rows. Fixed window, in memory, keyed by req.ip: same tradeoff
+// CPU or database rows. Fixed window, in memory, keyed by ipRateLimitKey(req.ip): same tradeoff
 // as the other in-memory limiters here (a restart clears them; fine for the
 // single-instance deployment, §2). Without TRUST_PROXY every client shares the
 // proxy's req.ip, so set it behind an ingress (docs/deployment.md).
@@ -39,7 +58,7 @@ export function createIpRateLimiter(opts: { max: number; windowMs: number; maxEn
 
   const limiter: IpRateLimiter = {
     hit(ip) {
-      const key = ip ?? "unknown";
+      const key = ipRateLimitKey(ip);
       const now = Date.now();
       let w = windows.get(key);
       if (!w || now - w.windowStart >= opts.windowMs) {
@@ -84,6 +103,19 @@ export function limitOauthEndpoint(req: Request, res: Response, next: NextFuncti
   res.set("Retry-After", String(retryAfter));
   res.set("Cache-Control", "no-store");
   res.status(429).json({ error: "temporarily_unavailable", error_description: "Too many requests from this address; slow down and retry later" });
+}
+
+/** GET /oauth/authorize and POST /oauth/device/code resolve the client first,
+ * which can start a client metadata fetch (a slot in the shared fetch pool and
+ * a request against the client's host budget). One address gets 60 a minute
+ * across both, counted before resolution. */
+const clientResolutionLimiter = createIpRateLimiter({ max: 60, windowMs: 60_000, maxEntries: 50_000 });
+
+/** Counts a request about to resolve a client. Returns the Retry-After seconds
+ * when `req.ip` is over its limit (the caller must then refuse without
+ * resolving), else 0. */
+export function clientResolutionRetryAfter(req: Request): number {
+  return clientResolutionLimiter.hit(req.ip);
 }
 
 /** Unauthenticated routes that INSERT a row per request (/oauth/authorize,

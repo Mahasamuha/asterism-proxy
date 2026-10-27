@@ -126,6 +126,43 @@ describe("safeFetchJson", () => {
     });
   });
 
+  describe("allowedPorts", () => {
+    const PUBLIC: Record_[] = [{ address: "10.0.0.1", family: 4 }];
+    const opts = { allowedPorts: [443] };
+
+    it.each([8443, 5432])("refuses port %i before any DNS lookup", async (port) => {
+      expect(await reasonOf(safeFetchJson(`https://${hostname}:${port}/x`, opts))).toBe("port_not_allowed");
+      expect(lookup).not.toHaveBeenCalled();
+    });
+
+    it.each([["https://%h/x"], ["https://%h:443/x"]])("accepts 443 (%s)", async (tpl) => {
+      stubDns({ [hostname]: PUBLIC });
+      // Gets past the port check and stops at the address check.
+      expect(await reasonOf(safeFetchJson(tpl.replace("%h", hostname), opts))).toBe("blocked_address");
+    });
+
+    it("refuses a redirect hop to another port", async () => {
+      srv.routes["/a"] = { status: 302, headers: { location: `https://${hostname}:5432/x` } };
+      expect(await reasonOf(safeFetchJson(base("/a"), opts))).toBe("port_not_allowed");
+    });
+
+    it("counts the rejection under its own reason", async () => {
+      const before = getSafeFetchRejectionCounts().port_not_allowed ?? 0;
+      await reasonOf(safeFetchJson(`https://${hostname}:8443/x`, opts));
+      expect(getSafeFetchRejectionCounts().port_not_allowed).toBe(before + 1);
+    });
+
+    it("leaves any port allowed when the option is not set (resource metadata)", async () => {
+      stubDns({ [hostname]: PUBLIC });
+      expect(await reasonOf(safeFetchJson(`https://${hostname}:8443/x`))).toBe("blocked_address");
+    });
+
+    it("does not affect the dev http loopback path", async () => {
+      srv.routes["/x"] = { body: { ok: 1 } };
+      expect(await safeFetchJson(base("/x"), opts)).toEqual({ ok: 1 });
+    });
+  });
+
   describe("allowPrivateNetwork", () => {
     // The route server speaks plain HTTP, so an https: request to it gets past the address
     // check and then fails the TLS handshake (connection_error), which is how these tests
@@ -516,15 +553,43 @@ describe("safeFetchJson", () => {
       expect(await reasonOf(safeFetchJson(base("/x"), { pool: "resource-metadata" }))).toBe("rate_limited");
     });
 
-    it("keeps a separate in-flight cap per pool", async () => {
+    it("keeps a separate per-host rate limit for client-jwks fetches", async () => {
+      srv.routes["/x"] = { body: {} };
+      for (let i = 0; i < 10; i++) expect(await reasonOf(safeFetchJson(base("/x")))).toBe("ok");
+      expect(await reasonOf(safeFetchJson(base("/x")))).toBe("rate_limited");
+      expect(await reasonOf(safeFetchJson(base("/x"), { pool: "client-jwks" }))).toBe("ok");
+    });
+
+    it.each([["cimd"], ["resource-metadata"], ["client-jwks"]] as const)("enforces a separate in-flight cap for the %s pool", async (pool) => {
       lookup.mockImplementation((() => new Promise(() => {})) as never);
-      const cimd = Array.from({ length: MAX_CONCURRENT_FETCHES }, (_, i) =>
-        reasonOf(safeFetchJson(`https://pool-c${i}-${n++}.test/x`, { timeoutMs: 150 })),
+      const others = (["cimd", "resource-metadata", "client-jwks"] as const).filter((p) => p !== pool);
+      const filling = Array.from({ length: MAX_CONCURRENT_FETCHES }, (_, i) =>
+        reasonOf(safeFetchJson(`https://pool-${pool}${i}-${n++}.test/x`, { timeoutMs: 150, pool })),
       );
-      expect(await reasonOf(safeFetchJson("https://pool-over.test/x", { timeoutMs: 150 }))).toBe("busy");
-      // the cimd pool is full; a metadata fetch still gets a slot (and then times out in DNS)
-      expect(await reasonOf(safeFetchJson("https://pool-meta.test/x", { timeoutMs: 150, pool: "resource-metadata" }))).toBe("timeout");
-      await Promise.all(cimd);
+      expect(await reasonOf(safeFetchJson(`https://pool-over-${n++}.test/x`, { timeoutMs: 150, pool }))).toBe("busy");
+      // this pool is full; each of the others still gets a slot (and then times out in DNS)
+      for (const other of others) {
+        expect(await reasonOf(safeFetchJson(`https://pool-${other}-${n++}.test/x`, { timeoutMs: 150, pool: other }))).toBe("timeout");
+      }
+      expect(await Promise.all(filling)).toEqual(Array(MAX_CONCURRENT_FETCHES).fill("timeout"));
+      // slots are released again
+      expect(await reasonOf(safeFetchJson(`https://pool-after-${n++}.test/x`, { timeoutMs: 150, pool }))).toBe("timeout");
+    });
+  });
+
+  describe("connection reuse", () => {
+    it("opens a new connection per fetch: no pooled keep-alive socket that would skip the pinned lookup", async () => {
+      const sockets = new Set<unknown>();
+      const connectionHeaders: (string | undefined)[] = [];
+      srv.routes["/k"] = (req, res) => {
+        sockets.add(req.socket);
+        connectionHeaders.push(req.headers.connection);
+        res.writeHead(200, { "content-type": "application/json" }).end("{}");
+      };
+      await safeFetchJson(base("/k"));
+      await safeFetchJson(base("/k"));
+      expect(sockets.size).toBe(2);
+      expect(connectionHeaders).toEqual(["close", "close"]);
     });
   });
 

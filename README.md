@@ -37,7 +37,7 @@ It was extracted from the authorization server in [Constellation](https://github
   - `private_key_jwt` client authentication.
   - Consent per (user, client, resource).
   - Revocation through `/grants` and RFC 7009.
-- **Short-lived JWTs.** Access tokens last 15 minutes, or 5 minutes with the `admin` scope. Signing uses ES256, with key rotation built in.
+- **Short-lived JWTs.** Access tokens last 15 minutes, or 5 minutes when a granted scope is marked short-lived (operator policy per scope; currently `admin`). Signing uses ES256, with key rotation built in.
 - **Identity.** OIDC federation to your IdP is the default. Minimal local accounts are available for people who don't run an OIDC provider.
 - **Operations.**
   - `/health` and `/ready` endpoints.
@@ -105,11 +105,12 @@ See the [package README](packages/asterism-verify/README.md) for the Express mid
 
 ```sh
 pnpm --filter @mcp-auth/proxy rotate-signing-key
-pnpm --filter @mcp-auth/proxy local-user add <username>       # also: deactivate, list
+pnpm --filter @mcp-auth/proxy local-user add <username>       # also: deactivate, list, set-admin
 pnpm --filter @mcp-auth/proxy deny-client add <client_id|domain> [--reason …]   # also: remove, list
+pnpm --filter @mcp-auth/proxy resource-server approve <identifier>   # also: list, show, set, policy, refresh, accept, remove
 ```
 
-Inside the container, use `asterism-cli` with the same subcommands, for example `docker compose exec asterism-proxy asterism-cli deny-client list`. `local-user add` prompts for the password; to pipe it in instead, use `docker compose exec -T`.
+Inside the container, use `asterism-cli` with the same subcommands, for example `docker compose exec asterism-proxy asterism-cli deny-client list`. `asterism-cli help` prints every command with its flags. `local-user add` prompts for the password; to pipe it in instead, use `docker compose exec -T`.
 
 Further reading:
 - [docs/key-rotation.md](docs/key-rotation.md): the signing-key rotation runbook.

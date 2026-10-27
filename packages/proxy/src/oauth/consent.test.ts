@@ -121,7 +121,7 @@ describe("flow validation (P0)", () => {
 describe("CSRF (P0)", () => {
   it("POST without the csrf field is rejected and consumes nothing", async () => {
     const r = await submit({}, { csrf: null });
-    expect(r.status).toBe(400);
+    expect(r.status).toBe(403);
     expect(r.text).toContain("CSRF");
     expect(m("authorizationRequest", "deleteMany")).not.toHaveBeenCalled();
   });
@@ -136,6 +136,32 @@ describe("CSRF (P0)", () => {
     const r = await postForm(app.baseUrl, "/oauth/consent", { flow: "h1", action: "approve", csrf_token: "x".repeat(64) }, (await boundClient()).fetch);
     expect(r.text).toContain("CSRF");
     expect(m("authCode", "create")).not.toHaveBeenCalled();
+  });
+
+  it("P0 a token minted for one flow cannot approve another flow of the same user (M4)", async () => {
+    m("authorizationRequest", "findUnique").mockImplementation(async ({ where }: { where: { handle: string } }) => flowRow({ handle: where.handle }));
+    const client = await boundClient("u1", "h1");
+    const csrf = csrfFrom((await getPath(app.baseUrl, "/oauth/consent?flow=h1", client.fetch)).text);
+    await bindBrowser(app.baseUrl, client, "h2", "u1");
+    const r = await postForm(app.baseUrl, "/oauth/consent", { flow: "h2", action: "approve", csrf_token: csrf }, client.fetch);
+    expect(r.text).toContain("CSRF");
+    expect(m("authCode", "create")).not.toHaveBeenCalled();
+    expect(m("authorizationRequest", "deleteMany")).not.toHaveBeenCalled();
+  });
+
+  it("P0 a token minted for one user cannot approve the same flow once it belongs to another user", async () => {
+    const client = await boundClient("u1");
+    const csrf = csrfFrom((await getPath(app.baseUrl, "/oauth/consent?flow=h1", client.fetch)).text);
+    // Same browser, same flow handle and same CSRF nonce cookie, but the flow's
+    // subject (and the browser's session) is now u2: u1's form token must not carry over.
+    m("authorizationRequest", "findUnique").mockImplementation(async () => flowRow({ subject: "u2" }));
+    m("user", "findFirst").mockResolvedValue({ id: "u2" });
+    await bindBrowser(app.baseUrl, client, "h1", "u2");
+    const r = await postForm(app.baseUrl, "/oauth/consent", { flow: "h1", action: "approve", csrf_token: csrf }, client.fetch);
+    expect(r.status).toBe(403);
+    expect(r.text).toContain("CSRF");
+    expect(m("authCode", "create")).not.toHaveBeenCalled();
+    expect(m("authorizationRequest", "deleteMany")).not.toHaveBeenCalled();
   });
 
   it("a repeated csrf_token field does not match", async () => {
@@ -533,7 +559,7 @@ describe("form-action on the consent page that submits to the client's redirect_
 
   it("POST responses that do not redirect carry no override either", async () => {
     const wrongCsrf = await submit({}, { csrf: "0".repeat(64) });
-    expect(wrongCsrf.status).toBe(400);
+    expect(wrongCsrf.status).toBe(403);
     expect(csp(wrongCsrf)).toBeNull();
 
     m("authorizationRequest", "deleteMany").mockResolvedValue({ count: 0 });

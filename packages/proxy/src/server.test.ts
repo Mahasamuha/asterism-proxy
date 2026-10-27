@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const db = vi.hoisted(() => ({
   prisma: {
     localUser: { count: vi.fn() },
+    signingKey: { findMany: vi.fn() },
     $queryRaw: vi.fn(),
   },
 }));
@@ -12,7 +13,12 @@ const oidc = vi.hoisted(() => ({
   handleUpstreamCallback: vi.fn(),
   startUpstreamAuth: vi.fn(),
 }));
+const logs = vi.hoisted(() => ({ warn: vi.fn(), error: vi.fn() }));
 vi.mock("./db.js", () => db);
+vi.mock("./logger.js", () => {
+  const log = { debug: vi.fn(), info: vi.fn(), error: logs.error, warn: logs.warn, child: () => log };
+  return { logger: log, createLogger: () => log };
+});
 vi.mock("./identity/oidc.js", () => oidc);
 
 import { startApp, type StartedApp } from "./test-helpers/app.js";
@@ -83,6 +89,17 @@ describe("error boundary", () => {
     expect(text).not.toMatch(/password|10\.9\.8\.7|mcp_auth/);
   });
 
+  it("P1 the error handler logs the error under `err`, for the logger's serializer to pick from", async () => {
+    const base = await boot();
+    const failure = new Error("secret-in-message");
+    db.prisma.localUser.count.mockRejectedValue(failure);
+    const res = await fetch(`${base}/setup`);
+    expect(res.status).toBe(500);
+    expect(await res.text()).not.toContain("secret-in-message");
+    const logged = logs.error.mock.calls.find((c) => c[1] === "Unhandled request error")?.[0] as Record<string, unknown>;
+    expect(logged).toEqual({ err: failure, path: "/setup" });
+  });
+
   it("P0 a non-Error rejection, or a 5xx/3xx status on the error, is still a generic 500", async () => {
     const base = await boot();
     for (const reason of ["boom", null, Object.assign(new Error("x"), { status: 503 }), Object.assign(new Error("x"), { status: 302 }), Object.assign(new Error("x"), { status: "400" })]) {
@@ -150,6 +167,25 @@ describe("trust proxy", () => {
     await app?.close();
     expect(await trustProxySetting("loopback")).toBe("loopback");
   });
+
+  it("P1 warns once, and only, when X-Forwarded-For arrives while TRUST_PROXY is unset", async () => {
+    const base = await boot({ TRUST_PROXY: undefined });
+    const forwarded = (await import("./server.js")).app;
+    await fetch(`${base}/health`);
+    expect(logs.warn).not.toHaveBeenCalled();
+    const res = await fetch(`${base}/health`, { headers: { "x-forwarded-for": "203.0.113.9" } });
+    expect(res.status).toBe(200);
+    await fetch(`${base}/health`, { headers: { "x-forwarded-for": "203.0.113.10" } });
+    expect(logs.warn).toHaveBeenCalledTimes(1);
+    expect(String(logs.warn.mock.calls[0]?.[0])).toMatch(/TRUST_PROXY/);
+    expect(forwarded.get("trust proxy")).toBeFalsy();
+  });
+
+  it("P1 does not warn when TRUST_PROXY is set", async () => {
+    const base = await boot({ TRUST_PROXY: "1" });
+    await fetch(`${base}/health`, { headers: { "x-forwarded-for": "203.0.113.9" } });
+    expect(logs.warn).not.toHaveBeenCalled();
+  });
 });
 
 describe("request id and security headers", () => {
@@ -212,6 +248,22 @@ describe("request id and security headers", () => {
     const res = await fetch(`${base}/oauth/consent`, { method: "POST" });
     expect(res.status).toBe(400);
     expect(res.headers.get("content-security-policy")).toBe(CSP);
+  });
+
+  it("P1 dynamic responses are no-store, while /assets stays cacheable and the JWKS keeps its own max-age", async () => {
+    const base = await boot();
+    for (const path of ["/health", "/nope"]) {
+      expect((await fetch(`${base}${path}`)).headers.get("cache-control"), path).toBe("no-store");
+    }
+    const bad = await fetch(`${base}/oauth/token`, { method: "POST", headers: { "content-type": "application/json" }, body: "{" });
+    expect(bad.headers.get("cache-control")).toBe("no-store");
+    expect((await fetch(`${base}/assets/mahasamuha.css`)).headers.get("cache-control")).toBe("public, max-age=86400");
+    expect((await fetch(`${base}/assets/fonts/Geist-Variable.woff2`)).headers.get("cache-control")).toBe("public, max-age=86400");
+    db.prisma.signingKey.findMany.mockResolvedValue([{ publicJwk: { kid: "k1" } }]);
+    const jwks = await fetch(`${base}/.well-known/jwks.json`);
+    expect(jwks.status).toBe(200);
+    expect(await jwks.json()).toEqual({ keys: [{ kid: "k1" }] });
+    expect(jwks.headers.get("cache-control")).toBe("public, max-age=3600");
   });
 
   it("serves the stylesheet, fonts and brand marks under /assets with the strict CSP, and nothing else there", async () => {

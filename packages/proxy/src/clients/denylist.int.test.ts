@@ -2,7 +2,7 @@ import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import { prisma } from "../db.js";
 import { disconnectDb, truncateAll } from "../test-helpers/db.js";
 import { seedClient, seedGrant, seedRefreshToken, seedUser } from "../test-helpers/seed.js";
-import { addDenial, DenylistError, listDenials, removeDenial } from "./denylist.js";
+import { addDenial, DenylistError, listDenials, MAX_REASON_LENGTH, removeDenial } from "./denylist.js";
 
 beforeEach(truncateAll);
 afterAll(disconnectDb);
@@ -20,6 +20,15 @@ describe("denylist module", () => {
     expect((await prisma.refreshToken.findUniqueOrThrow({ where: { tokenHash: row.tokenHash } })).revokedAt).not.toBeNull();
     expect((await listDenials()).map((r) => [r.kind, r.value, r.reason])).toEqual([["domain", "evil.example.com", "abuse"]]);
     expect(await prisma.adminAuditLog.findFirstOrThrow()).toMatchObject({ actor: `user:${user.id}`, action: "denylist.add", target: "domain:evil.example.com" });
+  });
+
+  it("P1 a reason over the cap is refused, not cut; one at the cap is stored whole", async () => {
+    await expect(addDenial("evil.example.com", "x".repeat(MAX_REASON_LENGTH + 1), "cli")).rejects.toThrow(DenylistError);
+    expect(await listDenials()).toEqual([]);
+    expect(await prisma.adminAuditLog.count()).toBe(0);
+    const reason = "x".repeat(MAX_REASON_LENGTH);
+    await addDenial("evil.example.com", reason, "cli");
+    expect((await listDenials())[0]?.reason).toBe(reason);
   });
 
   it("P0 remove deletes the entry and records the actor; unknown entries record nothing", async () => {

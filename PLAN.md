@@ -747,10 +747,16 @@ redirects.
 ### T13 — Consent
 `feat: add consent screen and grant persistence`
 
-After authentication, look for a live `Grant` on `(userId, clientId, resource)`. If it covers
-every requested scope, skip the screen.
+After authentication, look for a live `Grant` on `(userId, clientId, resource)`. ~~If it covers
+every requested scope, skip the screen.~~ **Superseded (decided by Joe 2026-10-25): consent is
+never skipped.** Every flow (auth code and device) stops at the consent screen, shows what is
+being granted, and mints nothing until the user clicks Approve, as other providers (Claude
+included) do. A covering grant only changes the wording. Rationale: silent SSO plus an
+auto-approve would let any local process that opens an authorize URL get tokens with no
+prompt. Pinned by the "consent is never skipped" tests in `consent.test.ts`,
+`consent.int.test.ts` and `flow-security.int.test.ts`.
 
-Otherwise render, using values **from the resolved metadata document, never from request
+Render, using values **from the resolved metadata document, never from request
 parameters**: `client_name`, `logo_uri`, the client's domain shown prominently, the target MCP
 server's display name from the registry, each scope's human description, and a warning banner
 when `trustLevel` is `unverified`.
@@ -967,21 +973,369 @@ round-trips to the same id through a proxy login.
 
 Copy, do not move. Constellation's rows stay until M3 deletes them.
 
+**As built (2026-10-25):** the scripts are in this share at `asterism/m2/`, deliberately not in either repo, since there is only one Constellation deployment. `export.sh` writes CSVs, then `import.sh` loads them, because the two databases share no docker network. There's no M2 commit. Deviations from the plan above:
+- `login_failures` is **not** copied. It's 15-minute throttle state, and Constellation's rows lack asterism's required `kind`.
+- `users.role` is not copied, because admin authority stays in Constellation.
+- Local usernames are normalised (NFKC, trimmed, lowercased) on import.
+
+The import refuses a non-empty target and any issuer mismatch, and runs in one transaction. Tested against throwaway databases built from both schemas' real migrations.
+
+**Identity match (decided 2026-10-25).** Both systems key users on `(oidcSub, oidcIssuer)`, and each stores `OIDC_ISSUER` exactly as written. So asterism uses **Constellation's existing Authentik provider**:
+- Add `https://asterism.joerybka.app/oauth/callback` to that provider's redirect URIs, and keep the relay's two callbacks until M3.
+- Copy `OIDC_ISSUER`, `OIDC_CLIENT_ID` and `OIDC_CLIENT_SECRET` verbatim from Constellation's `.env`. The issuer must match byte for byte.
+
+The throwaway `asterism-proxy` Authentik provider used for the E2E test is retired.
+
+**Before running M2:**
+- Clear asterism's test data: the users, grants and refresh tokens from the E2E runs.
+- Don't sign in to asterism through OIDC between the provider switch and M2. A login creates a `User` with the same `(oidcSub, oidcIssuer)` as the row M2 copies, and the two collide on the unique key.
+
 ### M3 — Cutover
 `feat: point constellation at the auth proxy and remove the legacy AS`
 
 One change, not a phased rollout. Add `@mahasamuha/asterism-verify` for token validation; update
 `/.well-known/oauth-protected-resource` and the `WWW-Authenticate` header in `mcp.ts` to name the
-proxy; delete `oauth.ts`, the `AuthCode` / `DeviceCode` / `OauthClient` / `OauthSession` models
+proxy; delete `oauth.ts`, the `AuthCode` / `OauthClient` / `OauthSession` models
 and their migrations, the `LocalUser` / `LoginFailure` models, `/setup` and `/auth/login`, and the
-bcrypt dependency. Map the `admin` scope onto whatever `adminUntil` currently gates. Reduce `User`
-to whatever Constellation still needs to key its own records off `sub`.
+bcrypt dependency. Map the `admin` scope onto whatever `adminUntil` currently gates.
+
+**The device flow (`device.ts`, `DeviceCode`) is not plain user sign-in.** It also mints executor tokens for node and hub registration, and it depends on the login M3 removes. Its replacement is M4. Decide whether M3 and M4 ship together (see M4, "Ordering with M3").
+
+**`admin` is obtained by step-up only.** Learned in the 2026-10-25 E2E: Claude requests exactly `scopes_supported`. So:
+- leave `admin` out of `scopes_supported`;
+- answer admin-only calls lacking it with `403` and `WWW-Authenticate: Bearer error="insufficient_scope", scope="<base scopes> admin", resource_metadata=...`;
+- advertise `offline_access` in `scopes_supported` so refresh tokens are issued.
+
+If `admin` is advertised, every token is a 5-minute shortLived token and none can be refreshed.
+
+Reduce `User` to whatever Constellation still needs to key its own records off `sub`.
 
 Keep `rate-limit-classify.ts` — its non-OAuth routes still matter.
 
 **Every connected node/hub's session ends the moment this ships.** Re-authenticate all three
 immediately after deploying — that manual step is the entire migration strategy for existing
-clients, replacing the old M3–M5 dual-validation-and-drain sequence.
+clients, replacing the old M3–M5 dual-validation-and-drain sequence. *(Corrected 2026-10-25, verified: nodes and hubs authenticate with `ExecutorToken`s, not OAuth sessions, and survive the cutover. What ends is MCP client sessions and CLI sessions.)*
+
+### M4 — Move Constellation's device flow onto asterism tokens
+`feat: register executors and authorize the CLI with asterism tokens`
+
+> **Status: unverified draft (2026-10-25).** Written from a read-through of `constellation-mcp` at
+> `c39986a` (branch `feat/rfc9728-discovery`). Nothing here has been run or traced end to end. The
+> implementing agent must re-check every claim below against the current code before acting on it,
+> in particular the call sites, the client flows in `cli/`, `node/` and `hub/`, and whether anything
+> else depends on `DeviceCode` or `/activate`.
+
+**Why this is separate.** M3 removes Constellation's login (`/auth/login`, OIDC, local accounts),
+but `device.ts` (`/oauth/device/code`, `/activate*`, the device branch of `/oauth/token`) depends on
+that login to identify the approving user. And it does more than sign people in. It handles four
+scopes:
+
+| Scope | Caller | Effect today | Replacement |
+|---|---|---|---|
+| `relay:manage` | `cli/src/cli/relay.ts` | Issues an `OauthSession` for `/api` | Asterism device flow with `resource` = Constellation |
+| `agent:escalate` | `cli/src/cli/relay.ts` (admin commands) | Sets `OauthSession.adminUntil` | Asterism step-up to the shortLived `admin` scope |
+| `agent:register` | `node/src/cli/node.ts` | Mints an `ExecutorToken` for a node | Stays in Constellation (see below) |
+| `agent:register:shared` | `hub/src/cli.ts` | Mints a HUB `ExecutorToken` (admin only) | Stays in Constellation (see below) |
+
+**Proposed design:**
+- The node and hub CLIs obtain a user access token from asterism's device flow, then call a new
+  authenticated Constellation endpoint (e.g. `POST /api/executors/register`, bearer-checked by
+  `asterism-verify`) that mints the `ExecutorToken`. Hub registration requires the `admin` scope
+  *and* `User.role = ADMIN`. Check whether the existing `POST /api/tokens/shared` (admin, mints a
+  shared token) already covers the hub case.
+- The CLI's `relay:manage` session becomes an asterism access and refresh token. `GET /api/me`
+  currently returns `session_id`, which `agent:escalate` uses. That goes away with `adminUntil`.
+- Delete `device.ts`, its tests, the `DeviceCode` model, `page-style.ts` (if nothing else renders
+  HTML), and the `device-poll` and `device-auth` buckets in `rate-limit-classify.ts`.
+
+**Open decisions:**
+- **Client identity for the CLIs.** Asterism accepts only CIMD clients. Its CIMD validation requires
+  a non-empty `redirect_uris` (`clients/cimd.ts`), even for a device-only client. Either:
+  - the relay serves a client metadata document for the CLIs, with an unused loopback redirect; or
+  - asterism's trust policy gains a static allowlisted client.
+  
+  It could be one client for all three CLIs, or one per CLI.
+- **Admin authority stays in Constellation.** Asterism grants `admin` to any user who consents; it
+  has no roles. Constellation must require both the scope and `User.role = ADMIN`. Promote and
+  demote via `RELAY_ADMIN_TOKEN` stay as they are.
+- **Ordering with M3: decided 2026-10-25, M3 and M4 ship together** as one cutover, so there's no window
+  where registration or the CLI is broken.
+
+**Possible correction to M3 (re-check):** nodes and hubs authenticate their WebSocket with
+`ExecutorToken` bearer tokens (`hub.ts` around line 128), not `OauthSession`s. If that holds,
+already-registered nodes and hubs keep working through M3. What ends at cutover is MCP client
+sessions (claude.ai etc.) and CLI sessions, not executor connections, and M3's "re-authenticate all
+three" line should be revised.
+
+**Scope of the M3 + M4 purge (approximate, from `wc -l`, not verified per symbol):**
+- **Removed outright:**
+  - `oauth.ts`, `oauth-pages.ts`, `oauth-flow-cookies.ts` and `oauth-tokens.ts`;
+  - `oauth-clients.ts` and `safe-fetch.ts`;
+  - `oidc.ts`, `local-auth.ts` and `setup.ts`;
+  - `lookupOAuthSession` in `middleware.ts`.
+  
+  About 1,800 source lines and 930 test lines.
+- **Removed at M4:** `device.ts` and its tests, about 940 lines.
+- **Models:** `AuthCode`, `DeviceCode`, `OauthClient`, `OauthSession`, `LocalUser` and `LoginFailure`.
+- **Dependencies:** `bcryptjs` and `openid-client`.
+- **API:**
+  - `/api/sessions` (replaced by asterism `/grants`);
+  - `/api/users` create, deactivate and reset-password (replaced by asterism's `local-user` CLI);
+  - `/api/me`'s `session_id`.
+- **Unchanged:**
+  - hub and WebSocket routing, executors, shares, filters, the activity log, MCP tools;
+  - the remaining `/api` routes, and `rate-limit-classify.ts` (minus the OAuth and device buckets);
+  - `User`, reduced to its id, identity fields and `role`.
+
+#### Verification findings (2026-10-25)
+
+Three read-only Sonnet researchers checked the draft above against the code: the relay server side, the clients, and asterism. Constellation was at `c39986a` (`feat/rfc9728-discovery`); asterism was at `main`. Main-session spot checks are marked (checked). Everything else is the researchers' reading, with file:line references, and was not run. The implementing agent should still confirm these before relying on them.
+
+**Confirmed**
+- **Nodes and hubs survive the cutover.** Executor WebSockets authenticate by `ExecutorToken` hash (`hub.ts:107-139`). Token rotation (`rotate_token`, `hub.ts:496-536`) is WebSocket-only and independent of OAuth.
+- **telescope has no auth of its own.** It runs in the MCP client's iframe as `ui://constellation/file-browser`. node-gui shells out to the CLI.
+- **`sub` in asterism tokens is asterism's `User.id`** (checked, `access-token.ts:50-60`). Since M2 kept ids, `sub` equals Constellation's `User.id` for migrated users.
+- **One token can cover both `/mcp` and `/api`.** `aud` is opaque, and asterism-verify doesn't look at paths. Use `audience = <RELAY_URL>/mcp` for both route sets, with one shared verifier (each `createBearerAuthMiddleware` builds its own JWKS cache).
+- **Step-up through a second device flow works.** The request is `scope=<base> admin` without `offline_access`. It gives a 5-minute token, and the grant never stores `admin`.
+- **Deletions.**
+  - Dead files and their only importers are as listed in the draft.
+  - Dependencies: `cookie-parser` (and its types) and `escape-html` (and its types) also become unused, in addition to `bcryptjs` and `openid-client`.
+  - Prisma FKs to the dropped models: only `LocalUser.userId`, `OauthSession.userId` and `OauthSession.mcpClientId`. `AuthCode` and `DeviceCode` have no FKs.
+
+**Corrections to the draft**
+1. **Base branch.** `feat/rfc9728-discovery` is 15 commits ahead of Constellation `main`, with relay src differing by +1900/-256 lines (checked). `oauth-clients.ts`, `safe-fetch.ts`, `oauth-pages.ts` and `oauth-flow-cookies.ts` exist only on the branch. Decide whether the branch merges before M3+M4, or M3+M4 builds on it.
+2. **`requireAdmin` never checks `User.role`** (checked, `middleware.ts:93-107`). It checks only `OauthSession.adminUntil`. The only role check is `isAdmin()` in `device.ts:30`, which is deleted. So "scope + role" is a **new** check, and the new `requireAdmin` must look up `User.role` per request. Admin-gated today:
+   - `POST /api/tokens/shared`
+   - `GET /api/admin/hub-shares`
+   - `GET /api/admin/activity`
+   - `/api/users*` (removed)
+   - hub registration
+3. **Discovery lives in `oauth.ts`** (lines ~78-110). Deleting the file removes `/.well-known/oauth-protected-resource[/mcp]`, so M3 must re-add them.
+   - asterism-verify's `protectedResourceMetadataHandler` can't emit `scopes_supported`, which Claude needs. Constellation either writes its own handler, or asterism-verify gains a `scopesSupported` option (a small, backward-compatible change).
+   - asterism-verify also has **no helper for the 403 `insufficient_scope` step-up challenge**. Constellation writes it, or the package gains one.
+   - `/.well-known/oauth-authorization-server` goes away.
+4. **The user's Authentik `sub` and claims are load-bearing** (checked).
+   - `mcp.ts` (around lines 269-386) and `router.ts:129-190` pass `userOidcSub` to `evaluatePermissionBlob` (`shared/src/permissions.ts`), which matches hub-share `overrides[].oidc_sub`.
+   - `router.ts:359-370` forwards `user_oidc_sub` and the claims filtered by `FORWARDED_CLAIMS` to executors.
+   - The asterism JWT carries neither. For migrated users, Constellation can look up its own `User` by `sub` and use its stored `oidcSub` and `lastKnownClaims`. **The claims then go stale**, because Constellation no longer sees logins.
+5. **New users don't exist in Constellation.** Today the relay creates `User` rows during its own login (`oidc.ts`, `local-auth.ts`). After the cutover, a user who first signs up via asterism has an asterism id Constellation has never seen, and the JWT has no email or upstream sub to build the row from. A resolve-or-create step is needed. Options:
+   - (a) asterism adds claims (email, upstream sub) to tokens, which is an asterism change;
+   - (b) Constellation creates a bare row (`id=sub`). Hub `oidc_sub` overrides won't match, and forwarded claims are empty;
+   - (c) an asterism userinfo endpoint.
+   
+   With a single-user deployment, (b) may be enough for now.
+6. **Registration logic moves; it isn't just deleted.**
+   - `device.ts` holds:
+     - HUB revoke-and-replace in a transaction (`521-570`);
+     - creating or updating the `Executor` with `host`;
+     - `host_name` validation (63-character cap);
+     - setting `approvedByUserId` (no FK).
+     
+     The new `POST /api/executors/register` must carry all of it.
+   - `POST /api/tokens/shared` does **not** cover the hub case: no host, no `Executor` row, no revoke. It's the CLI's break-glass path.
+7. **The node's host name is collected on the relay's consent page today** (`device.ts:358-371`). Asterism's consent page can't do that, so the node CLI must send `host` to the register endpoint, and node-gui needs a way to supply it.
+
+**Not covered by the draft**
+- **Deactivation.** `POST /api/account/deactivate` sets `User.deactivatedAt`, which only the old session lookup enforced. The new auth path must check it per request. Asterism deactivation doesn't reach Constellation, so decide the source of truth.
+- **Promote/demote.** `resolveUserByIdentifier` (`api.ts:~571`) falls back to `prisma.localUser`, which breaks when `LocalUser` is dropped; rewrite it to email or `oidcSub`. `ADMIN_GROUPS` role bootstrap (`oidc.ts:146`) disappears, so `RELAY_ADMIN_TOKEN` becomes the only way to make an admin.
+- **The root status page `GET /`** is in `setup.ts:146`, with `setupMiddleware`. Keep a minimal page or drop it.
+- **Client changes.**
+  - The `RelaySession` type and `relay-session.yaml` live in `node/src/config.ts:224-250`. They need a separate short-lived admin token, and the CLIs' `client_id`.
+  - The CLI's refresh sends `client_id: "constellation-cli"`, and the device pollers send none. All must send the CIMD URL.
+  - `isSameOrigin(relayUrl, verification_uri_complete)` (`cli relay.ts:319, 676`; `node.ts:87`) stops auto-opening the browser, because asterism is a different origin.
+  - Pollers treat asterism's `expired_token` as an unknown error.
+  - node-gui's deregister revoke needs the CLI's asterism session.
+- **Client identity (decided by evidence): CIMD documents served by the relay.**
+  - Asterism has no static-client path: the trust policy only sets trust level and a denylist, and DCR isn't implemented.
+  - The document must include `authorization_code` in `grant_types` and a non-empty `redirect_uris` (checked, `cimd.ts:171-200`). Use `["authorization_code", "urn:ietf:params:oauth:grant-type:device_code", "refresh_token"]` and a never-used `http://127.0.0.1/callback`.
+  - The documents also need `token_endpoint_auth_method: none`, at most 5 KB, no redirects, and a sane `Cache-Control`.
+  - Allowlist them in asterism's trust policy to drop the "unverified" consent wording.
+  - **Use separate client_ids for the CLI, node and hub:** asterism keeps one grant per (user, client, resource) (checked, `schema.prisma:241`), so refresh-reuse detection or a `/grants` revoke would otherwise kill all three.
+- **The CLI's refresh handling.** Persist the rotated refresh token before using it, and serialize refreshes across processes (two concurrent refreshes trip reuse detection). Re-run the device flow on `invalid_grant` or after 30 days (absolute).
+- **Dead config to remove.**
+  - Settings: `AUTH_MODE`, `OIDC_*`, `ADMIN_GROUPS`, `COOKIE_SECRET`, `OAUTH_*` TTLs and redirect origins, `ADMIN_SESSION_DURATION`, the three `RATE_LIMIT_*` OAuth/device keys, and the matching `config.ts` keys.
+  - The prune jobs in `index.ts:25-35`.
+  - Keep `secureCookies` (used by HSTS), or reimplement it.
+  - New settings: the asterism issuer and the audience.
+  - Docs to update: `docs/configuration.md`, `README.md`, `HUB_QUICKSTART.md`, `CONTRIBUTING.md`, `docker/standard/.env.example` and `packages/relay/.env.example`.
+- **Tests.** Rewrite `mcp.test.ts` for the verifier (it mocks `oauthSession`), and update `config.test.ts` and `rate-limit-classify.test.ts`. Delete `oauth.test.ts`, `oauth-clients.test.ts`, `safe-fetch.test.ts` and `device.test.ts`.
+
+**Decisions (settled with Joe, 2026-10-25).** The clean cut in `asterism/identity-boundary.md` is
+adopted. It replaces options (a)/(b)/(c) above wherever they conflict.
+1. **Base branch:** `feat/rfc9728-discovery` is merged to Constellation `main` (`05ca37e`). Build
+   on `main`.
+2. **Claims:** asterism releases claims per resource server in the access token. For Constellation
+   these are `groups`, `email` and `constellation_username`.
+   - `constellation_username` is a custom Authentik claim. Hubs use it in identity tier 1
+     (`hub/src/identity.ts`, `identity.claims`) to choose the OS user they drop privileges to, so it
+     is security-critical. It must be released exactly as Authentik sent it.
+   - `email_verified` is false in Authentik's ID token, so nothing may key on or authorize by email.
+   - Sample of Authentik's ID token (Constellation provider):
+     ```
+     sub, email, email_verified:false, name, given_name, preferred_username, nickname,
+     groups: ["authentik Admins", "constellation-admins"], constellation_username
+     ```
+3. **Hub rules:** keyed on both asterism `sub` and groups. No existing override needs keeping;
+   Joe will redefine them. The hub `user_map` is re-keyed to asterism `sub` the same way.
+4. **Admin:** `admin` is issued only to members of the Authentik group `constellation-admins`
+   (already created and present in `groups`). Removed from Constellation: `User.role`,
+   promote/demote, `RELAY_ADMIN_TOKEN` and `ADMIN_GROUPS`.
+5. **Freshness:** at refresh, asterism re-checks the user with Authentik, so changes arrive within
+   one access-token lifetime (15 minutes). Option (b) in the design note, §5. SCIM is later.
+6. **This round:** `OIDC_SUBJECT_CLAIM` and a claim map are in. Later: `relink-user`, more than one
+   upstream provider, and the `/revocations` feed.
+7. **Scopes and the verify library:**
+   - no separate registration scope: node registration needs the base scope, hub registration
+     needs `admin`;
+   - `asterism-verify` gains `Principal.claims`, `scopesSupported` in the metadata handler, and a
+     403 `insufficient_scope` helper, published as a new minor version.
+8. **Constellation local state:** drop `/api/account/deactivate`; keep a minimal root status page.
+
+### Clean cut: task breakdown (2026-10-25)
+
+**Phase A: asterism** (this repo). Three Sonnet agents, each owning separate files.
+- **A1, `asterism-verify`:** add `Principal.claims` (every payload claim except the registered ones
+  `iss sub aud exp nbf iat jti client_id scope`), `scopesSupported` on the metadata handler, and a
+  helper for 403 `insufficient_scope` with a `WWW-Authenticate` challenge (`scope=`,
+  `resource_metadata=`). Bump the minor version.
+- **A2, claims and group gating (proxy):**
+  - registry: `releaseClaims` per server, and `requireGroups` per scope (any-of);
+  - `OIDC_SUBJECT_CLAIM` and `OIDC_CLAIM_MAP`;
+  - released claims added at the top level of access tokens;
+  - consent lists which claims are shared;
+  - a scope gated on groups is refused (`invalid_scope`) before consent when the user is not in any
+    of the groups.
+- **A3, upstream re-check at refresh (proxy):**
+  - request `offline_access` upstream and store the upstream refresh token on `User` (plaintext,
+    the same threat model as `SigningKey.privateJwk`);
+  - at refresh, if the last check is older than about 5 minutes, refresh upstream once per user
+    (single-flight) and update `lastKnownClaims`;
+  - `invalid_grant` from upstream, or no stored upstream token, fails the asterism refresh, which
+    forces one Authentik sign-in. Upstream outages fail open for at most 24 hours since the last
+    good check.
+  - **Authentik setup:** the asterism provider must allow the refresh grant and the
+    `offline_access` scope.
+- **Wiring after the agents finish (main session):** refresh drops gated scopes the user no longer
+  qualifies for; documentation.
+
+**Phase A status (2026-10-25):** done on branch `feat/clean-cut-identity` (`be4b770`, then the
+red-team fixes in `a4deeff`). Pushed, not yet merged or deployed.
+
+**Phase R: resource-server registry in the database (before phase B).** Joe wants resource
+servers separated from asterism's config *before* Constellation moves, so Constellation is onboarded
+the new way from the start. Design: `asterism/resource-server-registry.md`.
+- **What moves:**
+  - each MCP server describes itself in its RFC 9728 metadata, with an `asterism_scopes` extension
+    member for consent text plus `step_up` and `short_lived` flags. A new `asterism-verify` helper
+    builds the document; fold it into 0.2.0, which is not published yet;
+  - asterism stores only policy in the database: approved servers, display name, `releaseClaims`,
+    and per-scope `shortLived` and `requireGroups`, with an audit log;
+  - an admin UI and `asterism-cli resource-server ...` manage it;
+  - `asterism-cli import-registry` moves the YAML in, and then `RESOURCE_SERVERS_PATH` is retired.
+- **Rules:**
+  - policy can only tighten what a server declares;
+  - only approved identifiers are ever fetched;
+  - the token path never fetches and uses the stored snapshot;
+  - on an outage, the last good snapshot is kept.
+- **Open decisions** are in the note, §7: admin authorization, recent sign-in for changes,
+  private-network servers, whether the trust policy and denylist join the UI, and how a dropped
+  scope affects existing refresh tokens.
+- Then publish `asterism-verify` 0.2.0, and only then start phase B.
+
+**Phase B: Constellation M3 and M4 together**, built on the published `asterism-verify`.
+Constellation serves its full `asterism_scopes` metadata from the start, and is onboarded in the
+admin UI rather than YAML.
+Agents are split by area:
+1. removing OAuth and login (M3 purge list above);
+2. bearer auth with the verifier, admin from the scope alone, step-up 403, discovery with
+   `scopesSupported`;
+3. executor registration (`POST /api/executors/register`) and the device-flow CLIs;
+4. the user model (a bare row per `sub`) and the hub protocol: the envelope carries `user_sub` and
+   `user_claims` from the token; overrides and `user_map` keyed on `sub` or `group`.
+
+Relay and hubs upgrade together; check for any hub protocol version check.
+
+**Security review of phase A (2026-10-25, three Sonnet reviewers, findings verified).**
+
+Fixed in `feat/clean-cut-identity`:
+- A 401 challenge from Authentik's token endpoint (for example `invalid_client` after a bad secret)
+  was counted as the user being rejected, wiping every user's stored upstream token. Now only
+  `invalid_grant` from the token endpoint, or a 401 from userinfo, is a rejection.
+- Clearing and storing the upstream token are compare-and-set on the token actually used, so a
+  sign-in that lands mid-check is never wiped or overwritten.
+- Failing open now covers only real outages: network errors, timeouts, non-JSON or unexpected-status
+  answers, other error bodies, and discovery. A refreshed ID token that fails validation is refused
+  without failing open.
+- There is a 60-second back-off per user after Authentik is found unavailable.
+- A failed database write after a successful check no longer fails the refresh.
+- A user whose `oidcIssuer` isn't the current issuer is refused (`issuer_mismatch`), never
+  overwritten.
+- More names are reserved in `releaseClaims` (`typ token_type may_act acr amr sid __proto__
+  constructor prototype`), and duplicate scope names are rejected.
+
+Accepted, not fixed:
+- The code and device-code exchanges don't re-check groups. Removal can leave up to about 15 minutes
+  plus one 5-minute `admin` token for a code already approved.
+- Gated scopes that aren't shortLived can ride stale groups through the 5-minute re-check window or
+  the 24-hour fail-open. There are none today: `admin` is shortLived and never refreshed.
+- ~~A newly added `releaseClaims` entry reaches existing refresh tokens without re-consent.~~
+  Fixed in round 2 (`Grant.releasedClaims`).
+- Backups and dumps of asterism's database now contain live Authentik refresh tokens.
+
+**Round 2 red team (2026-10-25), fixed before commit:**
+- a refused gated scope now shows asterism's own error page instead of redirecting `invalid_scope`
+  to the client. That redirect was a zero-click group-membership oracle under SSO;
+- consent names both the client and the resource server as receiving claims (the JWT isn't
+  encrypted, so the client can read them);
+- claims are tied to consent: `Grant.releasedClaims`; mint releases only consented claims that the
+  registry still lists. Existing grants release nothing until re-consent;
+- 4096-character cap per released claim value;
+- the 24-hour fail-open covers only genuine outages (network, timeout, 5xx, 429, unparseable 2xx or
+  5xx). Other 4xx answers and failed ID-token validation refuse and keep the token;
+- a 10-second timeout on upstream calls, so a slow Authentik can't make a client retry trip
+  refresh-token reuse detection;
+- compare-and-set also on `upstreamCheckedAt`;
+- `OIDC_SUBJECT_CLAIM` refuses editable claims (`email`, `preferred_username`, ...);
+- `subject_missing` and `subject_mismatch` are reported separately.
+
+**Phase B must (from the review):**
+- treat `constellation_username` as untrusted input on the hub:
+  - `getent passwd 1000` resolves a **UID**, so today a value of `"1000"`, `"+1000"` or
+    `"01000"` maps to whichever account has that UID (confirmed by the round-2 red team);
+  - pattern, widened for LDAP/SSSD (decided with Joe 2026-10-25):
+    `^[A-Za-z_][A-Za-z0-9._@-]{0,255}$`;
+    - it allows mixed case, `.`, and fully-qualified SSSD names such as `user@domain.example`;
+    - the first character must be a letter or `_`, so the value is never numeric (no UID
+      lookup) and never starts with `-`;
+    - no whitespace, `+` (NIS compat), `:`, `/`, `\`, unicode or control characters;
+    - it is a cheap pre-filter only. The exact-name check below is the real guard;
+  - `getpwnam` returns the passwd name (`parts[0]`). Require `pw.name === claim` (case-sensitive;
+    SSSD returns its canonical case, so the claim must use it), and use `pw.name` from then on
+    (ACLs, audit, `getGroupIds`, subnode key);
+  - a claim that is present but invalid, unresolved or mismatched is a hard refusal. Only an absent
+    claim moves on to tier 2 (`user_map`). Today `hub/src/identity.ts:101-111` falls through;
+  - apply the same pattern and exact-name check to `user_map[].local_username`;
+  - remove tier 3 (`preferred_username`): asterism doesn't release it, and users can edit it;
+  - keep `subnode.ts`'s uid 0, hub-uid and range checks; refuse when no tier resolves;
+  - tests: numeric, `+`-prefixed, padded and whitespace values; a mismatched name; mixed case;
+    `user@domain`; arrays and objects; no fall-through on an invalid claim;
+- hub tier 2 (`user_map[].oidc_sub`) will see asterism's `sub` (a cuid `User.id`), not Authentik's;
+- never authorize by `groups` for admin: use `scope`. Refreshed tokens can carry groups up to
+  24 hours stale;
+- keep the Authentik attribute behind `constellation_username` admin-only and unique (two users
+  with the same value would map to the same OS user);
+- check `scope` on every request (`requireScopes`), since a stolen 15-minute token is otherwise
+  enough.
+
+**Verification (Joe, live):**
+- after a refresh, check that Authentik's refreshed ID token (or userinfo) still carries `groups`
+  and `constellation_username`. If not, they are dropped from `lastKnownClaims`, which fails closed.
+  Joe confirmed (2026-10-25) that they are present;
+- disable a test user in Authentik, and confirm the refresh returns `invalid_grant`, not
+  success. Joe confirmed (2026-10-25) that Authentik rejects a disabled user's refresh;
+- disable a test user in Authentik, and their asterism refresh fails within 15 minutes;
+- remove `constellation-admins` membership, and step-up to `admin` is refused;
+- a hub resolves the OS user from `constellation_username` carried in the token.
 
 ### On migrating DCR client records
 

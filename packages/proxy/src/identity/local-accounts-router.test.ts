@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 const db = vi.hoisted(() => ({
   prisma: {
@@ -18,12 +18,16 @@ const la = vi.hoisted(() => ({
   changePassword: vi.fn(),
   localAccountsExist: vi.fn(),
   MIN_PASSWORD_LENGTH: 12,
+  // Not the real 15 minutes, so the tests show the wait is derived from the constant.
+  FAILURE_WINDOW_MS: 10 * 60 * 1000,
 }));
 const sess = vi.hoisted(() => ({ getSessionUserId: vi.fn(), startSession: vi.fn() }));
 vi.mock("../db.js", () => db);
 vi.mock("./local-accounts.js", () => la);
 vi.mock("./session.js", async (orig) => ({ ...(await orig<typeof import("./session.js")>()), getSessionUserId: sess.getSessionUserId, startSession: sess.startSession }));
 
+import { config } from "../config.js";
+import { cookieName } from "../cookies.js";
 import { setSession } from "./session.js";
 import { localAccountsRouter } from "./local-accounts-router.js";
 import { startRouterApp, type RouterApp } from "../test-helpers/identity-app.js";
@@ -31,6 +35,27 @@ import { cookieClient, csrfFrom, form } from "../test-helpers/http.js";
 import { bindBrowser, bindRouter } from "../test-helpers/fix-f-bind.js";
 
 const GOOD_PW = "correct horse battery";
+const ISSUERS: Array<[string, string]> = [["https://auth.example.test", "https"], ["http://localhost:3000", "http"]];
+/** The cookie-clearing Set-Cookie line for `base`, asserted to be at Path=/ and Secure exactly when https. */
+function expectCleared(res: { headers: Headers }, base: string) {
+  const wire = cookieName(base);
+  const line = res.headers.getSetCookie().find((l) => l.startsWith(`${wire}=;`));
+  expect(line, `clear of ${wire}`).toBeDefined();
+  expect(line).toMatch(/; Path=\/(;|$)/);
+  expect(line).toMatch(/; Expires=/);
+  if (config.issuerUrl.startsWith("https:")) {
+    expect(wire).toBe(`__Host-${base}`);
+    expect(line).toMatch(/; Secure/);
+  } else {
+    expect(wire).toBe(base);
+    expect(line).not.toMatch(/; Secure/);
+  }
+}
+const savedIssuer = config.issuerUrl;
+afterEach(() => {
+  config.issuerUrl = savedIssuer;
+});
+
 let app: RouterApp;
 
 beforeAll(async () => {
@@ -102,6 +127,25 @@ describe("/setup", () => {
     expect(la.createFirstLocalUser).not.toHaveBeenCalled();
   });
 
+  it("P0 a throttled setup-token guess gets 429 with Retry-After and creates nothing", async () => {
+    const saved = config.setupToken;
+    config.setupToken = "the-token";
+    try {
+      la.beginIpAttempt.mockResolvedValue(null);
+      const { jar, csrf } = await withCsrf("/setup");
+      const res = await jar.fetch(`${app.baseUrl}/setup`, {
+        method: "POST",
+        ...form({ username: "alice", password: GOOD_PW, confirm_password: GOOD_PW, setup_token: "the-token", csrf_token: csrf }),
+      });
+      expect(res.status).toBe(429);
+      expect(res.headers.get("retry-after")).toBe("600");
+      expect(await res.text()).toContain("Please wait 10 minutes.");
+      expect(la.createFirstLocalUser).not.toHaveBeenCalled();
+    } finally {
+      config.setupToken = saved;
+    }
+  });
+
   it("P0 POST with no body at all is 403, not a crash", async () => {
     const res = await fetch(`${app.baseUrl}/setup`, { method: "POST" });
     expect(res.status).toBe(403);
@@ -132,6 +176,15 @@ describe("/setup", () => {
     expect(jar.cookies.has("session")).toBe(true);
     expect(jar.cookies.has("reauth")).toBe(false);
     expect(jar.cookies.has("csrf_setup")).toBe(false);
+  });
+
+  it.each(ISSUERS)("P0 success clears the setup CSRF cookie under its wire name at Path=/ (%s)", async (issuer) => {
+    config.issuerUrl = issuer;
+    const { jar, csrf } = await withCsrf("/setup");
+    const res = await jar.fetch(`${app.baseUrl}/setup`, { method: "POST", ...form({ username: "bob", password: GOOD_PW, confirm_password: GOOD_PW, csrf_token: csrf }) });
+    expect(res.status).toBe(302);
+    expectCleared(res, "csrf_setup");
+    expect(jar.cookies.has(cookieName("csrf_setup"))).toBe(false);
   });
 
   it("P0 an empty username is rejected", async () => {
@@ -201,7 +254,9 @@ describe("POST /auth/login", () => {
     const { jar, csrf } = await withCsrf("/auth/login");
     const res = await post(jar, { username: "a", password: "b", csrf_token: csrf });
     expect(res.status).toBe(429);
-    expect(await res.text()).toContain("Too many failed attempts");
+    expect(res.headers.get("retry-after")).toBe("600");
+    const html = await res.text();
+    expect(html).toContain("Too many failed attempts. Please wait 10 minutes.");
     expect(la.validateLocalUser).not.toHaveBeenCalled();
     expect(la.endAttempt).not.toHaveBeenCalled();
   });
@@ -254,6 +309,15 @@ describe("POST /auth/login", () => {
     expect(jar.cookies.has("session")).toBe(true);
     expect(jar.cookies.has("reauth")).toBe(true); // a password was just entered
     expect(db.prisma.authorizationRequest.findUnique).not.toHaveBeenCalled();
+  });
+
+  it.each(ISSUERS)("P0 success clears the login CSRF cookie under its wire name at Path=/ (%s)", async (issuer) => {
+    config.issuerUrl = issuer;
+    const { jar, csrf } = await withCsrf("/auth/login");
+    const res = await post(jar, { username: "alice", password: "pw", csrf_token: csrf });
+    expect(res.status).toBe(302);
+    expectCleared(res, "csrf_login");
+    expect(jar.cookies.has(cookieName("csrf_login"))).toBe(false);
   });
 
   it("P0 an OAuth flow records the subject and continues to consent", async () => {
@@ -343,6 +407,51 @@ describe("/auth/account and POST /auth/password", () => {
   it("P0 password change needs CSRF (403 without; no body is 403 not 500)", async () => {
     loggedIn();
     expect((await fetch(`${app.baseUrl}/auth/password`, { method: "POST" })).status).toBe(403);
+    expect(la.changePassword).not.toHaveBeenCalled();
+  });
+
+  it("P0 the logout token does not work for the password form, even with its cookie planted under the password cookie's name", async () => {
+    loggedIn();
+    const jar = cookieClient();
+    const html = await (await jar.fetch(`${app.baseUrl}/auth/account`)).text();
+    const logoutToken = csrfFrom(html.split("<form").find((f) => f.includes('action="/auth/logout"'))!);
+    expect(logoutToken).not.toBe(csrfFrom(html));
+    const planted = cookieClient();
+    // Same nonce, so the token's HMAC differs from the password form's only by purpose.
+    planted.cookies.set(cookieName("csrf_password"), jar.cookies.get(cookieName("csrf_logout"))!);
+    const res = await planted.fetch(`${app.baseUrl}/auth/password`, {
+      method: "POST",
+      ...form({ current_password: "old", new_password: GOOD_PW, confirm_new_password: GOOD_PW, csrf_token: logoutToken }),
+    });
+    expect(res.status).toBe(403);
+    expect(la.changePassword).not.toHaveBeenCalled();
+  });
+
+  it("P0 a password token minted for one user is refused for another", async () => {
+    loggedIn();
+    const jar = cookieClient();
+    const csrf = csrfFrom(await (await jar.fetch(`${app.baseUrl}/auth/account`)).text());
+    sess.getSessionUserId.mockResolvedValue("u2");
+    const res = await jar.fetch(`${app.baseUrl}/auth/password`, {
+      method: "POST",
+      ...form({ current_password: "old", new_password: GOOD_PW, confirm_new_password: GOOD_PW, csrf_token: csrf }),
+    });
+    expect(res.status).toBe(403);
+    expect(la.changePassword).not.toHaveBeenCalled();
+  });
+
+  it("P0 a throttled password change gets 429 with Retry-After and the check is never evaluated", async () => {
+    loggedIn();
+    la.beginPasswordChangeAttempt.mockResolvedValue(null);
+    const jar = cookieClient();
+    const csrf = csrfFrom(await (await jar.fetch(`${app.baseUrl}/auth/account`)).text());
+    const res = await jar.fetch(`${app.baseUrl}/auth/password`, {
+      method: "POST",
+      ...form({ current_password: "old", new_password: GOOD_PW, confirm_new_password: GOOD_PW, csrf_token: csrf }),
+    });
+    expect(res.status).toBe(429);
+    expect(res.headers.get("retry-after")).toBe("600");
+    expect(await res.text()).toContain("Please wait 10 minutes.");
     expect(la.changePassword).not.toHaveBeenCalled();
   });
 

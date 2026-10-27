@@ -19,11 +19,18 @@ const MAX_DOCUMENT_BYTES = 5 * 1024;
 // the client_id URL itself, not from wherever that URL points.
 const CIMD_MAX_REDIRECTS = 0;
 // A fetch refused by the per-host rate limit or the global concurrency cap may
-// be served from an existing row this recent (an attacker can otherwise exhaust
-// the budget for a no-store client's host and deny it to real users).
+// be served from an existing row that expired no longer ago than this (an
+// attacker can otherwise exhaust the budget for a no-store client's host and
+// deny it to real users). Measured from expiry, not from the fetch: a refetch
+// only happens once the row has expired, so a window from fetchedAt would
+// never be open for a client with a long TTL.
 const STALE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const CLIENT_ID_URL_MAX_LENGTH = 2000;
 const CLIENT_NAME_MAX_LENGTH = 200;
+// Same rule as UNSAFE_TEXT in resource-servers/metadata.ts: the name is shown at
+// consent, and control, format (bidi override, zero-width) and line or paragraph
+// separator characters could hide or reorder what it appears to say.
+const UNSAFE_TEXT = /[\p{Cc}\p{Cf}\u2028\u2029]/u;
 
 // Grant types this server can actually issue; anything else in a document is
 // meaningless here and is dropped.
@@ -161,6 +168,9 @@ export function validateDocument(fetchedFromUrl: string, raw: unknown): ClientMe
   if (typeof clientName !== "string" || clientName.trim() === "" || clientName.trim().length > CLIENT_NAME_MAX_LENGTH) {
     throw new CimdValidationError(`client_name is required and must be a non-empty string of at most ${CLIENT_NAME_MAX_LENGTH} characters`);
   }
+  if (UNSAFE_TEXT.test(clientName)) {
+    throw new CimdValidationError("client_name must not contain control, format or line-separator characters");
+  }
 
   // A CIMD client is public or private_key_jwt; a shared secret in a public
   // document is never valid.
@@ -249,8 +259,10 @@ export function cacheLifetimeMs(cacheControl: string | string[] | undefined): nu
   if (directives.includes("no-store") || directives.includes("no-cache")) return 0;
   const maxAge = directives.find((s) => s.startsWith("max-age="));
   if (!maxAge) return DEFAULT_TTL_MS;
-  const seconds = Number(maxAge.slice("max-age=".length));
-  if (!Number.isFinite(seconds) || seconds < 0) return DEFAULT_TTL_MS;
+  const raw = maxAge.slice("max-age=".length);
+  // Only a non-negative integer counts; "max-age=" (empty) is not "max-age=0".
+  if (!/^\d+$/.test(raw)) return DEFAULT_TTL_MS;
+  const seconds = Number(raw);
   if (seconds === 0) return 0;
   return Math.min(Math.max(seconds * 1000, MIN_TTL_MS), DEFAULT_TTL_MS);
 }
@@ -329,6 +341,7 @@ async function fetchAndStore(clientId: string, cached: OauthClient | null): Prom
     raw = await safeFetchJson(clientId, {
       maxBytes: MAX_DOCUMENT_BYTES,
       maxRedirects: CIMD_MAX_REDIRECTS,
+      allowedPorts: [443],
       onHeaders: (h) => {
         headers = h;
       },
@@ -338,14 +351,14 @@ async function fetchAndStore(clientId: string, cached: OauthClient | null): Prom
   } catch (err) {
     recordDuration("cimd_fetch_duration_ms", { outcome: "failure" }, Date.now() - fetchStarted);
     incrementCounter("cimd_fetch_total", { outcome: "failure" });
-    log.warn({ clientId, err: err instanceof Error ? err.message : err }, "CIMD fetch failed");
+    log.warn({ clientId, err }, "CIMD fetch failed");
     if (
       err instanceof SafeFetchError &&
       (err.reason === "rate_limited" || err.reason === "busy") &&
-      cached &&
-      Date.now() - cached.fetchedAt.getTime() <= STALE_MAX_AGE_MS
+      cached?.expiresAt &&
+      Date.now() - cached.expiresAt.getTime() <= STALE_MAX_AGE_MS
     ) {
-      log.warn({ clientId, reason: err.reason, fetchedAt: cached.fetchedAt }, "Serving stale CIMD client row because the refetch was refused");
+      log.warn({ clientId, reason: err.reason, expiresAt: cached.expiresAt }, "Serving stale CIMD client row because the refetch was refused");
       incrementCounter("cimd_stale_served_total", { reason: err.reason });
       return { ...cached, trustLevel: assignTrustLevel(clientId, cached.source) };
     }
@@ -356,7 +369,7 @@ async function fetchAndStore(clientId: string, cached: OauthClient | null): Prom
   try {
     document = validateDocument(clientId, raw);
   } catch (err) {
-    log.warn({ clientId, err: err instanceof Error ? err.message : err }, "CIMD document failed validation");
+    log.warn({ clientId, err }, "CIMD document failed validation");
     return null;
   }
 
@@ -376,6 +389,7 @@ async function fetchAndStore(clientId: string, cached: OauthClient | null): Prom
       metadata: document as unknown as Prisma.InputJsonObject,
       trustLevel,
       expiresAt,
+      fetchedAt: new Date(),
       lastSeenAt: new Date(),
     },
   });

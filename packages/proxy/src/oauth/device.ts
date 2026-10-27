@@ -2,6 +2,7 @@ import { randomBytes, createHash } from "node:crypto";
 import { Router, Request, Response } from "express";
 import { prisma } from "../db.js";
 import { config } from "../config.js";
+import { clearSignedCookie } from "../cookies.js";
 import { createLogger } from "../logger.js";
 import { resolveClient } from "../clients/cimd.js";
 import { isRegisteredResource, lookupResourceServer } from "../resource-registry.js";
@@ -10,7 +11,7 @@ import { requestsFreshSignIn } from "./fresh-sign-in.js";
 import { bodyOf, stringField } from "../http-params.js";
 import { issueCsrfToken, verifyCsrfToken } from "../identity/csrf.js";
 import { bindFlow } from "../identity/flow-binding.js";
-import { rowCreationRetryAfter } from "../rate-limit.js";
+import { clientResolutionRetryAfter, ipRateLimitKey, rowCreationRetryAfter } from "../rate-limit.js";
 import { allowFormSubmissionTo } from "../security-headers.js";
 
 const log = createLogger("device");
@@ -86,7 +87,14 @@ export function resetDeviceEntryLimits(): void {
   failedByIp.clear();
 }
 
-/** Reserves a failed-entry slot for `ip`. Returns a function that gives the
+/** Seconds until `ip`'s failed-entry window ends (at least 1). */
+function failedEntryRetryAfter(ip: string): number {
+  const perIp = failedByIp.get(ip);
+  if (!perIp) return 1;
+  return Math.max(1, Math.ceil((perIp.windowStart + CODE_ENTRY_WINDOW_MS - Date.now()) / 1000));
+}
+
+/** Reserves a failed-entry slot for `ip` (already an ipRateLimitKey). Returns a function that gives the
  * slot back (call it on success), or null if the limit is reached. */
 function reserveFailedEntry(ip: string): (() => void) | null {
   const now = Date.now();
@@ -132,6 +140,16 @@ deviceRouter.post("/oauth/device/code", async (req: Request, res: Response) => {
     return;
   }
 
+  // resolveClient can fetch the client's metadata document, so cap it per
+  // address before it runs.
+  const resolveRetryAfter = clientResolutionRetryAfter(req);
+  if (resolveRetryAfter > 0) {
+    log.warn({ ip: req.ip }, "Device code client resolution rate limit exceeded");
+    res.set({ "Retry-After": String(resolveRetryAfter), "Cache-Control": "no-store" });
+    res.status(429).json({ error: "temporarily_unavailable", error_description: "Too many requests from this address; slow down and retry later" });
+    return;
+  }
+
   const client = await resolveClient(clientId);
   if (!client) {
     res.status(400).json({ error: "invalid_client" });
@@ -164,7 +182,7 @@ deviceRouter.post("/oauth/device/code", async (req: Request, res: Response) => {
   const retryAfter = rowCreationRetryAfter(req);
   if (retryAfter > 0) {
     log.warn({ clientId, ip: req.ip }, "Device code request rate limit exceeded");
-    res.set("Retry-After", String(retryAfter));
+    res.set({ "Retry-After": String(retryAfter), "Cache-Control": "no-store" });
     res.status(429).json({ error: "temporarily_unavailable", error_description: "Too many requests from this address; slow down and retry later" });
     return;
   }
@@ -232,8 +250,10 @@ async function startDeviceConsent(req: Request, res: Response, rawCode: string):
     await renderEntry(res, "Invalid or missing CSRF token. Please try again.", normalizeUserCode(rawCode) ? formatUserCode(normalizeUserCode(rawCode)) : "", 403);
     return;
   }
-  const release = reserveFailedEntry(req.ip ?? "unknown");
+  const ip = ipRateLimitKey(req.ip);
+  const release = reserveFailedEntry(ip);
   if (!release) {
+    res.set("Retry-After", String(failedEntryRetryAfter(ip)));
     await renderEntry(res, "Too many attempts. Please wait and try again.", "", 429);
     return;
   }
@@ -272,7 +292,7 @@ async function startDeviceConsent(req: Request, res: Response, rawCode: string):
     },
   });
   bindFlow(req, res, handle);
-  res.clearCookie("csrf_device");
+  clearSignedCookie(res, "csrf_device");
 
   if (config.enableLocalAccounts && !config.enableOidc) {
     res.redirect(`/auth/login?flow=${encodeURIComponent(handle)}`);

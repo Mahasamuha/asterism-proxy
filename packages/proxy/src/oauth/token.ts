@@ -15,6 +15,9 @@ import { isRegisteredResource, lookupResourceServer } from "../resource-registry
 
 const log = createLogger("token");
 
+// RFC 7636 §4.1 code_verifier: 43-128 unreserved characters.
+const CODE_VERIFIER_PATTERN = /^[A-Za-z0-9._~-]{43,128}$/;
+
 export const tokenRouter: Router = Router();
 
 // RFC 6749 §5.1: every token-endpoint response, success or error, must not be cached.
@@ -121,36 +124,45 @@ async function handleAuthorizationCodeGrant(body: Record<string, unknown>, res: 
     return;
   }
 
-  if (entry.consumedAt !== null) {
-    await revokeDescendantRefreshTokens(entry.grantId, "code_replay");
-    res.status(400).json({ error: "invalid_grant", error_description: "Authorization code already used" });
-    return;
-  }
+  // A consumed code is answered "already used" whatever else is wrong with the
+  // request, but it only revokes the grant's refresh tokens once the request
+  // proves possession (below): otherwise anyone holding a leaked used code
+  // could knock the user's grant offline with one unauthenticated POST.
+  const consumed = entry.consumedAt !== null;
+  const reject = (description: string): void => {
+    res.status(400).json({ error: "invalid_grant", error_description: consumed ? "Authorization code already used" : description });
+  };
 
   // client_id/redirect_uri mismatch burns the code — Constellation's lifted
   // behavior — since it suggests identity confusion, not a transient client
-  // bug like a PKCE mismatch below (which does not burn the code).
+  // bug like a PKCE mismatch below (which does not burn the code). A consumed
+  // code is left in place: it is the record that makes later replays detectable.
   if (entry.clientId !== client_id || entry.redirectUri !== redirect_uri) {
-    await prisma.authCode.delete({ where: { codeHash } }).catch(() => {});
-    res.status(400).json({ error: "invalid_grant", error_description: "client_id or redirect_uri mismatch" });
+    if (!consumed) await prisma.authCode.delete({ where: { codeHash } }).catch(() => {});
+    reject("client_id or redirect_uri mismatch");
     return;
   }
 
   if (!code_verifier) {
-    res.status(400).json({ error: "invalid_grant", error_description: "code_verifier required" });
+    reject("code_verifier required");
+    return;
+  }
+  // RFC 7636 §4.1: a verifier outside this grammar was never a valid one.
+  if (!CODE_VERIFIER_PATTERN.test(code_verifier)) {
+    reject("code_verifier malformed");
     return;
   }
   if (entry.codeChallengeMethod !== "S256") {
-    res.status(400).json({ error: "invalid_grant", error_description: "Unsupported code_challenge_method" });
+    reject("Unsupported code_challenge_method");
     return;
   }
   const challenge = createHash("sha256").update(code_verifier).digest("base64url");
   if (challenge !== entry.codeChallenge) {
-    res.status(400).json({ error: "invalid_grant", error_description: "code_verifier mismatch" });
+    reject("code_verifier mismatch");
     return;
   }
 
-  if (resource !== undefined && resource !== entry.resource) {
+  if (!consumed && resource !== undefined && resource !== entry.resource) {
     res.status(400).json({ error: "invalid_target", error_description: "resource does not match the authorization code" });
     return;
   }
@@ -166,6 +178,14 @@ async function handleAuthorizationCodeGrant(body: Record<string, unknown>, res: 
   const auth = await authenticateConfidentialClient(client, body);
   if (!auth.ok) {
     res.status(400).json({ error: auth.error, error_description: auth.errorDescription });
+    return;
+  }
+
+  if (consumed) {
+    // Client, redirect_uri, verifier and client authentication all check out:
+    // the presenter held the code's secrets, so this is a genuine replay.
+    await revokeDescendantRefreshTokens(entry.grantId, "code_replay");
+    reject("Authorization code already used");
     return;
   }
 
@@ -227,6 +247,7 @@ async function handleAuthorizationCodeGrant(body: Record<string, unknown>, res: 
   if (!issued) {
     // Treated exactly like the ordinary replay case above, including revoking
     // descendant refresh tokens (idempotent if the other request already did so).
+    // This request passed every proof check above, so it is a proven replay.
     await revokeDescendantRefreshTokens(entry.grantId, "code_replay");
     res.status(400).json({ error: "invalid_grant", error_description: "Authorization code already used" });
     return;

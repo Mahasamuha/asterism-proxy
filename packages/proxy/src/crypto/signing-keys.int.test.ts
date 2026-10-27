@@ -64,6 +64,25 @@ describe("signing keys (real Postgres)", () => {
     await jwtVerify(fresh, createLocalJWKSet(jwks), { algorithms: ["ES256"] });
   });
 
+  it("tokens carry typ at+jwt", async () => {
+    expect(decodeProtectedHeader(await signJwt({ sub: "x" }, 60)).typ).toBe("at+jwt");
+  });
+
+  it("rotation with compromised deletes all old keys at once, so their tokens stop verifying", async () => {
+    const { kid: oldKid } = await ensureActiveSigningKey();
+    await rotateSigningKey();
+    const old = await signJwt({ sub: "u1" }, 900);
+    const { kid: newKid, removedKids } = await rotateSigningKey({ compromised: true });
+
+    expect(removedKids).toHaveLength(2);
+    expect(removedKids).toContain(oldKid);
+    expect(await prisma.signingKey.count()).toBe(1);
+    const jwks = await getJwks();
+    expect(jwks.keys.map((k) => k.kid)).toEqual([newKid]);
+    await expect(jwtVerify(old, createLocalJWKSet(jwks), { algorithms: ["ES256"] })).rejects.toThrow();
+    expect(decodeProtectedHeader(await signJwt({ sub: "u2" }, 60)).kid).toBe(newKid);
+  });
+
   it("drops retired keys from the JWKS after 2 hours but keeps them before", async () => {
     const { kid: oldKid } = await ensureActiveSigningKey();
     const { kid: midKid } = await rotateSigningKey();

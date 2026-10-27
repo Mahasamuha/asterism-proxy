@@ -2,12 +2,13 @@ import { createHash } from "node:crypto";
 import { Router, Request, Response } from "express";
 import { prisma } from "../db.js";
 import { config } from "../config.js";
+import { clearSignedCookie } from "../cookies.js";
 import { createLogger } from "../logger.js";
 import { resolveClient } from "../clients/cimd.js";
 import { authenticateConfidentialClient } from "./client-assertion.js";
 import { lookupResourceServer } from "../resource-registry.js";
 import { getSessionUserId, clearSession, revokeSessions } from "../identity/session.js";
-import { issueCsrfToken, verifyCsrfToken } from "../identity/csrf.js";
+import { issueBoundCsrfToken, verifyBoundCsrfToken, LOGOUT_CSRF_PURPOSE } from "../identity/csrf.js";
 import { createSelfLoginRequest } from "../identity/self-login.js";
 import { startUpstreamAuth } from "../identity/oidc.js";
 import { bodyOf, stringField } from "../http-params.js";
@@ -18,6 +19,8 @@ import { limitOauthEndpoint, rowCreationRetryAfter } from "../rate-limit.js";
 const log = createLogger("grants");
 
 export const grantsRouter: Router = Router();
+
+const GRANTS_CSRF_PURPOSE = "grants-revoke";
 
 const ERROR_HEADINGS: Record<number, string> = {
   401: "Not signed in",
@@ -64,14 +67,16 @@ async function requireSession(req: Request, res: Response, returnTo: string): Pr
 // could sign a user out with a cross-site form post. A valid session's epoch is
 // bumped, which ends that user's sessions everywhere (a copied cookie included).
 grantsRouter.post("/auth/logout", async (req: Request, res: Response) => {
-  if (!verifyCsrfToken(req, "csrf_logout")) {
+  const userId = await getSessionUserId(req);
+  // The token is bound to the signed-in user, so a post with no session has
+  // nothing to verify against and is refused (the page it came from is stale).
+  if (!userId || !verifyBoundCsrfToken(req, "csrf_logout", LOGOUT_CSRF_PURPOSE, userId)) {
     renderErrorPage(res, 403, "Invalid or missing CSRF token. Please reload the page and try again.");
     return;
   }
-  const userId = await getSessionUserId(req);
-  if (userId) await revokeSessions(userId);
+  await revokeSessions(userId);
   clearSession(res);
-  res.clearCookie("csrf_logout");
+  clearSignedCookie(res, "csrf_logout");
   renderMessage(res, 200, {
     status: "success",
     heading: "Signed out",
@@ -118,8 +123,8 @@ grantsRouter.get("/grants", async (req: Request, res: Response) => {
   );
 
   const admin = await isAdmin(userId);
-  const csrfToken = issueCsrfToken(res, "csrf_grants");
-  const logoutToken = issueCsrfToken(res, "csrf_logout");
+  const csrfToken = issueBoundCsrfToken(req, res, "csrf_grants", GRANTS_CSRF_PURPOSE, userId);
+  const logoutToken = issueBoundCsrfToken(req, res, "csrf_logout", LOGOUT_CSRF_PURPOSE, userId);
 
   const links: Array<Record<string, unknown>> = [{ href: "/grants", label: "your grants", current: true }];
   if (config.enableLocalAccounts) links.push({ href: "/auth/account", label: "account" });
@@ -147,7 +152,7 @@ grantsRouter.post("/grants/:id/revoke", async (req: Request, res: Response) => {
     return;
   }
 
-  if (!verifyCsrfToken(req, "csrf_grants")) {
+  if (!verifyBoundCsrfToken(req, "csrf_grants", GRANTS_CSRF_PURPOSE, userId)) {
     renderErrorPage(res, 403, "Invalid or missing CSRF token. Please reload and try again.");
     return;
   }
@@ -210,17 +215,24 @@ grantsRouter.post("/oauth/revoke", limitOauthEndpoint, async (req: Request, res:
   // distinguish an authentication failure (400) from success, which reveals
   // nothing they don't have: they presented the token. Everyone else gets the
   // same 200 and, for a nonexistent token, skips the verification cost; the
-  // hash and one indexed lookup are all they can make the server do.
+  // hash and one indexed lookup are all they can make the server do. A client
+  // that can't be resolved is refused too (400 invalid_client, as at the token
+  // endpoint) rather than skipped, since we can't tell it needs no assertion.
   const tokenHash = createHash("sha256").update(token).digest("hex");
   const entry = await prisma.refreshToken.findUnique({ where: { tokenHash } });
   if (entry && entry.clientId === client_id) {
     const client = await resolveClient(client_id);
-    if (client) {
-      const auth = await authenticateConfidentialClient(client, body);
-      if (!auth.ok) {
-        res.status(400).json({ error: auth.error, error_description: auth.errorDescription });
-        return;
-      }
+    if (!client) {
+      // Not "nothing to authenticate": a private_key_jwt client whose metadata
+      // can't be fetched (an attacker can force that via the per-host fetch
+      // budget) would otherwise let a stolen token revoke without the assertion.
+      res.status(400).json({ error: "invalid_client", error_description: "Client could not be resolved" });
+      return;
+    }
+    const auth = await authenticateConfidentialClient(client, body);
+    if (!auth.ok) {
+      res.status(400).json({ error: auth.error, error_description: auth.errorDescription });
+      return;
     }
     const result = await prisma.refreshToken.updateMany({
       where: { grantId: entry.grantId, revokedAt: null },

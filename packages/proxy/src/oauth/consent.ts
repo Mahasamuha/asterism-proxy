@@ -6,7 +6,7 @@ import { createLogger } from "../logger.js";
 import { resolveClient } from "../clients/cimd.js";
 import { lookupResourceServer, type ResourceServer } from "../resource-registry.js";
 import { groupsSatisfy, loadUserGroups } from "../identity/released-claims.js";
-import { issueCsrfToken, verifyCsrfToken } from "../identity/csrf.js";
+import { issueBoundCsrfToken, verifyBoundCsrfToken } from "../identity/csrf.js";
 import { config } from "../config.js";
 import { isSelfLogin } from "../identity/self-login.js";
 import { isFlowBound } from "../identity/flow-binding.js";
@@ -23,11 +23,15 @@ export const consentRouter: Router = Router();
 
 const AUTH_CODE_TTL_MS = 10 * 60 * 1000;
 
-function renderErrorPage(res: Response, message: string): void {
-  renderMessage(res, 400, { status: "error", heading: "Authorization failed", text: message });
+function renderErrorPage(res: Response, message: string, status = 400): void {
+  renderMessage(res, status, { status: "error", heading: "Authorization failed", text: message });
 }
 
 const WRONG_BROWSER_MESSAGE = "This authorization request must be completed in the browser that started it. Please start again from the application.";
+
+function consentCsrfPurpose(handle: string): string {
+  return `consent:${handle}`;
+}
 
 /** A flow is only usable here once T6/T7 has written `subject` onto it, and
  * only from the browser that started it (flow-binding cookie) and that is
@@ -351,7 +355,8 @@ consentRouter.get("/oauth/consent", async (req: Request, res: Response) => {
   // updateMany: a request consumed in the meantime is simply not there.
   await prisma.authorizationRequest.updateMany({ where: { handle: authRequest.handle }, data: { shownClaims: resourceServer.releaseClaims } });
 
-  const csrfToken = issueCsrfToken(res, "csrf_consent");
+  // Bound to this flow and its user, so a token minted for one flow cannot approve another.
+  const csrfToken = issueBoundCsrfToken(req, res, "csrf_consent", consentCsrfPurpose(authRequest.handle), authRequest.subject);
   // Approve and deny both answer the POST with a redirect to the client's
   // redirect_uri. The browser checks form-action against this page's CSP, not
   // the 302's, so this page must allow that target. A device flow's POST
@@ -388,8 +393,8 @@ consentRouter.post("/oauth/consent", async (req: Request, res: Response) => {
   }
   if (!(await requireFlowBrowser(req, res, authRequest))) return;
 
-  if (!verifyCsrfToken(req, "csrf_consent")) {
-    renderErrorPage(res, "Invalid or missing CSRF token. Please reload and try again.");
+  if (!verifyBoundCsrfToken(req, "csrf_consent", consentCsrfPurpose(authRequest.handle), authRequest.subject)) {
+    renderErrorPage(res, "Invalid or missing CSRF token. Please reload and try again.", 403);
     return;
   }
 

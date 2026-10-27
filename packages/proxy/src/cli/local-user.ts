@@ -93,13 +93,22 @@ async function deactivate(rawUsername: string): Promise<void> {
   // One transaction: a deactivated user must not keep working grants or
   // refresh tokens (the token endpoint also checks, but revoking makes it final).
   const result = await prisma.$transaction(async (tx) => {
-    const row = await tx.localUser.findUnique({ where: { username }, select: { userId: true } });
+    const row = await tx.localUser.findUnique({ where: { username }, select: { userId: true, isActive: true } });
     if (!row) return null;
     await tx.localUser.update({ where: { username }, data: { isActive: false } });
     // Bump both epochs so session and device cookies issued before this stay dead even if the account is reactivated.
     await tx.user.update({ where: { id: row.userId }, data: { sessionEpoch: { increment: 1 }, deviceEpoch: { increment: 1 } } });
     const g = await tx.grant.updateMany({ where: { userId: row.userId, revokedAt: null }, data: { revokedAt: now } });
     const t = await tx.refreshToken.updateMany({ where: { userId: row.userId, revokedAt: null }, data: { revokedAt: now } });
+    await tx.adminAuditLog.create({
+      data: {
+        actor: "cli",
+        action: "local-user.deactivate",
+        target: username,
+        before: { isActive: row.isActive },
+        after: { isActive: false, grantsRevoked: g.count, refreshTokensRevoked: t.count },
+      },
+    });
     return { grants: g.count, tokens: t.count };
   });
   if (!result) throw new Error(`No local user "${username}"`);

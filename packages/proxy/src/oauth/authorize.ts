@@ -9,7 +9,7 @@ import { isRegisteredResource, lookupResourceServer } from "../resource-registry
 import { startUpstreamAuth } from "../identity/oidc.js";
 import { requestsFreshSignIn } from "./fresh-sign-in.js";
 import { bindFlow } from "../identity/flow-binding.js";
-import { rowCreationRetryAfter } from "../rate-limit.js";
+import { clientResolutionRetryAfter, rowCreationRetryAfter } from "../rate-limit.js";
 
 const log = createLogger("authorize");
 
@@ -47,6 +47,16 @@ authorizeRouter.get("/oauth/authorize", async (req: Request, res: Response) => {
   const clientId = singleQueryValue(query["client_id"]);
   if (!clientId) {
     renderErrorPage(res, "client_id is required");
+    return;
+  }
+
+  // resolveClient may fetch a remote document, so an unauthenticated caller is
+  // limited before it, not just before the row insert further down.
+  const resolutionRetryAfter = clientResolutionRetryAfter(req);
+  if (resolutionRetryAfter > 0) {
+    log.warn({ clientId, ip: req.ip }, "Authorization request rate limit exceeded before client resolution");
+    res.set("Retry-After", String(resolutionRetryAfter));
+    renderErrorPage(res, "Too many authorization requests from this address. Please wait a minute and try again.", 429);
     return;
   }
 
@@ -145,6 +155,12 @@ authorizeRouter.get("/oauth/authorize", async (req: Request, res: Response) => {
   }
   const resourceServer = lookupResourceServer(resource)!;
 
+  // A repeated (or object-valued) scope is refused, as at /oauth/device/code;
+  // reading it as absent would turn a malformed request into a scope-less one.
+  if (query["scope"] !== undefined && typeof query["scope"] !== "string") {
+    fail("invalid_scope", "scope must be a single space-delimited string");
+    return;
+  }
   const requestedScopes = (singleQueryValue(query["scope"]) ?? "").split(" ").filter(Boolean);
   const declaredScopeNames = new Set(resourceServer.scopes.map((s) => s.name));
   // offline_access (T15) is a protocol-level scope controlling refresh token

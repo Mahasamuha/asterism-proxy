@@ -53,7 +53,7 @@ describe("GET /oauth/callback", () => {
     db.prisma.authorizationRequest.findUniqueOrThrow.mockResolvedValue({ ...flow, requireFreshLogin: true });
     const fresh = (await callback()).headers.getSetCookie().join();
     expect(fresh).toMatch(/reauth=s%3Au1\./);
-    expect(fresh).toMatch(/reauth=[^;]*; Max-Age=600; Path=\/admin;/);
+    expect(fresh).toMatch(/reauth=[^;]*; Max-Age=600; Path=\/;/);
 
     db.prisma.authorizationRequest.findUniqueOrThrow.mockResolvedValue({ ...flow, requireFreshLogin: false });
     expect((await callback()).headers.getSetCookie().join()).not.toContain("reauth=");
