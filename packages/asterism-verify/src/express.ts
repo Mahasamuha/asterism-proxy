@@ -61,12 +61,22 @@ export function protectedResourceMetadataUrl(audience: string): string {
   return `${new URL(audience).origin}${protectedResourceMetadataPath(audience)}`;
 }
 
-/** Scope strings are written into a quoted header parameter and a space-separated list, so
- * whitespace, `"` and `\` (and the empty string) are rejected. Throws on the first bad one. */
+/** RFC 6749 §3.3 scope-token: one or more of %x21 / %x23-5B / %x5D-7E. The proxy validates
+ * scope names with the same grammar (resource-servers/metadata.ts), so metadata that passes here
+ * is not refused at fetch time. Scope strings are also written into a quoted header parameter
+ * and a space-separated list; this grammar excludes whitespace, `"` and `\` for that reason. */
+const SCOPE_TOKEN = /^[\x21\x23-\x5B\x5D-\x7E]+$/;
+
+/** Text shown to a user at consent: no control (Cc) or format (Cf: bidi overrides, zero-width)
+ * characters and no line or paragraph separators, which could hide or reorder what it says.
+ * Same pattern as the proxy's. */
+const UNSAFE_TEXT = /[\p{Cc}\p{Cf}\u2028\u2029]/u;
+
+/** Throws on the first scope that is not an RFC 6749 scope-token (this includes the empty string). */
 function assertValidScopes(scopes: readonly string[]): void {
   for (const scope of scopes) {
-    if (typeof scope !== "string" || !/^[^\s"\\]+$/.test(scope)) {
-      throw new Error(`Invalid scope ${JSON.stringify(scope)}: must be non-empty with no whitespace, '"' or backslash`);
+    if (typeof scope !== "string" || !SCOPE_TOKEN.test(scope)) {
+      throw new Error(`Invalid scope ${JSON.stringify(scope)}: must be non-empty printable ASCII with no whitespace, '"' or backslash`);
     }
   }
 }
@@ -125,7 +135,7 @@ export function createBearerAuthMiddleware(config: VerifierConfig): RequestHandl
 
 /** Responds 403 `insufficient_scope` (RFC 6750 §3.1) with a challenge that names the
  * `requiredScopes` and carries the RFC 9728 `resource_metadata` URL, so a client can step up.
- * Throws on a scope containing whitespace, `"` or `\`. */
+ * Throws on a scope that is not an RFC 6749 scope-token (printable ASCII, no space, `"` or `\`). */
 export function sendInsufficientScope(
   res: Response,
   config: VerifierConfig,
@@ -170,8 +180,17 @@ export function buildProtectedResourceMetadata(config: VerifierConfig, options: 
   if (resourceName !== undefined && (typeof resourceName !== "string" || resourceName.length === 0 || resourceName.length > MAX_RESOURCE_NAME)) {
     throw new Error(`Invalid resourceName: must be a non-empty string of at most ${MAX_RESOURCE_NAME} characters`);
   }
+  if (resourceName !== undefined && UNSAFE_TEXT.test(resourceName)) {
+    throw new Error("Invalid resourceName: must not contain control, formatting or line-separator characters");
+  }
   if (scopes && scopesSupported) throw new Error("Pass either scopes or scopesSupported, not both");
-  if (scopesSupported) assertValidScopes(scopesSupported);
+  if (scopesSupported) {
+    assertValidScopes(scopesSupported);
+    // The proxy refuses these when it fetches the document, so fail here instead.
+    if (scopesSupported.length > MAX_SCOPES) throw new Error(`Too many scopesSupported: at most ${MAX_SCOPES}`);
+    if (scopesSupported.includes("openid")) throw new Error(`Scope "openid" is reserved for the proxy and cannot be listed`);
+    if (new Set(scopesSupported).size !== scopesSupported.length) throw new Error("Duplicate entry in scopesSupported");
+  }
   if (scopes) {
     if (scopes.length > MAX_SCOPES) throw new Error(`Too many scopes: at most ${MAX_SCOPES}`);
     assertValidScopes(scopes.map((s) => s.name));
@@ -184,6 +203,9 @@ export function buildProtectedResourceMetadata(config: VerifierConfig, options: 
       seen.add(name);
       if (typeof description !== "string" || description.trim().length === 0 || description.length > MAX_DESCRIPTION) {
         throw new Error(`Invalid description for scope ${JSON.stringify(name)}: must be a non-empty string of at most ${MAX_DESCRIPTION} characters`);
+      }
+      if (UNSAFE_TEXT.test(description)) {
+        throw new Error(`Invalid description for scope ${JSON.stringify(name)}: must not contain control, formatting or line-separator characters`);
       }
     }
   }

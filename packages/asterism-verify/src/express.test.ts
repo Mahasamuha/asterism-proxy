@@ -307,6 +307,30 @@ describe("buildProtectedResourceMetadata", () => {
     expect(() => build({ scopes: [scope({ description: "x".repeat(300) })] })).not.toThrow();
   });
 
+  it("P1 holds scope names to the RFC 6749 scope-token grammar the proxy enforces", () => {
+    for (const bad of ["café", "a\u0000b", "a\u007fb", "a\u200bb", "😀", "a\u00a0b"]) {
+      expect(() => build({ scopes: [scope({ name: bad })] })).toThrow(/Invalid scope/);
+      expect(() => build({ scopesSupported: [bad] })).toThrow(/Invalid scope/);
+    }
+    expect(() => build({ scopes: [scope({ name: "urn:a/b.c-d_e~!#$%&'()*+,;=<>?@[]^`{|}" })] })).not.toThrow();
+  });
+
+  it("P1 rejects control, format and separator characters in display text", () => {
+    for (const bad of ["a\u202eb", "a\u200bb", "a\nb", "a\u2028b", "a\u2029b", "a\u0000b"]) {
+      expect(() => build({ resourceName: bad })).toThrow(/Invalid resourceName/);
+      expect(() => build({ scopes: [scope({ description: bad })] })).toThrow(/Invalid description/);
+    }
+    expect(() => build({ resourceName: "Café 😀", scopes: [scope({ description: "Lé café 😀" })] })).not.toThrow();
+  });
+
+  it("P1 applies the proxy's limits to scopesSupported", () => {
+    expect(() => build({ scopesSupported: ["openid"] })).toThrow(/reserved/);
+    expect(() => build({ scopesSupported: ["a", "a"] })).toThrow(/Duplicate/);
+    const many = (n: number) => Array.from({ length: n }, (_, i) => `s${i}`);
+    expect(() => build({ scopesSupported: many(50) })).not.toThrow();
+    expect(() => build({ scopesSupported: many(51) })).toThrow(/Too many/);
+  });
+
   it("P1 caps the number of scopes at 50", () => {
     const many = (n: number) => Array.from({ length: n }, (_, i) => scope({ name: `s${i}` }));
     expect(() => build({ scopes: many(50) })).not.toThrow();
@@ -338,7 +362,7 @@ describe("sendInsufficientScope", () => {
 
   it("P0 throws on invalid scope strings", () => {
     const res = { set: vi.fn(), status: vi.fn() } as never;
-    for (const bad of ['a"b', "a\\b", "a b", "", "a\tb", "a\nb"]) {
+    for (const bad of ['a"b', "a\\b", "a b", "", "a\tb", "a\nb", "café", "a\u200bb"]) {
       expect(() => sendInsufficientScope(res, cfg(), [bad])).toThrow(/Invalid scope/);
     }
   });
@@ -371,7 +395,7 @@ describe("requireScopes", () => {
   });
 
   it("P0 throws at creation on invalid scope strings", () => {
-    for (const bad of ['a"b', "a\\b", "a b", ""]) {
+    for (const bad of ['a"b', "a\\b", "a b", "", "café", "a\u0000b"]) {
       expect(() => requireScopes(cfg(), bad)).toThrow(/Invalid scope/);
     }
   });

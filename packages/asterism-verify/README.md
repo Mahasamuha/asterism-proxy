@@ -127,7 +127,7 @@ This emits `resource_name` and an `asterism_scopes` member, an extension to RFC 
 - `stepUp`, `shortLived` and `freshSignIn` are omitted from the output when false. The implications are applied by asterism, so `freshSignIn: true` alone is enough.
 - `offlineAccess: true` adds `offline_access` to `scopes_supported`. The proxy issues refresh tokens only to clients that ask for it, and Claude.ai asks for exactly what is listed, so set it unless every connection should end when its access token expires. It is the proxy's scope, not yours: it never appears in `asterism_scopes`, and declaring `offline_access` or `openid` in `scopes` throws.
 - `scopes` and `scopesSupported` are alternatives; passing both throws.
-- Options are validated when the handler is created: scope names follow the same rules as `requireScopes`, must be unique, at most 50 scopes; each description is a non-empty string of at most 300 characters; `resourceName` is non-empty and at most 200 characters.
+- Options are validated when the handler is created, with the same rules the proxy applies when it fetches your metadata, so a document the proxy would refuse fails here instead: scope names follow the same rules as `requireScopes` (RFC 6749 scope tokens), must be unique, at most 50 scopes (also for `scopesSupported`, which may not list `openid`); each description is a non-empty string of at most 300 characters; `resourceName` is non-empty and at most 200 characters; `resourceName` and descriptions may not contain control or format characters (bidi overrides, zero-width characters) or line/paragraph separators. Ordinary non-ASCII text such as `Café` is fine.
 
 Servers that don't use Express can serve the same document with `buildProtectedResourceMetadata(config, options)`, which returns the JSON object and throws on the same validation errors.
 
@@ -143,7 +143,7 @@ app.post("/mcp/admin", requireScopes(config, "admin"), handler);
 sendInsufficientScope(res, config, ["admin"], "Admin scope required");
 ```
 
-A missing scope answers **403** with `WWW-Authenticate: Bearer realm="<aud>", resource_metadata="<url>", error="insufficient_scope", scope="admin"` (RFC 6750 §3.1) and a JSON `{ error, error_description }` body. `requireScopes` must run after the bearer middleware; with no `req.principal` it fails closed with the same 401 challenge. Scope strings containing whitespace, `"` or a backslash throw when the middleware is created (or when `sendInsufficientScope` is called).
+A missing scope answers **403** with `WWW-Authenticate: Bearer realm="<aud>", resource_metadata="<url>", error="insufficient_scope", scope="admin"` (RFC 6750 §3.1) and a JSON `{ error, error_description }` body. `requireScopes` must run after the bearer middleware; with no `req.principal` it fails closed with the same 401 challenge. Scope strings that are not RFC 6749 scope tokens (printable ASCII only; no whitespace, `"` or backslash; not empty) throw when the middleware is created (or when `sendInsufficientScope` is called).
 
 ## Revocation
 
