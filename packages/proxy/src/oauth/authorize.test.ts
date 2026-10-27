@@ -223,6 +223,13 @@ describe("resource and scope (P0)", () => {
     expect(created()).not.toHaveBeenCalled();
   });
 
+  it("a repeated scope parameter -> invalid_scope, not a scope-less request (as device code)", async () => {
+    const url = errorRedirect(await authorize({ scope: ["read", "read"] }));
+    expect(url.searchParams.get("error")).toBe("invalid_scope");
+    expect(url.searchParams.get("error_description")).toBe("scope must be a single space-delimited string");
+    expect(created()).not.toHaveBeenCalled();
+  });
+
   it("offline_access is exempt from the declared-scope check", async () => {
     const r = await authorize({ scope: "read offline_access" });
     expect(r.status).toBe(302);

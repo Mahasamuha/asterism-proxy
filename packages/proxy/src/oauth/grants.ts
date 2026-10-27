@@ -215,17 +215,24 @@ grantsRouter.post("/oauth/revoke", limitOauthEndpoint, async (req: Request, res:
   // distinguish an authentication failure (400) from success, which reveals
   // nothing they don't have: they presented the token. Everyone else gets the
   // same 200 and, for a nonexistent token, skips the verification cost; the
-  // hash and one indexed lookup are all they can make the server do.
+  // hash and one indexed lookup are all they can make the server do. A client
+  // that can't be resolved is refused too (400 invalid_client, as at the token
+  // endpoint) rather than skipped, since we can't tell it needs no assertion.
   const tokenHash = createHash("sha256").update(token).digest("hex");
   const entry = await prisma.refreshToken.findUnique({ where: { tokenHash } });
   if (entry && entry.clientId === client_id) {
     const client = await resolveClient(client_id);
-    if (client) {
-      const auth = await authenticateConfidentialClient(client, body);
-      if (!auth.ok) {
-        res.status(400).json({ error: auth.error, error_description: auth.errorDescription });
-        return;
-      }
+    if (!client) {
+      // Not "nothing to authenticate": a private_key_jwt client whose metadata
+      // can't be fetched (an attacker can force that via the per-host fetch
+      // budget) would otherwise let a stolen token revoke without the assertion.
+      res.status(400).json({ error: "invalid_client", error_description: "Client could not be resolved" });
+      return;
+    }
+    const auth = await authenticateConfidentialClient(client, body);
+    if (!auth.ok) {
+      res.status(400).json({ error: auth.error, error_description: auth.errorDescription });
+      return;
     }
     const result = await prisma.refreshToken.updateMany({
       where: { grantId: entry.grantId, revokedAt: null },

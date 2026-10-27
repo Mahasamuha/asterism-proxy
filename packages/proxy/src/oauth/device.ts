@@ -87,6 +87,13 @@ export function resetDeviceEntryLimits(): void {
   failedByIp.clear();
 }
 
+/** Seconds until `ip`'s failed-entry window ends (at least 1). */
+function failedEntryRetryAfter(ip: string): number {
+  const perIp = failedByIp.get(ip);
+  if (!perIp) return 1;
+  return Math.max(1, Math.ceil((perIp.windowStart + CODE_ENTRY_WINDOW_MS - Date.now()) / 1000));
+}
+
 /** Reserves a failed-entry slot for `ip` (already an ipRateLimitKey). Returns a function that gives the
  * slot back (call it on success), or null if the limit is reached. */
 function reserveFailedEntry(ip: string): (() => void) | null {
@@ -138,7 +145,7 @@ deviceRouter.post("/oauth/device/code", async (req: Request, res: Response) => {
   const resolveRetryAfter = clientResolutionRetryAfter(req);
   if (resolveRetryAfter > 0) {
     log.warn({ ip: req.ip }, "Device code client resolution rate limit exceeded");
-    res.set("Retry-After", String(resolveRetryAfter));
+    res.set({ "Retry-After": String(resolveRetryAfter), "Cache-Control": "no-store" });
     res.status(429).json({ error: "temporarily_unavailable", error_description: "Too many requests from this address; slow down and retry later" });
     return;
   }
@@ -175,7 +182,7 @@ deviceRouter.post("/oauth/device/code", async (req: Request, res: Response) => {
   const retryAfter = rowCreationRetryAfter(req);
   if (retryAfter > 0) {
     log.warn({ clientId, ip: req.ip }, "Device code request rate limit exceeded");
-    res.set("Retry-After", String(retryAfter));
+    res.set({ "Retry-After": String(retryAfter), "Cache-Control": "no-store" });
     res.status(429).json({ error: "temporarily_unavailable", error_description: "Too many requests from this address; slow down and retry later" });
     return;
   }
@@ -243,8 +250,10 @@ async function startDeviceConsent(req: Request, res: Response, rawCode: string):
     await renderEntry(res, "Invalid or missing CSRF token. Please try again.", normalizeUserCode(rawCode) ? formatUserCode(normalizeUserCode(rawCode)) : "", 403);
     return;
   }
-  const release = reserveFailedEntry(ipRateLimitKey(req.ip));
+  const ip = ipRateLimitKey(req.ip);
+  const release = reserveFailedEntry(ip);
   if (!release) {
+    res.set("Retry-After", String(failedEntryRetryAfter(ip)));
     await renderEntry(res, "Too many attempts. Please wait and try again.", "", 429);
     return;
   }

@@ -102,6 +102,17 @@ describe("POST /oauth/revoke (RFC 7009)", () => {
     expect(authenticate).not.toHaveBeenCalled();
   });
 
+  it("refuses with invalid_client and revokes nothing when the token is the client's own but the client can't be resolved (P0)", async () => {
+    resolve.mockResolvedValue(null);
+    m("refreshToken", "findUnique").mockResolvedValue(rtEntry());
+    const r = await revoke({ token: "rt", client_id: CLIENT_ID });
+    expect(r.status).toBe(400);
+    expect(r.json["error"]).toBe("invalid_client");
+    expect(r.json["error_description"]).toBe("Client could not be resolved");
+    expect(authenticate).not.toHaveBeenCalled();
+    expect(m("refreshToken", "updateMany")).not.toHaveBeenCalled();
+  });
+
   it("a failing client assertion is rejected and revokes nothing (P0)", async () => {
     m("refreshToken", "findUnique").mockResolvedValue(rtEntry());
     authenticate.mockResolvedValue({ ok: false, error: "invalid_client", errorDescription: "bad" });
@@ -295,9 +306,9 @@ describe("GET /grants and /auth/logout", () => {
 
   it("links to /admin for an admin and only for an admin", async () => {
     m("grant", "findMany").mockResolvedValue([]);
-    m("localUser", "findUnique").mockResolvedValue({ isAdmin: true, isActive: true });
+    m("localUser", "findUnique").mockResolvedValue({ isAdmin: true, isActive: true, user: { deactivatedAt: null } });
     expect((await getPath(app.baseUrl, "/grants")).text).toContain('href="/admin"');
-    m("localUser", "findUnique").mockResolvedValue({ isAdmin: false, isActive: true });
+    m("localUser", "findUnique").mockResolvedValue({ isAdmin: false, isActive: true, user: { deactivatedAt: null } });
     expect((await getPath(app.baseUrl, "/grants")).text).not.toContain('href="/admin"');
   });
 

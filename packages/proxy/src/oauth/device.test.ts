@@ -11,7 +11,7 @@ import { prisma } from "../db.js";
 import { config } from "../config.js";
 import { resolveClient } from "../clients/cimd.js";
 import { DEVICE_FLOW_REDIRECT_URI_SENTINEL, deviceRouter, resetDeviceEntryLimits } from "./device.js";
-import { csrfFrom } from "../test-helpers/http.js";
+import { cookieClient, csrfFrom, type CookieClient } from "../test-helpers/http.js";
 import { cookieName } from "../cookies.js";
 import { CONSENT_FORM_SCRIPT } from "../security-headers.js";
 
@@ -66,18 +66,8 @@ beforeEach(() => {
 });
 
 /** GETs the entry page (CSRF cookie) then POSTs the code, like a user would. */
-async function enterCode(ip: string, userCode: string | string[]) {
-  const jar = new Map<string, string>();
-  const doFetch = async (url: string, init: RequestInit = {}) => {
-    const headers = { ...(init.headers as Record<string, string>), "x-forwarded-for": ip, cookie: [...jar].map(([k, v]) => `${k}=${v}`).join("; ") };
-    const res = await fetch(url, { ...init, headers, redirect: "manual" });
-    for (const line of res.headers.getSetCookie()) {
-      const [pair] = line.split(";");
-      const eq = pair!.indexOf("=");
-      jar.set(pair!.slice(0, eq), pair!.slice(eq + 1));
-    }
-    return res;
-  };
+async function enterCode(ip: string, userCode: string | string[], client: CookieClient = cookieClient()) {
+  const doFetch = (url: string, init: RequestInit = {}) => client.fetch(url, { ...init, headers: { ...(init.headers as Record<string, string>), "x-forwarded-for": ip } });
   const page = await getPath(app.baseUrl, "/oauth/device", doFetch);
   return postForm(app.baseUrl, "/oauth/device", { csrf_token: csrfFrom(page.text), user_code: userCode }, doFetch);
 }
@@ -131,7 +121,19 @@ describe("POST /oauth/device/code", () => {
     expect(r.status).toBe(429);
     expect(r.json["error"]).toBe("temporarily_unavailable");
     expect(Number(r.headers.get("retry-after"))).toBeGreaterThan(0);
+    expect(r.headers.get("cache-control")).toBe("no-store");
     expect(resolve).not.toHaveBeenCalled();
+  });
+
+  it("the row-creation 429 carries Retry-After and no-store", async () => {
+    const ip = freshIp();
+    const post = () => postForm(app.baseUrl, "/oauth/device/code", { client_id: CLIENT_ID, resource: RESOURCE }, from(ip));
+    let r = await post();
+    for (let i = 0; i < 40 && r.status !== 429; i++) r = await post();
+    // Valid requests hit the row-creation limit (30/min) before the resolution one (60/min).
+    expect(r.status).toBe(429);
+    expect(r.headers.get("cache-control")).toBe("no-store");
+    expect(Number(r.headers.get("retry-after"))).toBeGreaterThan(0);
   });
 
   it.each([
@@ -359,9 +361,24 @@ describe("GET/POST /oauth/device (user-code entry)", () => {
     const blocked = await enterCode(ip, "ABCD2345");
     expect(blocked.status).toBe(429);
     expect(blocked.text).toContain("Too many attempts");
+    // Seconds until the 15-minute failure window ends.
+    const wait = Number(blocked.headers.get("retry-after"));
+    expect(Number.isInteger(wait)).toBe(true);
+    expect(wait).toBeGreaterThan(0);
+    expect(wait).toBeLessThanOrEqual(900);
     expect(m("deviceCode", "findFirst")).toHaveBeenCalledTimes(10);
     // A different address is unaffected.
     expect((await enterCode(freshIp(), "ABCD2345")).status).toBe(200);
+  });
+});
+
+describe("device entry cookies", () => {
+  it("a cleared CSRF cookie is dropped from the jar and not sent again", async () => {
+    m("deviceCode", "findFirst").mockResolvedValue({ clientId: CLIENT_ID, resource: RESOURCE, scopes: ["read"], expiresAt: new Date(Date.now() + 600_000) });
+    const client = cookieClient();
+    const r = await enterCode(freshIp(), "ABCD2345", client);
+    expect(r.status).toBe(302);
+    expect(client.cookies.has(cookieName("csrf_device"))).toBe(false);
   });
 });
 

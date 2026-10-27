@@ -155,6 +155,12 @@ authorizeRouter.get("/oauth/authorize", async (req: Request, res: Response) => {
   }
   const resourceServer = lookupResourceServer(resource)!;
 
+  // A repeated (or object-valued) scope is refused, as at /oauth/device/code;
+  // reading it as absent would turn a malformed request into a scope-less one.
+  if (query["scope"] !== undefined && typeof query["scope"] !== "string") {
+    fail("invalid_scope", "scope must be a single space-delimited string");
+    return;
+  }
   const requestedScopes = (singleQueryValue(query["scope"]) ?? "").split(" ").filter(Boolean);
   const declaredScopeNames = new Set(resourceServer.scopes.map((s) => s.name));
   // offline_access (T15) is a protocol-level scope controlling refresh token

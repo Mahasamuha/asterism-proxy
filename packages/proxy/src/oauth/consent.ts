@@ -23,8 +23,8 @@ export const consentRouter: Router = Router();
 
 const AUTH_CODE_TTL_MS = 10 * 60 * 1000;
 
-function renderErrorPage(res: Response, message: string): void {
-  renderMessage(res, 400, { status: "error", heading: "Authorization failed", text: message });
+function renderErrorPage(res: Response, message: string, status = 400): void {
+  renderMessage(res, status, { status: "error", heading: "Authorization failed", text: message });
 }
 
 const WRONG_BROWSER_MESSAGE = "This authorization request must be completed in the browser that started it. Please start again from the application.";
@@ -394,7 +394,7 @@ consentRouter.post("/oauth/consent", async (req: Request, res: Response) => {
   if (!(await requireFlowBrowser(req, res, authRequest))) return;
 
   if (!verifyBoundCsrfToken(req, "csrf_consent", consentCsrfPurpose(authRequest.handle), authRequest.subject)) {
-    renderErrorPage(res, "Invalid or missing CSRF token. Please reload and try again.");
+    renderErrorPage(res, "Invalid or missing CSRF token. Please reload and try again.", 403);
     return;
   }
 
