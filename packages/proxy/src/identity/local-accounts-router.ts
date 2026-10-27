@@ -6,7 +6,6 @@ import { clearSignedCookie } from "../cookies.js";
 import { prisma } from "../db.js";
 import { bodyOf, stringField } from "../http-params.js";
 import { createLogger } from "../logger.js";
-import { errorFields } from "../error-fields.js";
 import {
   beginLoginAttempt,
   beginDeviceLoginAttempt,
@@ -101,7 +100,7 @@ localAccountsRouter.post("/setup", async (req: Request, res: Response, next: Nex
     if (msg.toLowerCase().includes("unique")) {
       renderSetup(res, 200, ["Username already taken."], issueCsrfToken(res, "csrf_setup"));
     } else {
-      log.error({ ...errorFields(err), username }, "Failed to create first user via setup");
+      log.error({ err, username }, "Failed to create first user via setup");
       renderSetup(res, 200, ["Setup failed. Please try again."], issueCsrfToken(res, "csrf_setup"));
     }
     return;

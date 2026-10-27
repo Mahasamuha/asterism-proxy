@@ -411,7 +411,7 @@ export async function refreshMetadata(identifier: string, actor?: string): Promi
     fetched = await fetchResourceMetadata(identifier, { issuer: config.issuerUrl, internal: server.internal });
   } catch (err) {
     const message = (err as Error).message;
-    log.warn({ identifier, error: message }, "Resource server metadata refresh failed; keeping the last good snapshot");
+    log.warn({ identifier, err }, "Resource server metadata refresh failed; keeping the last good snapshot");
     await prisma.resourceServer.update({ where: { identifier }, data: { lastFetchError: message, lastFetchAttemptAt: now } });
     return { ok: false, error: message };
   }

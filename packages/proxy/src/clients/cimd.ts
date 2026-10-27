@@ -349,7 +349,7 @@ async function fetchAndStore(clientId: string, cached: OauthClient | null): Prom
   } catch (err) {
     recordDuration("cimd_fetch_duration_ms", { outcome: "failure" }, Date.now() - fetchStarted);
     incrementCounter("cimd_fetch_total", { outcome: "failure" });
-    log.warn({ clientId, err: err instanceof Error ? err.message : err }, "CIMD fetch failed");
+    log.warn({ clientId, err }, "CIMD fetch failed");
     if (
       err instanceof SafeFetchError &&
       (err.reason === "rate_limited" || err.reason === "busy") &&
@@ -367,7 +367,7 @@ async function fetchAndStore(clientId: string, cached: OauthClient | null): Prom
   try {
     document = validateDocument(clientId, raw);
   } catch (err) {
-    log.warn({ clientId, err: err instanceof Error ? err.message : err }, "CIMD document failed validation");
+    log.warn({ clientId, err }, "CIMD document failed validation");
     return null;
   }
 

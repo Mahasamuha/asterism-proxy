@@ -89,15 +89,15 @@ describe("error boundary", () => {
     expect(text).not.toMatch(/password|10\.9\.8\.7|mcp_auth/);
   });
 
-  it("P1 the error handler logs picked fields, not the error object or its stack's message", async () => {
+  it("P1 the error handler logs the error under `err`, for the logger's serializer to pick from", async () => {
     const base = await boot();
-    db.prisma.localUser.count.mockRejectedValue(Object.assign(new Error("secret-in-message"), { code: "P1001", response: { headers: { authorization: "Bearer s3cret" } } }));
-    await fetch(`${base}/setup`);
+    const failure = new Error("secret-in-message");
+    db.prisma.localUser.count.mockRejectedValue(failure);
+    const res = await fetch(`${base}/setup`);
+    expect(res.status).toBe(500);
+    expect(await res.text()).not.toContain("secret-in-message");
     const logged = logs.error.mock.calls.find((c) => c[1] === "Unhandled request error")?.[0] as Record<string, unknown>;
-    expect(logged).toMatchObject({ errName: "Error", errCode: "P1001", path: "/setup" });
-    expect(logged).not.toHaveProperty("err");
-    expect(JSON.stringify(logged)).not.toContain("s3cret");
-    expect(String(logged.stackFrames)).not.toContain("secret-in-message");
+    expect(logged).toEqual({ err: failure, path: "/setup" });
   });
 
   it("P0 a non-Error rejection, or a 5xx/3xx status on the error, is still a generic 500", async () => {

@@ -4,7 +4,6 @@ import { prisma } from "../db.js";
 import { config } from "../config.js";
 import { clearSignedCookie } from "../cookies.js";
 import { createLogger } from "../logger.js";
-import { errorFields } from "../error-fields.js";
 import { resolveClient } from "../clients/cimd.js";
 import { isRegisteredResource, lookupResourceServer } from "../resource-registry.js";
 import { getUpstreamAuthorizationEndpoint, startUpstreamAuth } from "../identity/oidc.js";
@@ -229,7 +228,7 @@ async function renderEntry(res: Response, error: string | null, userCode: string
     try {
       allowFormSubmissionTo(res, await getUpstreamAuthorizationEndpoint());
     } catch (err) {
-      log.warn(errorFields(err), "Could not determine the identity provider origin for form-action");
+      log.warn({ err }, "Could not determine the identity provider origin for form-action");
     }
   }
   res.status(status).render("device-entry", { error, csrfToken: issueCsrfToken(res, "csrf_device"), userCode });

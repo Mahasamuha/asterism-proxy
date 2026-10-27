@@ -266,7 +266,7 @@ export async function authenticateConfidentialClient(client: OauthClient, body: 
     await verifyClientAssertion(client.clientId, jwksUri, assertion);
     return { ok: true };
   } catch (err) {
-    log.warn({ clientId: client.clientId, err: err instanceof Error ? err.message : err }, "client_assertion verification failed");
+    log.warn({ clientId: client.clientId, err }, "client_assertion verification failed");
     return {
       ok: false,
       error: "invalid_client",
